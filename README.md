@@ -7,7 +7,7 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **phase 5 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, and **Mode 1 — Time Map** with the full map library, image and video maps, map adjustments, and map animation. Slit Scan, the cutout, the compositor, and the export come in the next phases.
+> Status: v0.1.0, **phase 6 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, and the **compositor** (blend modes, opacity, age decay, age tint). Slit Scan, the cutout, and the export come in the next phases.
 
 ## How to use
 
@@ -40,6 +40,23 @@ A greyscale map gives each pixel a delay. Black = the current frame. White = the
 **Map adjust** (all sources, in this order): offset and tile (repeat or mirror) → blur → levels (black and white point) → gamma and contrast → curve (Linear, Ease in, Ease out, S, Step) → posterize → invert.
 
 **Map animation** (built-in maps): Phase speed (the map moves in its direction; ramps repeat), Rotation speed (°/frame), Pulse (scale: amount and period), New seed every k frames.
+
+## Composite and Look
+
+**Effect composite**: **Replace** (default) shows the effect as it is; pixels that are not online are black. **Blend** puts the effect on the original video with a blend mode and an alpha; pixels that are not online are transparent (the original shows).
+
+| Setting | Values | Default |
+|---|---|---|
+| Blend mode | Normal, Add, Screen, Lighten, Color dodge, Overlay, Soft light, Hard light, Multiply, Darken, Color burn, Subtract, Difference, Exclusion, Divide, Hue, Saturation, Color, Luminosity (W3C formulas) | Normal |
+| Opacity | 0–100 % | 100 % |
+| Age decay | Full, Linear, Exponential (half-life), Curve | Full |
+| Decay length / Half-life | frames (0 = the Max age) | 0 |
+| Linear blend | On / Off (blend in linear light) | Off |
+| Age tint | Off / a ramp of 2–4 colours from new to old, with an amount | Off |
+| Age brightness | the brightness multiplier at the Max age, 0–2 | 1 |
+| Spatial offset (Mode 1) | 0–64 px and an angle: each delayed pixel also moves by map value × offset | 0 |
+
+The age of a pixel is its delay in frames (Mode 1). Blend mode, opacity, and decay apply with Blend; tint and brightness apply in both.
 
 The view switch above the preview shows **Result**, **Original** (the source frame), or **Map** (the map in grey). Double-click a setting label to reset it.
 
@@ -86,7 +103,7 @@ The last command writes the test videos (plan §13.1) to `samples/`. The tests m
 | Folder | Content |
 |---|---|
 | `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `preview.js`, `ui/` (timeline, inspector, widgets) |
-| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
+| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
 | `src/maps/` | `builtin.js` (the map list and parameters), `curve.js` (monotone curves), `mapsource.js` (image and video maps) |
 | `src/io/` | `demux.js` (MP4/MOV reader), `mp4.js` (MP4 muxer), `timeline.js` (frame order, seek plan), `decode-worker.js` |
 | `tools/` | `build.mjs`, `make-fixtures.mjs` |

@@ -81,7 +81,7 @@ export const tests = [
       const f = makeFixtures(FIX_DIR);
       const { browser, page, errors } = await launch();
       try {
-        for (const [name, file] of Object.entries(f)) {
+        for (const [name, file] of Object.entries(f).filter(([n]) => n.startsWith('code'))) {
           const gt = groundTruth(file, ROT[name] || 0);
           const r = await open(page, file);
           assert(!r.error, `${name}: ${r.error}`);

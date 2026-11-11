@@ -30,6 +30,8 @@ export const FIXTURES = {
   'code_elst.mp4': (dir) => ['-ss', '0.5', '-i', path.join(dir, 'code.mp4'), '-c', 'copy'],
   // Variable frame rate: a 0.2 s gap after frame 40, and jitter.
   'code_vfr.mp4': () => [...codeIn(), '-vf', `${codeFilter},setpts='N/${FPS}/TB+if(gt(N,40),0.2/TB,0)+if(eq(mod(N,7),3),0.011/TB,0)'`, '-fps_mode', 'passthrough', ...x264(['-bf', '2', '-g', '30'])],
+  // Colours that move (compositor tests).
+  'color.mp4': () => ['-f', 'lavfi', '-i', `testsrc2=size=${W}x${H}:rate=${FPS}`, ...x264(['-bf', '2'])],
   // AAC audio.
   'code_aac.mp4': () => [...codeIn(), '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3', '-vf', codeFilter, ...x264(['-bf', '2']), '-c:a', 'aac', '-shortest'],
 };

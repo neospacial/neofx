@@ -19,6 +19,23 @@ export const DEFAULTS = {
     adjust: { invert: false, black: 0, white: 1, gamma: 1, contrast: 0, curve: 'linear', posterize: 0, blur: 0, tileX: 1, tileY: 1, mirrorTile: false, offsetX: 0, offsetY: 0 },
     anim: { phaseSpeed: 0, rotSpeed: 0, pulseAmount: 0, pulsePeriod: 60, seedEvery: 0 },
   },
+  composite: {
+    mode: 'replace', // effect composite: 'replace' | 'blend' (§10.1)
+    blend: 'normal', // gpu/blend.js BLEND_MODES
+    opacity: 1,
+    linear: false, // blend in linear light
+    decay: 'full', // 'full' | 'linear' | 'exp' | 'curve'
+    decayLength: 0, // frames; 0 = Max age (exp: the half-life)
+    decayCurve: 'linear', // a curve preset (or points): alpha = 1 − curve(age / length)
+  },
+  look: {
+    tint: false,
+    tintColors: ['#ffffff', '#ff7a00'], // new -> old, 2..4 colours
+    tintAmount: 1,
+    ageBrightness: 1, // multiplier at max age
+    offset: 0, // Mode 1 spatial offset at white (px)
+    offsetAngle: 0,
+  },
 };
 
 export const clone = (o) => JSON.parse(JSON.stringify(o));

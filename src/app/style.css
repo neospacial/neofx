@@ -81,3 +81,8 @@ body[data-state="start"] #viewBar{display:none}
 .fileRow{grid-template-columns:auto 1fr}
 .fileName{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .note{margin:2px 12px 8px;font-size:11px;color:var(--dim)}
+.setting.select,.setting.colors{grid-template-columns:96px 1fr}
+.setting select{font:inherit;font-size:12px;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:4px;min-height:28px}
+.colorList{display:flex;gap:4px;align-items:center}
+.colorList input{width:32px;height:28px;padding:0;border:1px solid var(--line);border-radius:4px;background:none}
+.colorList button{min-width:28px;min-height:28px;padding:0}

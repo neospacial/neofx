@@ -19,12 +19,18 @@ import { createContext, program, texParams, drawQuad } from './gl.js';
 import { layerCount, frameBytes } from './store.js';
 import { MapGen } from './mapgen.js';
 import { isDynamic } from '../maps/builtin.js';
+import { curveTable, CURVE_PRESETS } from '../maps/curve.js';
+import { BLEND_INDEX, DECAY_INDEX, hexRgb } from './blend.js';
 
 const QUAD_VERT = "@GLSL:gpu/glsl/quad.vert";
 const UPLOAD_FRAG = "@GLSL:gpu/glsl/upload.frag";
 const STORE_GLSL = "@GLSL:gpu/glsl/store.glsl";
 const SHOW_FRAG = "@GLSL:gpu/glsl/show.frag";
 const TIMEMAP_FRAG = "@GLSL:gpu/glsl/timemap.frag";
+const COMPOSITE_GLSL = "@GLSL:gpu/glsl/composite.glsl";
+const AGE_GLSL = "@GLSL:gpu/glsl/age.glsl";
+const COMPTEST_FRAG = "@GLSL:gpu/glsl/comptest.frag";
+const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\n';
 const VIEWS = { result: 0, original: 1, map: 2 };
 
 export class Engine {
@@ -38,7 +44,10 @@ export class Engine {
     };
     this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);
     this.show = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${SHOW_FRAG}`);
-    this.timemap = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${TIMEMAP_FRAG}`);
+    this.timemap = program(gl, QUAD_VERT, `${HEAD}${STORE_GLSL}\n${COMPOSITE_GLSL}\n${AGE_GLSL}\n${TIMEMAP_FRAG}`);
+    this.comptest = null; // made on the first test call
+    this.decayTex = gl.createTexture();
+    this.decayKey = '';
     this.mapgen = new MapGen(this);
     this.mapTex = null;
     this.mapKey = '';
@@ -78,6 +87,7 @@ export class Engine {
       return { cmd: 'rendered', index: this.last.index };
     }
     if (m.cmd === 'read') return this.read();
+    if (m.cmd === 'compositeTest') return this.compositeTest(m);
     if (m.cmd === 'mapImage') {
       const b = m.bitmap;
       const s = Math.min(1, 2048 / Math.max(b.width, b.height));
@@ -283,7 +293,85 @@ export class Engine {
     gl.uniform1i(p.u.u_steps, s.timemap.steps);
     gl.uniform1i(p.u.u_blend, s.timemap.blend ? 1 : 0);
     gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);
+    this.compositeUniforms(p, s, Math.min(s.timemap.maxDelay, this.n - 1));
+    const L = s.look;
+    const a = (L.offsetAngle * Math.PI) / 180;
+    gl.uniform2f(p.u.u_shift, (L.offset * Math.cos(a)) / this.w, (L.offset * Math.sin(a)) / this.h);
     drawQuad(gl);
+  }
+
+  // The uniforms of composite.glsl and age.glsl. maxAge: the age of "max age" (Mode 1: Max delay).
+  compositeUniforms(p, s, maxAge) {
+    const gl = this.gl;
+    const C = s.composite, L = s.look;
+    gl.uniform1i(p.u.u_comp, C.mode === 'blend' ? 1 : 0);
+    gl.uniform1i(p.u.u_blendMode, BLEND_INDEX[C.blend] ?? 0);
+    gl.uniform1i(p.u.u_linear, C.linear ? 1 : 0);
+    gl.uniform1f(p.u.u_opacity, C.opacity);
+    gl.uniform1i(p.u.u_decay, DECAY_INDEX[C.decay] ?? 0);
+    gl.uniform1f(p.u.u_decayLen, C.decayLength > 0 ? C.decayLength : Math.max(1, maxAge));
+    gl.uniform1f(p.u.u_maxAge, Math.max(1, maxAge));
+    if (C.decay === 'curve') {
+      const key = JSON.stringify(C.decayCurve);
+      if (key !== this.decayKey) {
+        this.decayKey = key;
+        const pts = Array.isArray(C.decayCurve) ? C.decayCurve : CURVE_PRESETS[C.decayCurve] || CURVE_PRESETS.linear;
+        gl.bindTexture(gl.TEXTURE_2D, this.decayTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 256, 1, 0, gl.RED, gl.UNSIGNED_BYTE, Uint8Array.from(curveTable(pts), (v) => Math.round(v * 255)));
+        texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
+      }
+    }
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, this.decayTex);
+    gl.uniform1i(p.u.u_decayCurve, 6);
+    const tint = L.tintColors.slice(0, 4);
+    gl.uniform1i(p.u.u_tintOn, L.tint && tint.length >= 2 ? 1 : 0);
+    gl.uniform1i(p.u.u_tintN, Math.max(2, tint.length));
+    const flat = new Float32Array(12);
+    tint.forEach((h, i) => flat.set(hexRgb(h), i * 3));
+    gl.uniform3fv(p.u['u_tint[0]'], flat);
+    gl.uniform1f(p.u.u_tintAmount, L.tintAmount);
+    gl.uniform1f(p.u.u_ageBright, L.ageBrightness);
+  }
+
+  // Tests (plan §13.2): composite n pixels. base, effect: RGBA bytes (effect alpha in .a).
+  compositeTest(m) {
+    const gl = this.gl;
+    if (!this.comptest) this.comptest = program(gl, QUAD_VERT, `${HEAD}${COMPOSITE_GLSL}\n${COMPTEST_FRAG}`);
+    const n = m.base.length / 4;
+    const w = Math.min(n, 1024), h = Math.ceil(n / w);
+    const tex = (data) => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      const full = new Uint8Array(w * h * 4);
+      full.set(data);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, full);
+      texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
+      return t;
+    };
+    const tb = tex(m.base), ts = tex(m.effect);
+    const out = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, out);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out, 0);
+    gl.viewport(0, 0, w, h);
+    const p = this.comptest;
+    gl.useProgram(p.prog);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tb);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, ts);
+    gl.uniform1i(p.u.u_b, 0);
+    gl.uniform1i(p.u.u_s, 1);
+    gl.uniform1i(p.u.u_blendMode, BLEND_INDEX[m.mode] ?? 0);
+    gl.uniform1i(p.u.u_linear, m.linear ? 1 : 0);
+    drawQuad(gl);
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    for (const t of [tb, ts, out]) gl.deleteTexture(t);
+    return { cmd: 'pixels', pixels: px.subarray(0, n * 4) };
   }
 
   read() {

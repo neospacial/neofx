@@ -84,3 +84,71 @@ export function section(title, open = true) {
   d.append(el('summary', null, title));
   return d;
 }
+
+// opts: { label, options: [[value, text]], value, onChange(v), key }
+export function select(opts) {
+  const row = el('div', 'setting select');
+  row.dataset.key = opts.key || '';
+  const label = el('label', null, opts.label);
+  const s = el('select');
+  s.setAttribute('aria-label', opts.label);
+  for (const [v, text] of opts.options) {
+    const o = el('option', null, text);
+    o.value = v;
+    s.append(o);
+  }
+  s.value = opts.value;
+  s.addEventListener('change', () => opts.onChange(s.value));
+  row.setValue = (v) => (s.value = v);
+  row.append(label, s);
+  return row;
+}
+
+// A ramp of 2 to 4 colours. opts: { label, value: ['#rrggbb', ...], onChange(list), key }
+export function colors(opts) {
+  const row = el('div', 'setting colors');
+  row.dataset.key = opts.key || '';
+  const label = el('label', null, opts.label);
+  const box = el('div', 'colorList');
+  let list = opts.value.slice();
+  const draw = () => {
+    box.textContent = '';
+    list.forEach((c, i) => {
+      const inp = el('input');
+      inp.type = 'color';
+      inp.value = c;
+      inp.setAttribute('aria-label', `${opts.label} ${i + 1}`);
+      inp.addEventListener('input', () => {
+        list[i] = inp.value;
+        opts.onChange(list.slice());
+      });
+      box.append(inp);
+    });
+    const more = el('button', null, '+');
+    more.type = 'button';
+    more.disabled = list.length >= 4;
+    more.setAttribute('aria-label', 'Add a colour');
+    more.addEventListener('click', () => {
+      list.push(list[list.length - 1]);
+      draw();
+      opts.onChange(list.slice());
+    });
+    const less = el('button', null, '−');
+    less.type = 'button';
+    less.disabled = list.length <= 2;
+    less.setAttribute('aria-label', 'Remove a colour');
+    less.addEventListener('click', () => {
+      list.pop();
+      draw();
+      opts.onChange(list.slice());
+    });
+    box.append(less, more);
+  };
+  row.setValue = (v) => {
+    list = v.slice();
+    draw();
+  };
+  draw();
+  row.append(label, box);
+  return row;
+}

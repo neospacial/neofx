@@ -16,7 +16,7 @@ import { THUMB_W, THUMB_H } from './ui/inspector.js';
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
 const DECODE_WORKER = "@WORKER:io/demux.js,io/timeline.js,io/decode-worker.js";
-const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,gpu/store.js,gpu/gl.js,gpu/mapgen.js,gpu/engine.js,gpu/gpu-worker.js";
+const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/engine.js,gpu/gpu-worker.js";
 
 let player, preview, timeline, gpu, inspector;
 const settings = clone(DEFAULTS);
@@ -128,7 +128,8 @@ async function applySettings() {
 // A setting changed in the UI.
 function change(path, value) {
   setPath(settings, path, value);
-  if (path === 'map.source' || path === 'map.type' || path === 'mode') {
+  const rebuild = ['map.source', 'map.type', 'mode', 'composite.mode', 'composite.decay', 'look.tint'];
+  if (rebuild.includes(path) || (path === 'look.offset' && (value > 0) !== !!document.querySelector('[data-key="look.offsetAngle"]'))) {
     inspector.build(settings, limits());
     updateThumbs();
   } else inspector.refresh(settings);

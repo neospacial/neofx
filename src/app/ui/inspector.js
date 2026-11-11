@@ -1,7 +1,8 @@
 // The inspector (plan §12.4): Mode, Map (source, map grid with thumbnails, params, fit and transform,
 // adjustments, animation), Time. Settings that do not apply are hidden (§12.1).
 
-import { slider, segmented, toggle, section } from './widgets.js';
+import { slider, segmented, toggle, section, select, colors } from './widgets.js';
+import { BLEND_MODES, DECAYS } from '../../gpu/blend.js';
 import { getPath, fixSteps } from '../settings.js';
 import { MAPS } from '../../maps/builtin.js';
 import { CURVE_PRESETS } from '../../maps/curve.js';
@@ -135,6 +136,34 @@ export class Inspector {
       this.app.change('timemap.steps', f);
     } }));
     add(time, toggle({ key: 'timemap.blend', label: 'Frame blend', value: T.blend, onChange: on('timemap.blend') }));
+
+    // Composite (§10): Replace shows the effect as it is; Blend puts it on the original.
+    const Cp = S.composite;
+    const comp = sec('composite', 'Composite');
+    add(comp, segmented({ key: 'composite.mode', label: 'Effect', options: [['replace', 'Replace'], ['blend', 'Blend']], value: Cp.mode, onChange: on('composite.mode') }));
+    if (Cp.mode === 'blend') {
+      add(comp, select({ key: 'composite.blend', label: 'Blend mode', options: BLEND_MODES, value: Cp.blend, onChange: on('composite.blend') }));
+      add(comp, slider({ key: 'composite.opacity', label: 'Opacity', min: 0, max: 1, step: 0.01, value: Cp.opacity, def: 1, onChange: on('composite.opacity') }));
+      add(comp, select({ key: 'composite.decay', label: 'Age decay', options: DECAYS, value: Cp.decay, onChange: on('composite.decay') }));
+      if (Cp.decay !== 'full') {
+        add(comp, slider({ key: 'composite.decayLength', label: Cp.decay === 'exp' ? 'Half-life' : 'Decay length', min: 0, max: Math.max(1, limits.maxDelay), step: 1, value: Cp.decayLength, def: 0, unit: 'f', onChange: on('composite.decayLength') }));
+        comp.append(Object.assign(document.createElement('p'), { className: 'note', textContent: '0 = the Max age.' }));
+      }
+      if (Cp.decay === 'curve') add(comp, segmented({ key: 'composite.decayCurve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: Cp.decayCurve, onChange: on('composite.decayCurve') }));
+      add(comp, toggle({ key: 'composite.linear', label: 'Linear blend', value: Cp.linear, onChange: on('composite.linear') }));
+    }
+
+    // Look: age tint, age brightness, spatial offset (Mode 1).
+    const L = S.look;
+    const look = sec('look', 'Look', false);
+    add(look, toggle({ key: 'look.tint', label: 'Age tint', value: L.tint, onChange: on('look.tint') }));
+    if (L.tint) {
+      add(look, colors({ key: 'look.tintColors', label: 'New → old', value: L.tintColors, onChange: on('look.tintColors') }));
+      add(look, slider({ key: 'look.tintAmount', label: 'Tint amount', min: 0, max: 1, step: 0.01, value: L.tintAmount, def: 1, onChange: on('look.tintAmount') }));
+    }
+    add(look, slider({ key: 'look.ageBrightness', label: 'Age brightness', min: 0, max: 2, step: 0.01, value: L.ageBrightness, def: 1, unit: '×', onChange: on('look.ageBrightness') }));
+    add(look, slider({ key: 'look.offset', label: 'Spatial offset', min: 0, max: 64, step: 0.5, value: L.offset, def: 0, unit: 'px', onChange: on('look.offset') }));
+    if (L.offset > 0) add(look, slider({ key: 'look.offsetAngle', label: 'Offset angle', min: 0, max: 360, step: 1, value: L.offsetAngle, def: 0, unit: '°', onChange: on('look.offsetAngle') }));
   }
 
   // Draw map thumbnails: images = { id: Uint8Array luma (THUMB_W x THUMB_H) }.
