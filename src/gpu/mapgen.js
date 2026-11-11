@@ -106,6 +106,11 @@ export class MapGen {
     const A = map.adjust, an = map.anim;
     const custom = (map.source === 'image' || map.source === 'video') && this.custom && this.custom.count;
 
+    // The subject maps: the mask and the jump flood distance (plan §7.3, §9). Made first: the
+    // distance pass uses its own programs (set before the uniforms of the map program).
+    const mk = e.mask;
+    const subj = map.source === 'builtin' && (map.type === 'subject' || map.type === 'subjectdist') && mk.tex;
+    const dist = subj && map.type === 'subjectdist' ? mk.distance() : null;
     // 1. Generate.
     const g = this.gen;
     this.into(W.raw, w, h);
@@ -120,13 +125,9 @@ export class MapGen {
     gl.uniform1i(g.u.u_custom, 5);
     gl.uniform2f(g.u.u_res, w, h);
     gl.uniform1i(g.u.u_t, t);
-    // The subject maps: the mask and the jump flood distance (plan §7.3, §9).
-    const mk = e.mask;
-    const subj = map.source === 'builtin' && (map.type === 'subject' || map.type === 'subjectdist') && mk.tex;
     gl.activeTexture(gl.TEXTURE6);
     gl.bindTexture(gl.TEXTURE_2D, subj ? mk.tex.out : this.empty2D());
     gl.uniform1i(g.u.u_mask, 6);
-    const dist = subj && map.type === 'subjectdist' ? mk.distance() : null;
     gl.activeTexture(gl.TEXTURE7);
     gl.bindTexture(gl.TEXTURE_2D, dist || this.empty2D());
     gl.uniform1i(g.u.u_dist, 7);

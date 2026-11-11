@@ -50,7 +50,8 @@ export async function launch(viewport = { width: 1280, height: 800 }, query = ''
   const page = await browser.newPage({ viewport });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
-  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  // Errors, and WebGL misuse (the browser gives it as a warning: INVALID_OPERATION, ...).
+  page.on('console', (m) => (m.type() === 'error' || (m.type() === 'warning' && /WebGL: INVALID|GL_INVALID/.test(m.text()))) && errors.push(m.text()));
   await page.goto((base ? base + PAGES[0][1] : pathToFileURL(path.join(root, 'dist', PAGES[0][1])).href) + query);
   await page.waitForFunction(() => window.neofx && window.neofx.player);
   await installReader(page);
