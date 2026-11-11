@@ -21,6 +21,11 @@ import { usesMask } from '../maps/builtin.js';
 import { Exporter } from './export.js';
 import { ExportDialog } from './ui/exportdialog.js';
 import { layerCount } from '../gpu/store.js';
+import { History } from './history.js';
+import { rng, randomizeSection } from './random.js';
+import { PRESETS, applyPreset, presetFile, parsePresetFile, dataUrlBlob, merge } from './presets.js';
+import { initLayout } from './ui/layout.js';
+import { startDemos } from './ui/startscreen.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
@@ -31,6 +36,11 @@ const ENCODE_WORKER = "@WORKER:io/encode-worker.js";
 
 let player, preview, timeline, gpu, inspector, analysis, handles, tools, exportDialog, gpuCaps, platform;
 let exporter = null; // the export that runs
+let layout = null;
+const history = new History();
+const locks = new Set(); // the sections that Randomize keeps
+let lastSeed = 0;
+const LOCAL_KEY = 'neofx.settings';
 // The state of the preview tools and the clean plate (not part of the settings).
 const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false, matteVersion: 0 };
 let edgeStats = null; // the Subject edge source: the measured GPU time and the Max age limit
@@ -301,6 +311,13 @@ async function loadMapFile(file, kind) {
     if (kind === 'image') {
       await loadImageMap(file, gpu);
       settings.map.image.name = file.name;
+      // Kept for a preset file (a data URL, read here: no network).
+      mapInfo.imageDataUrl = await new Promise((resolve) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => resolve(null);
+        fr.readAsDataURL(file);
+      });
     } else {
       const caps = await gpu.call({ cmd: 'caps' });
       const r = await loadVideoMap(file, gpu, { workerSrc: DECODE_WORKER, short: Math.min(store.height || 540, 540), maxLayers: caps.maxLayers, onProgress: setProgress });
@@ -328,8 +345,13 @@ async function applySettings() {
   await r;
 }
 
-// A setting changed in the UI.
-function change(path, value) {
+// A setting changed in the UI. final: the end of a drag (the next change is a new undo step).
+// The view (and the split divider) is not a look: no undo step.
+function change(path, value, final) {
+  if (path !== 'view' && path !== 'splitPos' && JSON.stringify(getPathSafe(path)) !== JSON.stringify(value)) {
+    history.record(JSON.stringify(settings), path);
+    if (final) history.cut();
+  }
   setPath(settings, path, value);
   // The Subject edge source needs the cutout (plan §8.5); Scan object is Mode 2 only.
   if (path === 'slitscan.source' && value === 'edge' && settings.cutout.mode === 'off') settings.cutout.mode = 'overlay';
@@ -343,8 +365,10 @@ function change(path, value) {
   } else inspector.refresh(settings);
   if (path.startsWith('map.params.')) updateThumbs(path.split('.')[2]);
   else if (path.startsWith('map.adjust.') || path.startsWith('map.anim.')) updateThumbs();
-  if (path === 'view') for (const b of document.querySelectorAll('#viewBar button')) b.classList.toggle('on', b.dataset.view === value);
+  if (path === 'view') viewChanged();
   handles.update();
+  saveLocal();
+  undoButtons();
   if (path === 'mode' || path.startsWith('slitscan.') || (edgeMode() && path.startsWith('cutout.'))) scheduleAnalysis();
   refreshEdgeStats();
   if (path === 'view' || path.startsWith('cutout.') || path.startsWith('map.')) ensurePlate();
@@ -452,7 +476,10 @@ function keys(e) {
   if (!player.info || e.target.closest('input, select, textarea')) return;
   const P = player;
   const k = e.key;
-  if (k === ' ') P.toggle();
+  if (k === ' ') {
+    // Space toggles playback when it comes up (Space + drag pans the preview, plan §12.2).
+    if (!e.repeat) stopReverse();
+  }
   else if (k === 'ArrowLeft') P.step(e.shiftKey ? -10 : -1);
   else if (k === 'ArrowRight') P.step(e.shiftKey ? 10 : 1);
   else if (k === 'Home') P.seek(0);
@@ -461,8 +488,305 @@ function keys(e) {
   else if (k === 'o' || k === 'O') timeline.setOut();
   else if (k === 'm' || k === 'M') change('view', settings.view === 'mask' ? 'result' : 'mask');
   else if ((k === 'e' || k === 'E') && (e.ctrlKey || e.metaKey)) exportDialog.open();
-  else return;
+  else if ((k === 'z' || k === 'Z') && (e.ctrlKey || e.metaKey)) (e.shiftKey ? redo() : undo());
+  else if ((k === 'y' || k === 'Y') && (e.ctrlKey || e.metaKey)) redo();
+  else if (k === 'j' || k === 'J') playReverse();
+  else if (k === 'k' || k === 'K') stopAll();
+  else if (k === 'l' || k === 'L') {
+    stopReverse();
+    if (!P.playing) P.play();
+  } else if (k === '\\') {
+    // Hold: the original (plan §12.7).
+    if (!e.repeat && holdView === null) {
+      holdView = settings.view;
+      setView('original');
+    }
+  } else return;
   e.preventDefault();
+}
+
+// J: play backward (a step back at the frame rate, from the frames in the store when they are there).
+let reverse = 0;
+function playReverse() {
+  if (!player.info) return;
+  player.pause();
+  stopReverse();
+  const step = async () => {
+    if (!reverse) return;
+    if (player.current <= 0) return stopReverse();
+    const t0 = performance.now();
+    await player.step(-1);
+    if (reverse) reverse = setTimeout(step, Math.max(0, 1000 / player.info.fps - (performance.now() - t0)));
+  };
+  reverse = setTimeout(step, 0);
+  document.body.dataset.reverse = '1';
+}
+function stopReverse() {
+  clearTimeout(reverse);
+  reverse = 0;
+  delete document.body.dataset.reverse;
+}
+function stopAll() {
+  stopReverse();
+  player.pause();
+}
+
+let holdView = null;
+function keysUp(e) {
+  if (e.key === ' ' && player.info && !e.target.closest('input, select, textarea')) {
+    e.preventDefault();
+    if (!preview.spacePanned) player.toggle();
+    preview.spacePanned = false;
+    return;
+  }
+  if (e.key === '\\' && holdView !== null) {
+    const v = holdView;
+    holdView = null;
+    setView(v);
+  }
+}
+
+// The view without a change of the settings history.
+function setView(v) {
+  settings.view = v;
+  viewChanged();
+  handles.update();
+  applySettings();
+}
+
+function viewChanged() {
+  for (const b of document.querySelectorAll('#viewBar button[data-view]')) b.classList.toggle('on', b.dataset.view === settings.view);
+  layout.placeSplit(settings.view === 'split' && player.info ? settings.splitPos : null);
+}
+
+const getPathSafe = (path) => {
+  try {
+    return path.split('.').reduce((x, k) => x[k], settings);
+  } catch {
+    return undefined;
+  }
+};
+
+// Put a whole settings object in place (undo, redo, a preset, randomize, the saved settings).
+function replaceSettings(next) {
+  for (const k of Object.keys(settings)) delete settings[k];
+  Object.assign(settings, clone(next));
+  inspector.build(settings, limits());
+  viewChanged();
+  handles.update();
+  updateThumbs();
+  if (player.info) {
+    scheduleAnalysis();
+    ensurePlate();
+  }
+  saveLocal();
+  undoButtons();
+  return applySettings();
+}
+
+function undo() {
+  const prev = history.undo(JSON.stringify(settings));
+  if (prev) return replaceSettings({ ...JSON.parse(prev), view: settings.view, splitPos: settings.splitPos });
+}
+
+function redo() {
+  const next = history.redo(JSON.stringify(settings));
+  if (next) return replaceSettings({ ...JSON.parse(next), view: settings.view, splitPos: settings.splitPos });
+}
+
+function undoButtons() {
+  $('undoBtn').disabled = !history.canUndo;
+  $('redoBtn').disabled = !history.canRedo;
+  for (const b of document.querySelectorAll('#menu button[data-act="undo"]')) b.disabled = !history.canUndo;
+  for (const b of document.querySelectorAll('#menu button[data-act="redo"]')) b.disabled = !history.canRedo;
+}
+
+// The last settings stay in the browser (plan §12.5), with try / catch (private windows, no storage).
+let saveTimer = 0;
+function saveLocal() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(settings));
+    } catch { /* no storage */ }
+  }, 250);
+}
+
+function loadLocal() {
+  try {
+    const t = localStorage.getItem(LOCAL_KEY);
+    if (!t) return null;
+    const s = merge(DEFAULTS, JSON.parse(t));
+    // The files of custom maps and mask videos are not stored: back to the built-in map, no import.
+    if (s.map.source !== 'builtin') s.map.source = 'builtin';
+    s.cutout.import = { on: false, name: '' };
+    if (s.view === 'split' || s.view === 'mask') s.view = 'result';
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+// Randomize (plan §12.5): the sections of the mode that are not locked (or the given ones), with a
+// seed (the same seed gives the same look). One undo step.
+const MODE_SECTIONS = { timemap: ['map', 'adjust', 'anim', 'time', 'composite', 'look'], slitscan: ['source', 'time2', 'composite', 'look'] };
+function randomize(sections, seed) {
+  lastSeed = seed ?? Math.floor(Math.random() * 1e6);
+  const list = (sections || MODE_SECTIONS[settings.mode]).filter((sec) => sections || !locks.has(sec));
+  history.record(JSON.stringify(settings), 'randomize');
+  history.cut();
+  const next = clone(settings);
+  const r = rng(lastSeed);
+  for (const sec of list) randomizeSection(next, sec, r, limits());
+  return replaceSettings(next);
+}
+
+function toggleLock(name) {
+  if (locks.has(name)) locks.delete(name);
+  else locks.add(name);
+  inspector.build(settings, limits());
+}
+
+// Presets (plan §12.5): the gallery, Save, Load.
+function openPresets() {
+  const grid = $('presetGrid');
+  grid.textContent = '';
+  for (const p of PRESETS) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'presetCard';
+    card.dataset.preset = p.id;
+    const c = document.createElement('canvas');
+    c.width = 160;
+    c.height = 90;
+    card.append(c, Object.assign(document.createElement('span'), { textContent: p.name }));
+    card.addEventListener('click', () => {
+      history.record(JSON.stringify(settings), 'preset');
+      history.cut();
+      replaceSettings(applyPreset(settings, p));
+      $('presetDialog').close();
+    });
+    grid.append(card);
+    presetThumb(p, c);
+  }
+  $('presetDialog').showModal();
+}
+
+// A preset thumbnail: the map of a Mode 1 preset (GPU), a line and an arrow for Mode 2.
+async function presetThumb(p, c) {
+  const s = applyPreset(settings, p);
+  const ctx = c.getContext('2d');
+  // Maps of the frames or of the mask (Motion, Video luminance, Subject) have no picture without
+  // them: an icon (a disc and its trail) for those.
+  const iconMap = ['motion', 'self', 'subject', 'subjectdist'].includes(s.map.type);
+  if (s.mode === 'timemap' && s.map.source === 'builtin' && !iconMap) {
+    try {
+      const r = await gpu.call({ cmd: 'thumbs', maps: [s.map], t: Math.max(0, player.current), width: 160, height: 90 });
+      const y = r.images[0];
+      const img = ctx.createImageData(160, 90);
+      for (let i = 0; i < y.length; i++) img.data.set([y[i], y[i], y[i], 255], i * 4);
+      ctx.putImageData(img, 0, 0);
+    } catch { /* no thumbnail */ }
+    return;
+  }
+  const g = ctx.createLinearGradient(0, 0, 160, 0);
+  g.addColorStop(0, '#222');
+  g.addColorStop(1, '#4fd1c5');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 160, 90);
+  if (s.mode === 'timemap') {
+    for (let i = 5; i >= 0; i--) {
+      ctx.fillStyle = `rgba(255,255,255,${1 - i / 6})`;
+      ctx.beginPath();
+      ctx.arc(110 - i * 12, 45, 14, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    return;
+  }
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  const sl = s.slitscan;
+  const a = ((sl.source === 'edge' || s.cutout.mode === 'scan' ? sl.edgeAngle : sl.angle - 90) * Math.PI) / 180;
+  ctx.beginPath();
+  ctx.moveTo(80, 45);
+  ctx.lineTo(80 + Math.cos(a) * 50, 45 + Math.sin(a) * 30);
+  ctx.stroke();
+  if (sl.source === 'edge' || s.cutout.mode === 'scan') {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(80, 45, 12, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+}
+
+async function savePreset() {
+  const assets = {};
+  if (settings.map.source === 'image' && mapInfo.imageDataUrl) assets.mapImage = mapInfo.imageDataUrl;
+  if (player.info) {
+    const m = await gpu.call({ cmd: 'matteGet' });
+    if (!m.empty) {
+      const c = document.createElement('canvas');
+      c.width = m.width;
+      c.height = m.height;
+      c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.pixels.buffer), m.width, m.height), 0, 0);
+      assets.matte = c.toDataURL('image/png');
+    }
+  }
+  const file = presetFile(settings, VERSION, assets);
+  const blob = new Blob([JSON.stringify(file, null, 1)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(currentFile ? currentFile.name.replace(/\.[^.]+$/, '') : 'neofx')}.neofx.json`;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  return file;
+}
+
+async function loadPreset(file) {
+  if (!file) return;
+  let p;
+  try {
+    p = parsePresetFile(await file.text());
+  } catch (e) {
+    showMessage(e.message);
+    return;
+  }
+  history.record(JSON.stringify(settings), 'preset');
+  history.cut();
+  const s = { ...p.settings, view: settings.view, splitPos: settings.splitPos };
+  const notes = [];
+  // A video map (and a mask video) is stored by its name: ask for the file.
+  const video = s.map.source === 'video' ? s.map.video.name : null;
+  if (video) s.map.source = 'builtin';
+  if (s.cutout.import.on) {
+    notes.push(`Open the mask video "${s.cutout.import.name}" in Cutout.`);
+    s.cutout.import = { on: false, name: '' };
+  }
+  if (s.map.source === 'image' && !p.assets.mapImage) s.map.source = 'builtin';
+  await replaceSettings(s);
+  if (p.assets.mapImage && settings.map.source === 'image') {
+    try {
+      await loadImageMap(dataUrlBlob(p.assets.mapImage), gpu);
+      mapInfo.imageDataUrl = p.assets.mapImage;
+      await applySettings();
+    } catch {
+      notes.push('The image map of the preset cannot be read.');
+    }
+  }
+  if (p.assets.matte && player.info) {
+    const m = await gpu.call({ cmd: 'matteGet' });
+    const bitmap = await createImageBitmap(dataUrlBlob(p.assets.matte), { resizeWidth: m.width, resizeHeight: m.height, colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    await gpu.call({ cmd: 'matteSet', bitmap }, [bitmap]);
+    toolState.matteVersion++;
+  }
+  if (video) {
+    notes.unshift(`This preset uses the video map "${video}": open it.`);
+    openMap('video');
+  }
+  showMessage(notes.join(' '));
+  $('presetDialog').close();
 }
 
 async function start() {
@@ -533,10 +857,52 @@ async function start() {
       return gpu.call({ cmd: 'matteClear' });
     },
     edgeStats: () => edgeStats,
+    locks,
+    toggleLock,
+    randomize: (list) => randomize(list),
+    lastSeed: () => lastSeed,
   });
-  inspector.build(settings, { maxDelay: 999 });
+  const saved = loadLocal();
+  if (saved) {
+    for (const k of Object.keys(settings)) delete settings[k];
+    Object.assign(settings, saved);
+  }
+  inspector.build(settings, { maxDelay: 999, maxAge: 600, maxAgeEdge: 512 });
   gpu.call({ cmd: 'settings', settings: clone(settings) });
-  for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
+  for (const b of document.querySelectorAll('#viewBar button[data-view]')) b.addEventListener('click', () => setView(b.dataset.view));
+  for (const b of document.querySelectorAll('#viewBar button[data-zoom]')) {
+    b.addEventListener('click', () => {
+      preview.setZoom(b.dataset.zoom === 'fit' ? 'fit' : 1);
+      for (const x of document.querySelectorAll('#viewBar button[data-zoom]')) x.classList.toggle('on', x === b);
+    });
+  }
+  layout = initLayout({
+    menu: { presets: openPresets, undo, redo },
+    split: (pos) => {
+      if (pos === null) return;
+      settings.splitPos = pos;
+      layout.placeSplit(pos);
+      applySettings();
+    },
+    onResize: () => preview.fit(),
+  });
+  preview.onChange = () => {
+    handles.update();
+    viewChanged();
+  };
+  $('presetsBtn').addEventListener('click', openPresets);
+  $('undoBtn').addEventListener('click', undo);
+  $('redoBtn').addEventListener('click', redo);
+  $('presetClose').addEventListener('click', () => $('presetDialog').close());
+  $('presetSave').addEventListener('click', savePreset);
+  $('presetLoad').addEventListener('click', () => {
+    $('presetFileInput').value = '';
+    $('presetFileInput').click();
+  });
+  $('presetFileInput').addEventListener('change', (e) => loadPreset(e.target.files[0]));
+  document.addEventListener('keyup', keysUp);
+  startDemos($('demoTime'), $('demoSlit'));
+  undoButtons();
     exportDialog = new ExportDialog($('exportDialog'), {
     info: () => player.info,
     file: () => currentFile,
@@ -547,7 +913,7 @@ async function start() {
     cancel: () => exporter && exporter.cancel(),
   });
   $('exportBtn').addEventListener('click', () => exportDialog.open());
-  Object.assign(window.neofx, { exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  Object.assign(window.neofx, { undo, redo, history, randomize, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));
   $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));

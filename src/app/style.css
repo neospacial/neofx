@@ -116,3 +116,86 @@ body[data-state="start"] #viewBar{display:none}
 .exportButtons{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
 .exportButtons .primary,.exportButtons a.button{background:var(--accent);color:#000}
 a.button{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;border-radius:6px;text-decoration:none;font-size:14px}
+
+/* ---- Phase 11: layout (plan §12.2, §12.3) ---- */
+#topBar{position:relative}
+#stage{grid-template-columns:minmax(0,1fr) 5px var(--inspector-w,340px)}
+#sizer{cursor:col-resize;background:var(--line);touch-action:none}
+#sizer:hover,#sizer.drag{background:var(--accent)}
+#inspectorBox{display:flex;flex-direction:column;min-height:0;min-width:0;background:var(--panel)}
+#inspector{flex:1;min-height:0;overflow:auto;border:0}
+#sheetHandle{display:none}
+.tabBar{display:none}
+.narrow{display:none}
+#topBar button.wide{min-width:36px}
+#menu{position:absolute;right:8px;top:calc(var(--top) - 2px);z-index:20;display:grid;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px;min-width:160px}
+#menu button{background:transparent;text-align:left;min-height:44px}
+#menu[hidden]{display:none}
+.vsep{width:1px;background:var(--line);margin:4px 2px}
+#viewBar button[data-zoom].on{color:var(--accent)}
+#preview{touch-action:none}
+#view{position:absolute;transform-origin:0 0}
+#view[hidden]{display:none}
+#splitLine{position:absolute;top:0;bottom:0;width:24px;margin-left:-12px;z-index:2;cursor:ew-resize;touch-action:none}
+#splitLine span{position:absolute;left:11px;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 2px #000}
+.secTools{float:right;display:inline-flex;gap:2px;margin-top:-4px}
+.secTools button{min-height:24px;min-width:28px;padding:0 4px;background:transparent;font-size:13px;line-height:1}
+.secTools button.lock.on{background:var(--line)}
+.randomBar{display:flex;align-items:center;gap:8px;padding:10px 12px}
+.randomBar .seed{font-size:11px;color:var(--dim)}
+.setting.curve{grid-template-columns:1fr;gap:4px}
+.curveCanvas{width:100%;max-width:320px;aspect-ratio:220/120;background:var(--bg);border-radius:6px;touch-action:none;cursor:crosshair}
+.curvePresets button{font-size:11px}
+#modeInfo{grid-template-columns:1fr 1fr;gap:12px}
+#modeInfo figure{margin:0;display:grid;gap:6px}
+#modeInfo canvas{width:100%;border-radius:6px;background:#000;image-rendering:pixelated}
+#modeInfo figcaption{font-size:12px}
+#presetDialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:0;width:min(720px,calc(100vw - 32px));max-height:calc(100vh - 48px)}
+#presetDialog::backdrop{background:rgba(0,0,0,.6)}
+.presetHead{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.presetHead h2{margin:0 auto 0 0;font-size:16px}
+#presetGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;padding:16px;overflow:auto}
+.presetCard{display:grid;gap:4px;padding:6px;background:var(--bg);border:1px solid transparent;border-radius:8px;text-align:left;min-height:0}
+.presetCard canvas{width:100%;aspect-ratio:16/9;border-radius:4px;background:#000}
+.presetCard span{font-size:12px}
+.presetCard:hover{border-color:var(--accent)}
+
+@media (max-width:999px){
+  #app{grid-template-columns:minmax(0,1fr);grid-template-rows:var(--top) minmax(140px,1fr) auto var(--sheet-h,42vh);
+    grid-template-areas:"top" "preview" "transport" "sheet"}
+  #stage{display:contents}
+  #topBar{grid-area:top}
+  #inspector{max-height:none;border-top:0}
+  #preview{grid-area:preview}
+  #transport{grid-area:transport}
+  #inspectorBox{grid-area:sheet;border-top:1px solid var(--line)}
+  #sizer{display:none}
+  .wide{display:none !important}
+  .narrow{display:inline-flex}
+  #status{display:none}
+  #sheetHandle{display:block;flex:none;height:22px;cursor:ns-resize;touch-action:none}
+  #sheetHandle span{display:block;width:44px;height:4px;border-radius:2px;background:var(--dim);margin:9px auto}
+  .tabBar{display:flex;gap:4px;overflow-x:auto;padding:4px 8px 6px;position:sticky;top:0;background:var(--panel);z-index:2;scrollbar-width:none}
+  .tabBar button{flex:none;min-height:44px;padding:0 14px}
+  .tabBar button.on{background:var(--accent);color:#000}
+  #inspector details[data-tab]{display:none}
+  #inspector[data-tab="mode"] details[data-tab="mode"],#inspector[data-tab="map"] details[data-tab="map"],
+  #inspector[data-tab="time"] details[data-tab="time"],#inspector[data-tab="cutout"] details[data-tab="cutout"],
+  #inspector[data-tab="mix"] details[data-tab="mix"],#inspector[data-tab="look"] details[data-tab="look"]{display:block}
+  button,select,#transport .controls button{min-height:44px}
+  .secTools button{min-height:36px;min-width:36px}
+  .setting{grid-template-columns:88px 1fr 60px 12px}
+  #modeInfo{grid-template-columns:1fr}
+}
+@media (max-width:999px){
+  /* The start screen: all of the area (no transport, no settings before a file is open). */
+  body[data-state="start"] #app{grid-template-rows:var(--top) minmax(0,1fr);grid-template-areas:"top" "preview"}
+  body[data-state="start"] #transport,body[data-state="start"] #inspectorBox{display:none}
+  body[data-state="start"] #preview{overflow:auto;align-items:flex-start}
+}
+@media (max-width:999px) and (min-width:700px) and (orientation:landscape){
+  #app{grid-template-columns:minmax(0,1fr) min(360px,42vw);grid-template-rows:var(--top) minmax(0,1fr) auto;
+    grid-template-areas:"top top" "preview sheet" "transport sheet"}
+  #inspectorBox{border-top:0;border-left:1px solid var(--line)}
+  #sheetHandle{display:none}
+}

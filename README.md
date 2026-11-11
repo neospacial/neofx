@@ -7,20 +7,27 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **phase 10 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer, frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, the **compositor**, **Mode 2 — Slit Scan** (line and subject-edge sources), the **cutout** (Overlay, Scan object), and the **export** (MP4, H.264, the original audio copied). The UI finish (presets, undo, curve editor, keyboard) and the device tests come in the next phases.
+> Status: v0.1.0, **phase 11 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: everything in the plan but the device tests (phase 12): the build, the MP4/MOV reader and muxer, frame-exact seek and playback, the GPU frame store, **Time Map** with the full map library, the **compositor**, **Slit Scan** (line and subject edge), the **cutout**, the **export**, and the **UI** (desktop and phone layouts, presets, undo, randomize, the curve editor, the keyboard).
 
 ## How to use
 
-1. Open `dist/neofx-v0.1.0.html` (or `index.html` on GitHub Pages) in desktop Chrome or Chrome on Android.
+1. Open `dist/neofx-v0.1.0.html` (or `index.html` on GitHub Pages) in desktop Chrome or Chrome on Android. The start screen shows an example of each mode.
 2. Drop an MP4 or MOV file on the page, or touch **Open**.
-3. The preview shows the video (turned as the file says). Use the transport to play and to move frame by frame. Drag on the timeline strip to scrub. **In** and **Out** set a range at the current frame (touch again to clear). **Loop** plays the range again and again.
-4. **Preview** sets the working resolution of the preview (short side: 360, 540, 720, 1080, or Source). The preview is never larger than the source.
+3. Select the **Mode** (Time Map or Slit Scan) and change the settings in the inspector (on a phone: the tabs **Mode · Map · Time · Cutout · Mix · Look** in the sheet under the preview; drag the handle of the sheet up to make it taller). Settings that do not apply are hidden. Double-click (double-tap) a label to reset the setting. On a phone, a long press on a slider and then a drag moves the value in fine steps (×0.1).
+4. Play, step, and scrub with the transport and the timeline strip. **In** and **Out** set a range; **Loop** plays it again and again.
+5. Touch **Export** for the MP4 file.
 
-The status bar shows the frame store: for example "Buffer: 240 frames at 540p (≈ 330 MB)". The store is a ring of past frames on the GPU (YUV 4:2:0, 1.5 bytes for each pixel). Its size is the smallest of: the GPU limit of texture layers, the memory budget divided by the size of one frame, and 1000 frames. The budget starts at 1 GB on desktop and 384 MB on Android, and halves when the GPU cannot allocate it. The Max delay of the Time Map effect (phase 4) cannot be more than this number of frames minus one.
+**Views** (above the preview): **Result**, **Original**, **Split** (drag the divider: the original on the left, the result on the right), **Mask**, **Map** (the Time Map in grey, or the age of Slit Scan as heat colours). **Fit** and **100%** set the zoom; the mouse wheel zooms at the pointer; drag with the middle button or with Space held to move the picture; on a touch screen, two fingers zoom and move it (one finger is for the tool: the line, the brush, the eyedropper).
 
-Each seek is frame-exact: the app decodes from the last clean keyframe (IDR) to the frame. Playback uses the file's own frame times, so variable frame rate files play at their true speed. When the device is too slow, the preview drops frames and the status bar shows "Preview N fps" in amber.
+**Presets** (top bar; on a phone in the ⋯ menu): 13 built-in looks for both modes and the cutout modes. **Save preset** writes a `.neofx.json` file (with an image map and the garbage matte in it); **Load preset** reads one. A video map or a mask video is stored by its file name: the app asks you to open the file. The last settings also stay in the browser.
 
-Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out; M the Mask view; Ctrl/Cmd+E export.
+**Randomize** (at the bottom of the inspector) sets safe random values in the sections of the mode; the lock of a section keeps it, the dice of a section changes only that section. Each look has a number (its seed). **Undo** / **Redo** (↶ ↷, Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z) go back and forward through the setting changes; a slider drag is one change.
+
+**Curves** (Map adjust curve, Slit Scan rate curve, decay curve): drag a point; click on the line to add one; double-click (or long press) a point to remove it; or use a preset (Linear, Ease in, Ease out, S-curve, Step).
+
+Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out; J play backward, K stop, L play; hold \ to show the original; M the Mask view; Ctrl/Cmd+Z undo, Shift+Ctrl/Cmd+Z redo; Ctrl/Cmd+E export.
+
+The status bar shows the frame store: for example "Buffer: 240 frames at 540p (≈ 330 MB)". The store is a ring of past frames on the GPU (YUV 4:2:0, 1.5 bytes for each pixel). Its size is the smallest of: the GPU limit of texture layers, the memory budget divided by the size of one frame, and 1000 frames. The budget starts at 1 GB on desktop and 384 MB on Android, and halves when the GPU cannot allocate it. **Preview** (transport) sets the working resolution of the preview (short side: 360, 540, 720, 1080, or Source). The preview drops frames when the device is too slow ("Preview N fps" in amber); the export never does.
 
 ## Mode 1 — Time Map
 
@@ -134,7 +141,7 @@ Input: MP4 and MOV only (not fragmented). Output: MP4, H.264 (WebCodecs `VideoEn
 - The Subject edge source needs float render targets (EXT_color_buffer_float), which current Chrome has.
 - The cutout is made for a camera that does not move. Temporal smooth and hysteresis use the mask of the previous frame: they apply in playback (and export), not to a single seek.
 - Grow / shrink and the outline use a square kernel: corners grow a little more than round edges.
-- A clean plate from This frame or an Image is not kept when the preview resolution changes (make it again); Auto is made again.
+- Undo covers the settings, not the painted matte, the clean plate, or the custom map files.
 - A video map keeps at most 256 MB of frames; a longer map video holds its last frame that fits.
 - Without float render targets, the map has 8-bit precision: with a long Max delay, the delays have steps of Max delay / 255 frames.
 - The frame store keeps 8-bit YUV 4:2:0 (BT.709, full range): a small colour change is possible on fine colour edges.
@@ -166,7 +173,7 @@ The last command writes the test videos (plan §13.1) to `samples/`. The tests m
 
 | Folder | Content |
 |---|---|
-| `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `analysis.js` (Mode 2 analysis pass), `export.js` (the export), `preview.js`, `ui/` (timeline, inspector, widgets, line handles, eyedropper and matte brush, export dialog) |
+| `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `analysis.js` (Mode 2 analysis pass), `export.js` (the export), `preview.js`, `history.js` (undo), `random.js`, `presets.js`, `ui/` (timeline, inspector, widgets, curve editor, layout, start screen, line handles, eyedropper and matte brush, export dialog) |
 | `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `slit.js` (slit history, analysis rows, Mode 2 render), `mask.js` (cutout mask pipeline, clean plate, matte, subject layer), `edge.js` (subject-edge emitters and trail), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
 | `src/analysis/` | `cleanplate.js` (median), `regions.js` (fill holes, keep largest), `analysis-worker.js` |
 | `src/modes/` | `slit.js` (Mode 2: rate types, S and A, line geometry) |

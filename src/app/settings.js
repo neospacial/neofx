@@ -4,7 +4,8 @@ import { defaultParams } from '../maps/builtin.js';
 
 export const DEFAULTS = {
   mode: 'timemap', // 'timemap' | 'slitscan' (phase 7)
-  view: 'result', // 'result' | 'original' | 'map' | 'mask'
+  view: 'result', // 'result' | 'original' | 'split' | 'map' | 'mask'
+  splitPos: 0.5, // the Split view divider (0..1 of the picture)
   timemap: {
     maxDelay: 30, // frames (white); the store limits it to N - 1
     steps: 0, // 0 = smooth, else 2..64
