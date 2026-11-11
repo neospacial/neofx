@@ -9,16 +9,20 @@ import { workingSize, defaultBudget, bufferText } from '../gpu/store.js';
 import { Timeline } from './ui/timeline.js';
 import { Inspector } from './ui/inspector.js';
 import { DEFAULTS, clone, setPath } from './settings.js';
+import { MAPS } from '../maps/builtin.js';
+import { loadImageMap, loadVideoMap } from '../maps/mapsource.js';
+import { THUMB_W, THUMB_H } from './ui/inspector.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
 const DECODE_WORKER = "@WORKER:io/demux.js,io/timeline.js,io/decode-worker.js";
-const GPU_WORKER = "@WORKER:gpu/store.js,gpu/gl.js,gpu/engine.js,gpu/gpu-worker.js";
+const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,gpu/store.js,gpu/gl.js,gpu/mapgen.js,gpu/engine.js,gpu/gpu-worker.js";
 
 let player, preview, timeline, gpu, inspector;
 const settings = clone(DEFAULTS);
 // The store state: { short (the preview setting), width, height, n, bytes, budget }.
 const store = { short: 540, budget: 0, failAlloc: 0 };
+const mapInfo = { mapFrames: 0 };
 
 function showMessage(text) {
   const m = $('message');
@@ -51,13 +55,65 @@ async function configureStore() {
   if (settings.timemap.maxDelay > r.n - 1) settings.timemap.maxDelay = r.n - 1;
   inspector.build(settings, limits());
   await applySettings();
+  updateThumbs();
   return r;
 }
 
 const limits = () => ({ maxDelay: Math.max(0, store.n - 1) });
 
-// The history that the effect needs: Mode 1, the Max delay.
-const effectDepth = () => (settings.mode === 'timemap' && settings.view !== 'original' ? settings.timemap.maxDelay : 0);
+// The history that the effect needs: Mode 1, the Max delay (and the frames of the Motion map).
+function effectDepth() {
+  if (settings.mode !== 'timemap' || settings.view === 'original') return 0;
+  const m = settings.map;
+  const motion = m.source === 'builtin' && m.type === 'motion' ? m.params.motion.frames + 1 : 0;
+  return Math.max(settings.timemap.maxDelay, motion);
+}
+
+// The map thumbnails (plan §12.4): each built-in map with its params, at the current frame.
+let thumbTimer = 0;
+function updateThumbs(only) {
+  clearTimeout(thumbTimer);
+  thumbTimer = setTimeout(async () => {
+    if (!player.info || settings.map.source !== 'builtin') return;
+    const ids = only ? [only] : MAPS.filter((m) => !m.needs).map((m) => m.id);
+    const maps = ids.map((id) => ({ ...clone(settings.map), source: 'builtin', type: id, anim: { ...settings.map.anim }, adjust: settings.map.adjust }));
+    const r = await gpu.call({ cmd: 'thumbs', maps, t: Math.max(0, player.current), width: THUMB_W, height: THUMB_H });
+    inspector.drawThumbs(Object.fromEntries(ids.map((id, i) => [id, r.images[i]])));
+  }, only ? 120 : 30);
+}
+
+// Open a custom map file (plan §7.4).
+function openMap(kind) {
+  const input = $('mapFileInput');
+  input.accept = kind === 'image' ? 'image/png,image/jpeg,image/webp' : 'video/mp4,video/quicktime,.mp4,.mov,.m4v';
+  input.dataset.kind = kind;
+  input.value = '';
+  input.click();
+}
+
+async function loadMapFile(file, kind) {
+  if (!file) return;
+  showMessage('');
+  try {
+    if (kind === 'image') {
+      await loadImageMap(file, gpu);
+      settings.map.image.name = file.name;
+    } else {
+      const caps = await gpu.call({ cmd: 'caps' });
+      const r = await loadVideoMap(file, gpu, { workerSrc: DECODE_WORKER, short: Math.min(store.height || 540, 540), maxLayers: caps.maxLayers, onProgress: setProgress });
+      settings.map.video.name = file.name;
+      mapInfo.mapFrames = r.count;
+      setProgress(null);
+    }
+    settings.map.source = kind;
+  } catch (e) {
+    setProgress(null);
+    showMessage(e.message);
+    return;
+  }
+  inspector.build(settings, limits());
+  await applySettings();
+}
 
 // Send the settings to the engine. When the effect needs more history, a seek decodes it.
 async function applySettings() {
@@ -72,7 +128,12 @@ async function applySettings() {
 // A setting changed in the UI.
 function change(path, value) {
   setPath(settings, path, value);
-  inspector.refresh(settings);
+  if (path === 'map.source' || path === 'map.type' || path === 'mode') {
+    inspector.build(settings, limits());
+    updateThumbs();
+  } else inspector.refresh(settings);
+  if (path.startsWith('map.params.')) updateThumbs(path.split('.')[2]);
+  else if (path.startsWith('map.adjust.') || path.startsWith('map.anim.')) updateThumbs();
   if (path === 'view') for (const b of document.querySelectorAll('#viewBar button')) b.classList.toggle('on', b.dataset.view === value);
   applySettings();
 }
@@ -158,11 +219,12 @@ async function start() {
     onProgress: setProgress,
   });
   timeline = new Timeline($('transport'), player);
-  inspector = new Inspector($('inspector'), change);
+  inspector = new Inspector($('inspector'), { change, openMap, info: () => mapInfo });
   inspector.build(settings, { maxDelay: 999 });
   gpu.call({ cmd: 'settings', settings: clone(settings) });
   for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
-  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings });
+  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs });
+  $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));
   $('resSelect').addEventListener('change', async (e) => {
     store.short = Number(e.target.value);
     if (!player.info) return;

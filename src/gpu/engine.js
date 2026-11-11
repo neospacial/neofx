@@ -8,16 +8,22 @@
 //   { cmd: 'render', index, delay }        tests: the stored frame index - delay            -> { cmd: 'rendered', index }
 //   { cmd: 'settings', settings }          the effect settings; renders the last frame again -> { cmd: 'rendered' }
 //   { cmd: 'read' }                        render again and read the canvas (tests)         -> { cmd: 'pixels', width, height, pixels }
+//   { cmd: 'mapImage', bitmap }                       custom map: an image (luma)        -> { cmd: 'map', w, h, count }
+//   { cmd: 'mapVideoBegin', width, height, count }    custom map: a video of count frames -> { cmd: 'map', ... }
+//   { cmd: 'mapVideoFrame', i, frame, rotation }      one frame of it                     -> { cmd: 'map', ... }
+//   { cmd: 'mapClear' }
+//   { cmd: 'thumbs', maps, t, width, height }  map thumbnails (luma bytes)                -> { cmd: 'thumbs', images }
 //   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }
 
 import { createContext, program, texParams, drawQuad } from './gl.js';
 import { layerCount, frameBytes } from './store.js';
+import { MapGen } from './mapgen.js';
+import { isDynamic } from '../maps/builtin.js';
 
 const QUAD_VERT = "@GLSL:gpu/glsl/quad.vert";
 const UPLOAD_FRAG = "@GLSL:gpu/glsl/upload.frag";
 const STORE_GLSL = "@GLSL:gpu/glsl/store.glsl";
 const SHOW_FRAG = "@GLSL:gpu/glsl/show.frag";
-const MAP_FRAG = "@GLSL:gpu/glsl/map.frag";
 const TIMEMAP_FRAG = "@GLSL:gpu/glsl/timemap.frag";
 const VIEWS = { result: 0, original: 1, map: 2 };
 
@@ -33,9 +39,9 @@ export class Engine {
     this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);
     this.show = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${SHOW_FRAG}`);
     this.timemap = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${TIMEMAP_FRAG}`);
-    this.mapProg = program(gl, QUAD_VERT, MAP_FRAG);
+    this.mapgen = new MapGen(this);
     this.mapTex = null;
-    this.mapDirty = true;
+    this.mapKey = '';
     this.layersTex = null;
     this.settings = null;
     this.vao = gl.createVertexArray();
@@ -68,11 +74,32 @@ export class Engine {
     if (m.cmd === 'settings') {
       const old = this.settings;
       this.settings = m.settings;
-      if (!old || JSON.stringify(old.map) !== JSON.stringify(m.settings.map)) this.mapDirty = true;
       if (this.n && this.last.index >= 0) this.render(this.last.index, this.last.delay);
       return { cmd: 'rendered', index: this.last.index };
     }
     if (m.cmd === 'read') return this.read();
+    if (m.cmd === 'mapImage') {
+      const b = m.bitmap;
+      const s = Math.min(1, 2048 / Math.max(b.width, b.height));
+      const c = this.mapgen.beginCustom(Math.max(1, Math.round(b.width * s)), Math.max(1, Math.round(b.height * s)), 1);
+      this.mapgen.putCustom(0, b, 0);
+      b.close();
+      return this.mapChanged(c);
+    }
+    if (m.cmd === 'mapVideoBegin') return this.mapChanged(this.mapgen.beginCustom(m.width, m.height, m.count));
+    if (m.cmd === 'mapVideoFrame') {
+      try {
+        this.mapgen.putCustom(m.i, m.frame, m.rotation);
+      } finally {
+        m.frame.close();
+      }
+      return this.mapChanged(this.mapgen.custom);
+    }
+    if (m.cmd === 'mapClear') {
+      this.mapgen.clearCustom();
+      return this.mapChanged(null);
+    }
+    if (m.cmd === 'thumbs') return { cmd: 'thumbs', images: this.mapgen.thumbs(m.maps, m.t, m.width, m.height) };
     return null;
   }
 
@@ -127,7 +154,7 @@ export class Engine {
     if (this.caps.floatTargets) gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);
     else gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
     texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
-    this.mapDirty = true;
+    this.mapKey = '';
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -188,25 +215,25 @@ export class Engine {
     drawQuad(gl);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.layerFrame[layer] = index;
+    if (this.settings && isDynamic(this.settings.map)) this.mapKey = ''; // self / motion read the store
     gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));
   }
 
-  // Render the map into its texture (once for each change of the map settings).
-  renderMap() {
-    const gl = this.gl;
-    const m = (this.settings && this.settings.map.linear) || { angle: 90, x: 0.5, y: 0.5, width: 1 };
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.mapTex, 0);
-    gl.viewport(0, 0, this.w, this.h);
-    gl.useProgram(this.mapProg.prog);
-    gl.uniform2f(this.mapProg.u.u_res, this.w, this.h);
-    gl.uniform1f(this.mapProg.u.u_angle, m.angle);
-    gl.uniform2f(this.mapProg.u.u_center, m.x, m.y);
-    gl.uniform1f(this.mapProg.u.u_width, m.width);
-    drawQuad(gl);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this.mapDirty = false;
+  mapChanged(c) {
+    this.mapKey = '';
+    return { cmd: 'map', ...(c ? { w: c.w, h: c.h, count: c.count, layers: c.layers } : { count: 0 }) };
+  }
+
+  // The map of frame t: rendered again when its settings change, and for each frame when it is
+  // dynamic (animation, self, motion, video map).
+  updateMap(t) {
+    if (!this.settings) return;
+    const map = this.settings.map;
+    const key = JSON.stringify(map) + (isDynamic(map) ? `@${t}` : '');
+    if (key === this.mapKey) return;
+    this.mapgen.run(map, t, this.mapTex, this.w, this.h);
+    this.mapKey = key;
   }
 
   // The layer of frame t, or -1 when it is not in the store (or t < 0).
@@ -230,7 +257,7 @@ export class Engine {
   render(index, delay) {
     const gl = this.gl;
     this.last = { index, delay };
-    if (this.mapDirty) this.renderMap();
+    this.updateMap(index);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.w, this.h);
     if (delay !== undefined || !this.settings) {

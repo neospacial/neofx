@@ -2,9 +2,7 @@
 // steps), src = t − d. src < 0: black (not online, D8). Frame blend: mix the two frames around src;
 // else the frame t − round(d). Each frame comes from the store at the same pixel. A frame that is not
 // in the store is black. u_view: 0 = result, 1 = original (frame t), 2 = the map.
-uniform sampler2D u_map;
-uniform highp isampler2D u_layers; // N x 1: the frame index in each store layer
-uniform int u_n;
+uniform highp sampler2D u_map;
 uniform int u_t;
 uniform float u_max;
 uniform int u_steps;
@@ -12,14 +10,6 @@ uniform bool u_blend;
 uniform int u_view;
 in vec2 v_uv;
 out vec4 o;
-
-// The color of frame k at uv, and in.a = 1 when frame k is in the store.
-vec4 frameAt(int k, vec2 uv) {
-  if (k < 0) return vec4(0.0);
-  int l = k % u_n;
-  if (texelFetch(u_layers, ivec2(l, 0), 0).r != k) return vec4(0.0);
-  return vec4(storeRgb(uv, float(l)), 1.0);
-}
 
 void main() {
   vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom

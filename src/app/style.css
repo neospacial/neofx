@@ -71,3 +71,13 @@ body[data-state="start"] #viewBar{display:none}
 .segs button{flex:1;min-height:28px;font-size:12px;background:transparent;padding:0 6px}
 .segs button.on{background:var(--line);color:var(--accent)}
 @media (max-width:999px){.setting input[type=range]{min-height:32px}.segs button{min-height:40px}}
+.mapGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:6px;padding:4px 12px 8px}
+.mapTile{display:flex;flex-direction:column;align-items:stretch;gap:2px;padding:3px;min-height:0;background:var(--bg);border:1px solid transparent;border-radius:6px}
+.mapTile canvas{width:100%;aspect-ratio:72/40;border-radius:3px;background:#000}
+.mapTile span{font-size:10px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mapTile.on{border-color:var(--accent)}
+.mapTile.on span{color:var(--text)}
+.mapTile:disabled{opacity:.35}
+.fileRow{grid-template-columns:auto 1fr}
+.fileName{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.note{margin:2px 12px 8px;font-size:11px;color:var(--dim)}

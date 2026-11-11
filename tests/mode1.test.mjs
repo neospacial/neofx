@@ -179,10 +179,10 @@ export const tests = [
           const want = (255 * (y + 0.5)) / H;
           assert(Math.abs(px[(H - 1 - y) * 320 + 100] - want) <= 1.5, `map row ${y}: ${px[(H - 1 - y) * 320 + 100]}, want ${want.toFixed(1)}`);
         }
-        await setAll(page, { 'map.linear.angle': 0 });
+        await setAll(page, { 'map.params.linear.angle': 0 });
         const h = await page.evaluate(async () => Array.from((await window.neofx.gpu.call({ cmd: 'read' })).pixels.filter((_, i) => i % 4 === 0)));
         for (const x of [0, 160, 319]) assert(Math.abs(h[100 * 320 + x] - (255 * (x + 0.5)) / 320) <= 1.5, `angle 0, column ${x}: ${h[100 * 320 + x]}`);
-        await setAll(page, { view: 'original', 'map.linear.angle': 90 });
+        await setAll(page, { view: 'original', 'map.params.linear.angle': 90 });
         const rows = await page.evaluate(() => window.__rows());
         assert(rows.every((c) => c === codes[20]), `original view: ${rows}`);
       });

@@ -35,6 +35,9 @@ export function bundle(files, src = SRC) {
   const parts = [];
   for (const f of files) {
     let code = inlineGlsl(fs.readFileSync(path.join(src, f), 'utf8'), src);
+    // One name for each export: "export const a = 1, b = 2;" would export only a.
+    const multi = code.match(/^export\s+(?:const|let|var)\s+[A-Za-z0-9_$]+\s*=[^;\n]*,\s*[A-Za-z0-9_$]+\s*=.*$/m);
+    if (multi && !/[([{]/.test(multi[0].split('=')[1].split(',')[0])) throw new Error(`${f}: one export for each declaration: ${multi[0]}`);
     code = code.replace(IMPORT_RE, '');
     const names = [];
     code = code.replace(EXPORT_RE, (m, decl, name) => {

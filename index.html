@@ -81,6 +81,16 @@ body[data-state="start"] #viewBar{display:none}
 .segs button{flex:1;min-height:28px;font-size:12px;background:transparent;padding:0 6px}
 .segs button.on{background:var(--line);color:var(--accent)}
 @media (max-width:999px){.setting input[type=range]{min-height:32px}.segs button{min-height:40px}}
+.mapGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:6px;padding:4px 12px 8px}
+.mapTile{display:flex;flex-direction:column;align-items:stretch;gap:2px;padding:3px;min-height:0;background:var(--bg);border:1px solid transparent;border-radius:6px}
+.mapTile canvas{width:100%;aspect-ratio:72/40;border-radius:3px;background:#000}
+.mapTile span{font-size:10px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mapTile.on{border-color:var(--accent)}
+.mapTile.on span{color:var(--text)}
+.mapTile:disabled{opacity:.35}
+.fileRow{grid-template-columns:auto 1fr}
+.fileName{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.note{margin:2px 12px 8px;font-size:11px;color:var(--dim)}
 </style>
 </head>
 <body data-state="start">
@@ -136,10 +146,142 @@ body[data-state="start"] #viewBar{display:none}
     </div>
     <canvas class="strip" aria-label="Timeline"></canvas>
   </footer>
+  <input id="mapFileInput" type="file" hidden>
   <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
 </div>
 <script>
 'use strict';
+// ---- maps/builtin.js
+const { MAPS, MAP_INDEX, defaultParams, paramArray, isDynamic, videoMapFrame } = (() => {
+// The built-in maps (plan §7.3): ids, names, and parameters. The order of MAPS is the u_type of
+// gpu/glsl/maps.glsl; the order of the params of each map is its u_k[] order.
+// A param: [key, label, min, max, step, default, unit].
+
+const C = [['x', 'Center x', 0, 1, 0.01, 0.5], ['y', 'Center y', 0, 1, 0.01, 0.5]];
+const SEED = ['seed', 'Seed', 0, 999, 1, 1];
+
+const MAPS = [
+  { id: 'linear', name: 'Linear', params: [['angle', 'Angle', 0, 360, 1, 90, '°'], ['x', 'Position x', 0, 1, 0.01, 0.5], ['y', 'Position y', 0, 1, 0.01, 0.5], ['width', 'Width', 0.05, 4, 0.01, 1]] },
+  { id: 'mirrored', name: 'Mirrored', params: [['angle', 'Angle', 0, 360, 1, 90, '°'], ['x', 'Center x', 0, 1, 0.01, 0.5], ['y', 'Center y', 0, 1, 0.01, 0.5], ['width', 'Width', 0.05, 4, 0.01, 1]] },
+  { id: 'radial', name: 'Radial', params: [...C, ['radius', 'Radius', 0.05, 2, 0.01, 0.7], ['aspect', 'Aspect', 0.25, 4, 0.01, 1]] },
+  { id: 'angular', name: 'Angular', params: [...C, ['start', 'Start angle', 0, 360, 1, 0, '°'], ['turns', 'Turns', 1, 16, 1, 1]] },
+  { id: 'spiral', name: 'Spiral', params: [...C, ['arms', 'Arms', 1, 12, 1, 2], ['tightness', 'Tightness', 0, 20, 0.1, 4]] },
+  { id: 'box', name: 'Diamond / Box', params: [...C, ['size', 'Size', 0.05, 2, 0.01, 0.5], ['roundness', 'Roundness', 0, 1, 0.01, 0, '']] },
+  { id: 'corners', name: 'Four corners', params: [['tl', 'Top left', 0, 1, 0.01, 0], ['tr', 'Top right', 0, 1, 0.01, 0.33], ['bl', 'Bottom left', 0, 1, 0.01, 0.66], ['br', 'Bottom right', 0, 1, 0.01, 1]] },
+  { id: 'stripes', name: 'Stripes', params: [['count', 'Count', 1, 64, 1, 8], ['angle', 'Angle', 0, 360, 1, 0, '°'], ['softness', 'Softness', 0, 1, 0.01, 0], ['duty', 'Duty', 0, 1, 0.01, 0.5]] },
+  { id: 'sine', name: 'Sine waves', params: [['fx', 'Frequency x', 0, 32, 0.1, 4], ['fy', 'Frequency y', 0, 32, 0.1, 0], ['angle', 'Angle', 0, 360, 1, 0, '°'], ['phase', 'Phase', 0, 1, 0.01, 0]] },
+  { id: 'rings', name: 'Rings', params: [...C, ['count', 'Count', 1, 64, 1, 8], ['softness', 'Softness', 0, 1, 0.01, 0]] },
+  { id: 'checker', name: 'Checkerboard', params: [['cells', 'Cells', 1, 64, 1, 8], ['softness', 'Softness', 0, 1, 0.01, 0]] },
+  { id: 'fbm', name: 'Value noise', params: [['scale', 'Scale', 0.5, 64, 0.1, 4], ['octaves', 'Octaves', 1, 8, 1, 4], ['roughness', 'Roughness', 0, 1, 0.01, 0.5], SEED] },
+  { id: 'ridged', name: 'Ridged noise', params: [['scale', 'Scale', 0.5, 64, 0.1, 3], ['octaves', 'Octaves', 1, 8, 1, 4], SEED] },
+  { id: 'worley', name: 'Cellular', params: [['scale', 'Scale', 1, 64, 0.1, 6], SEED, ['metric', 'Metric', 0, 2, 1, 0]] },
+  { id: 'voronoi', name: 'Voronoi cells', params: [['scale', 'Scale', 1, 64, 0.1, 6], SEED] },
+  { id: 'blocks', name: 'Random blocks', params: [['bw', 'Block width', 1, 256, 1, 32, 'px'], ['bh', 'Block height', 1, 256, 1, 32, 'px'], SEED] },
+  { id: 'rows', name: 'Random rows', params: [['size', 'Size', 1, 256, 1, 16, 'px'], ['direction', 'Columns', 0, 1, 1, 0], SEED] },
+  { id: 'bayer', name: 'Bayer dither', params: [['matrix', 'Matrix (2^n)', 1, 3, 1, 2], ['base', 'Base value', 0, 1, 0.01, 0.5]] },
+  { id: 'self', name: 'Video luminance', params: [] },
+  { id: 'motion', name: 'Motion', params: [['gain', 'Gain', 0.5, 20, 0.1, 4], ['frames', 'Smooth (frames)', 1, 8, 1, 2]] },
+  { id: 'subject', name: 'Subject mask', params: [], needs: 'cutout' },
+  { id: 'subjectdist', name: 'Subject distance', params: [], needs: 'cutout' },
+];
+
+const MAP_INDEX = Object.fromEntries(MAPS.map((m, i) => [m.id, i]));
+
+// The default params of each map: { linear: { angle: 90, ... }, ... }.
+function defaultParams() {
+  return Object.fromEntries(MAPS.map((m) => [m.id, Object.fromEntries(m.params.map((p) => [p[0], p[5]]))]));
+}
+
+// The u_k[] values of a map.
+function paramArray(id, params) {
+  const m = MAPS[MAP_INDEX[id]];
+  return m.params.map((p) => Number((params && params[p[0]]) ?? p[5]));
+}
+
+// The map needs a new render for each frame (it changes with t).
+function isDynamic(map) {
+  const a = map.anim;
+  return map.source === 'video' || (map.source === 'builtin' && (map.type === 'self' || map.type === 'motion'))
+    || (map.source === 'builtin' && !!(a.phaseSpeed || a.rotSpeed || a.pulseAmount || a.seedEvery));
+}
+
+// Video map (plan §7.4): the map frame for source frame t. end: 'loop' | 'hold' | 'pingpong'.
+function videoMapFrame(t, count, speed, offset, end) {
+  if (count <= 1) return 0;
+  const m = Math.round(t * speed + offset);
+  if (end === 'hold') return Math.max(0, Math.min(count - 1, m));
+  if (end === 'pingpong') {
+    const p = 2 * (count - 1);
+    const r = ((m % p) + p) % p;
+    return r < count ? r : p - r;
+  }
+  return ((m % count) + count) % count;
+}
+
+return { MAPS, MAP_INDEX, defaultParams, paramArray, isDynamic, videoMapFrame };
+})();
+
+// ---- maps/curve.js
+const { CURVE_PRESETS, monotoneCurve, curveTable } = (() => {
+// Curves (plan §7.5, §12.6): points [[x, y], ...] with x from 0 to 1 -> monotone cubic interpolation
+// (Fritsch–Carlson). The GPU gets a lookup table.
+
+const CURVE_PRESETS = {
+  linear: [[0, 0], [1, 1]],
+  easeIn: [[0, 0], [0.5, 0.2], [1, 1]],
+  easeOut: [[0, 0], [0.5, 0.8], [1, 1]],
+  sCurve: [[0, 0], [0.25, 0.1], [0.75, 0.9], [1, 1]],
+  step: [[0, 0], [0.49, 0], [0.51, 1], [1, 1]],
+};
+
+// A function x -> y through the points (sorted by x), monotone between them.
+function monotoneCurve(points) {
+  const p = points.slice().sort((a, b) => a[0] - b[0]);
+  const n = p.length;
+  if (n < 2) return () => (n ? p[0][1] : 0);
+  const dx = [], m = [];
+  for (let i = 0; i < n - 1; i++) {
+    dx.push(p[i + 1][0] - p[i][0]);
+    m.push(dx[i] > 0 ? (p[i + 1][1] - p[i][1]) / dx[i] : 0);
+  }
+  const t = new Array(n);
+  t[0] = m[0];
+  t[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i++) t[i] = m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (m[i] === 0) {
+      t[i] = t[i + 1] = 0;
+      continue;
+    }
+    const a = t[i] / m[i], b = t[i + 1] / m[i], h = a * a + b * b;
+    if (h > 9) {
+      const s = 3 / Math.sqrt(h);
+      t[i] = s * a * m[i];
+      t[i + 1] = s * b * m[i];
+    }
+  }
+  return (x) => {
+    if (x <= p[0][0]) return p[0][1];
+    if (x >= p[n - 1][0]) return p[n - 1][1];
+    let i = 0;
+    while (i < n - 2 && x > p[i + 1][0]) i++;
+    const h = dx[i], u = (x - p[i][0]) / h;
+    const u2 = u * u, u3 = u2 * u;
+    return (2 * u3 - 3 * u2 + 1) * p[i][1] + (u3 - 2 * u2 + u) * h * t[i] + (-2 * u3 + 3 * u2) * p[i + 1][1] + (u3 - u2) * h * t[i + 1];
+  };
+}
+
+// 256 values of the curve, clamped to 0..1.
+function curveTable(points, size = 256) {
+  const f = monotoneCurve(points);
+  const out = new Float32Array(size);
+  for (let i = 0; i < size; i++) out[i] = Math.max(0, Math.min(1, f(i / (size - 1))));
+  return out;
+}
+
+return { CURVE_PRESETS, monotoneCurve, curveTable };
+})();
+
 // ---- gpu/store.js
 const { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText } = (() => {
 // Frame store sizes (plan §6.3, §6.4). No browser APIs, so Node tests can use it.
@@ -224,6 +366,244 @@ function drawQuad(gl) {
 return { createContext, program, texParams, drawQuad };
 })();
 
+// ---- gpu/mapgen.js
+const { MapGen } = (() => {
+// The map pipeline of the engine (plan §7.3 – §7.6): generate -> blur (2 passes) -> adjust, into a
+// map texture. The custom map (image or video frames) is an R8 texture array.
+
+
+
+
+
+const QUAD_VERT = "#version 300 es\n// One triangle that covers the target. v_uv: 0..1, v = 0 at the first row (image top, in texture space).\nout vec2 v_uv;\nvoid main() {\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  v_uv = p;\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n}\n";
+const STORE_GLSL = "// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\nuniform highp sampler2DArray u_storeY;\nuniform highp sampler2DArray u_storeC;\nuniform highp isampler2D u_layers; // N x 1: the frame index in each store layer\nuniform int u_n;\n\nvec3 storeRgb(vec2 uv, float layer) {\n  float y = texture(u_storeY, vec3(uv, layer)).r;\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\n}\n\n// The layer of frame k, or -1 when frame k is not in the store (or k < 0).\nint layerOf(int k) {\n  if (k < 0 || u_n < 1) return -1;\n  int l = k % u_n;\n  return texelFetch(u_layers, ivec2(l, 0), 0).r == k ? l : -1;\n}\n\n// The colour of frame k at uv, and a = 1 when frame k is in the store (else black, a = 0).\nvec4 frameAt(int k, vec2 uv) {\n  int l = layerOf(k);\n  return l < 0 ? vec4(0.0) : vec4(storeRgb(uv, float(l)), 1.0);\n}\n\n// The luma of frame k at uv (0 when not in the store).\nfloat lumaAt(int k, vec2 uv) {\n  int l = layerOf(k);\n  return l < 0 ? 0.0 : texture(u_storeY, vec3(uv, float(l))).r;\n}\n";
+const GEN_FRAG = "// Map generator (plan §7.3, §7.4, §7.6). Into the raw map texture (one value for each pixel).\n// The coordinates: offset -> tile (repeat or mirror) -> animation (rotate, pulse, about the frame\n// centre) -> the source: a built-in map (u_type), the custom image / video map, the luma of frame t\n// (self), or the motion of frames t-K .. t.\n#define PI 3.14159265359\nuniform vec2 u_res;\nuniform int u_src;      // 0 built-in, 1 custom (image or video)\nuniform int u_type;     // MAPS index\nuniform float u_k[12];  // the params of the map\nuniform float u_phase;  // phase speed × t (cycles)\nuniform float u_rot;    // rotation speed × t (degrees)\nuniform float u_pulse;  // the pulse scale at t\nuniform float u_seed;   // the seed change: floor(t / every)\nuniform vec2 u_offset;  // 0..1 of the frame\nuniform vec2 u_tile;\nuniform bool u_mirror;\nuniform int u_t;\n// Custom map (R8 array: an image = 1 layer, a video = its frames).\nuniform highp sampler2DArray u_custom;\nuniform float u_layer;\nuniform vec2 u_csize;   // its size in pixels\nuniform int u_fit;      // 0 fill, 1 fit, 2 stretch\nuniform float u_outside;\nuniform vec2 u_pos;     // 0..1 of the frame\nuniform float u_scale;\nuniform float u_crot;   // degrees\nuniform vec2 u_flip;    // -1 or 1\nin vec2 v_uv;\nout vec4 o;\n\nuint hash3(uvec3 v) {\n  v = v * 1664525u + 1013904223u;\n  v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n  v ^= v >> 16u;\n  v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n  return v.x ^ v.y ^ v.z;\n}\n// 0..1 for an integer cell and a seed.\nfloat rnd(vec2 cell, float seed) {\n  return float(hash3(uvec3(ivec3(int(floor(cell.x)) + 32768, int(floor(cell.y)) + 32768, int(seed)))) & 0xffffffu) / 16777216.0;\n}\nfloat vnoise(vec2 p, float seed) {\n  vec2 i = floor(p), f = fract(p);\n  vec2 u = f * f * (3.0 - 2.0 * f);\n  return mix(mix(rnd(i, seed), rnd(i + vec2(1, 0), seed), u.x), mix(rnd(i + vec2(0, 1), seed), rnd(i + vec2(1, 1), seed), u.x), u.y);\n}\nvec2 rnd2(vec2 cell, float seed) {\n  return vec2(rnd(cell, seed), rnd(cell, seed + 7919.0));\n}\n// Phase: a clamped ramp (phase 0), or a repeated ramp that moves (phase != 0).\nfloat ramp(float s) {\n  return u_phase == 0.0 ? clamp(s, 0.0, 1.0) : fract(s - u_phase);\n}\nvec2 dir(float deg) {\n  float a = radians(deg);\n  return vec2(cos(a), sin(a));\n}\n\nfloat builtin(vec2 P) {\n  vec2 R = u_res;\n  float seed = u_k[3] + u_seed; // where the seed is param 3 (fbm); others set their own below\n  if (u_type == 0) { // linear: angle, x, y, width\n    vec2 d = dir(u_k[0]);\n    float span = abs(R.x * d.x) + abs(R.y * d.y);\n    return ramp(dot(P - vec2(u_k[1], u_k[2]) * R, d) / max(u_k[3] * span, 1e-3) + 0.5);\n  }\n  if (u_type == 1) { // mirrored: angle, x, y, width\n    vec2 d = dir(u_k[0]);\n    float span = abs(R.x * d.x) + abs(R.y * d.y);\n    return ramp(abs(dot(P - vec2(u_k[1], u_k[2]) * R, d)) / max(0.5 * u_k[3] * span, 1e-3));\n  }\n  vec2 q = (P - vec2(u_k[0], u_k[1]) * R) / R.y; // from the centre, in frame heights\n  if (u_type == 2) { // radial: x, y, radius, aspect\n    q.x /= u_k[3];\n    return ramp(length(q) / u_k[2]);\n  }\n  if (u_type == 3) { // angular: x, y, start, turns\n    float a = atan(q.y, q.x) - radians(u_k[2]);\n    return fract(a / (2.0 * PI) * u_k[3] - u_phase);\n  }\n  if (u_type == 4) { // spiral: x, y, arms, tightness\n    float a = atan(q.y, q.x);\n    return fract(a / (2.0 * PI) * u_k[2] + length(q) * u_k[3] - u_phase);\n  }\n  if (u_type == 5) { // box: x, y, size, roundness (0 box, 0.5 circle, 1 diamond)\n    float r = u_k[3];\n    float n = r < 0.5 ? exp2(4.0 - 6.0 * r) : 2.0 - 2.0 * (r - 0.5);\n    vec2 a = abs(q) / u_k[2];\n    float m = max(a.x, a.y);\n    float norm = m <= 0.0 ? 0.0 : m * pow(pow(a.x / m, n) + pow(a.y / m, n), 1.0 / n);\n    return ramp(norm);\n  }\n  vec2 uv = P / R;\n  if (u_type == 6) { // four corners\n    float v = mix(mix(u_k[0], u_k[1], uv.x), mix(u_k[2], u_k[3], uv.x), uv.y);\n    return u_phase == 0.0 ? v : fract(v - u_phase);\n  }\n  vec2 h = P / R.y; // frame-height units from the top left\n  if (u_type == 7) { // stripes: count, angle, softness, duty\n    float f = fract(dot(h, dir(u_k[1])) * u_k[0] - u_phase);\n    float duty = u_k[3];\n    float f2 = f > 0.5 * (1.0 + duty) ? f - 1.0 : f;\n    float e = min(f2, duty - f2);\n    return clamp(e / max(u_k[2], 1e-4) + 0.5, 0.0, 1.0);\n  }\n  if (u_type == 8) { // sine: fx, fy, angle, phase\n    vec2 d = dir(u_k[2]);\n    float x = dot(h, d), y = dot(h, vec2(-d.y, d.x));\n    float ph = u_k[3] + u_phase, s = 0.0, n = 0.0;\n    if (u_k[0] > 0.0) { s += sin(2.0 * PI * (u_k[0] * x + ph)); n += 1.0; }\n    if (u_k[1] > 0.0) { s += sin(2.0 * PI * (u_k[1] * y + ph)); n += 1.0; }\n    return 0.5 + 0.5 * s / max(n, 1.0);\n  }\n  if (u_type == 9) { // rings: x, y, count, softness\n    float f = fract(length(q) * u_k[2] - u_phase);\n    return mix(f, 0.5 - 0.5 * cos(2.0 * PI * f), u_k[3]);\n  }\n  if (u_type == 10) { // checker: cells, softness\n    vec2 c = h * u_k[0] + vec2(u_phase, 0.0);\n    float s = sin(PI * c.x) * sin(PI * c.y);\n    return u_k[1] < 1e-4 ? step(0.0, s) : clamp(0.5 + s / (2.0 * u_k[1]), 0.0, 1.0);\n  }\n  if (u_type == 11) { // fbm: scale, octaves, roughness, seed\n    vec2 p = h * u_k[0] + vec2(u_phase, 0.0);\n    float sum = 0.0, amp = 1.0, total = 0.0;\n    for (int i = 0; i < 8; i++) {\n      if (float(i) >= u_k[1]) break;\n      sum += amp * vnoise(p, seed + float(i) * 101.0);\n      total += amp;\n      amp *= u_k[2];\n      p *= 2.0;\n    }\n    return sum / max(total, 1e-4);\n  }\n  if (u_type == 12) { // ridged: scale, octaves, seed\n    vec2 p = h * u_k[0] + vec2(u_phase, 0.0);\n    float sum = 0.0, amp = 1.0, total = 0.0;\n    for (int i = 0; i < 8; i++) {\n      if (float(i) >= u_k[1]) break;\n      float n = 1.0 - abs(2.0 * vnoise(p, u_k[2] + u_seed + float(i) * 101.0) - 1.0);\n      sum += amp * n * n;\n      total += amp;\n      amp *= 0.5;\n      p *= 2.0;\n    }\n    return sum / max(total, 1e-4);\n  }\n  if (u_type == 13 || u_type == 14) { // worley: scale, seed, metric; voronoi: scale, seed\n    vec2 p = h * u_k[0] + vec2(u_phase, 0.0);\n    vec2 i = floor(p);\n    float best = 1e9, val = 0.0;\n    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {\n      vec2 c = i + vec2(x, y);\n      vec2 d = c + rnd2(c, u_k[1] + u_seed) - p;\n      float m = u_type == 13 && u_k[2] > 1.5 ? max(abs(d.x), abs(d.y)) : u_type == 13 && u_k[2] > 0.5 ? abs(d.x) + abs(d.y) : length(d);\n      if (m < best) { best = m; val = rnd(c, u_k[1] + u_seed + 31.0); }\n    }\n    return u_type == 13 ? clamp(best, 0.0, 1.0) : val;\n  }\n  if (u_type == 15) { // blocks: bw, bh, seed\n    return rnd(floor((P + vec2(u_phase * u_k[0], 0.0)) / vec2(u_k[0], u_k[1])), u_k[2] + u_seed);\n  }\n  if (u_type == 16) { // rows: size, direction (1 = columns), seed\n    float c = u_k[1] > 0.5 ? P.x : P.y;\n    return rnd(vec2(floor(c / u_k[0] + u_phase), 0.0), u_k[2] + u_seed);\n  }\n  if (u_type == 17) { // bayer: matrix (2^n), base\n    int n = int(u_k[0] + 0.5);\n    ivec2 ip = ivec2(floor(P));\n    int b = 0;\n    for (int i = 0; i < 3; i++) {\n      if (i >= n) break;\n      int sh = n - 1 - i;\n      int x = (ip.x >> i) & 1, y = (ip.y >> i) & 1;\n      b |= ((x ^ y) << (2 * sh + 1)) | (y << (2 * sh));\n    }\n    float size = float(1 << (2 * n));\n    return u_k[1] > (float(b) + 0.5) / size ? 1.0 : 0.0;\n  }\n  if (u_type == 18) return lumaAt(u_t, P / R); // self: the luma of frame t\n  if (u_type == 19) { // motion: gain, frames\n    float s = 0.0;\n    int K = int(u_k[1] + 0.5);\n    for (int k = 0; k < 8; k++) {\n      if (k >= K) break;\n      if (layerOf(u_t - k - 1) < 0) break;\n      s += abs(lumaAt(u_t - k, P / R) - lumaAt(u_t - k - 1, P / R));\n    }\n    return clamp(s / float(K) * u_k[0], 0.0, 1.0);\n  }\n  return 0.0; // subject maps: phase 8\n}\n\nfloat custom(vec2 P) {\n  vec2 R = u_res;\n  vec2 p = P - R * 0.5 - u_pos * R;\n  float a = radians(-u_crot);\n  p = mat2(cos(a), sin(a), -sin(a), cos(a)) * p / max(u_scale, 1e-3);\n  p *= u_flip;\n  vec2 uv;\n  if (u_fit == 2) uv = p / R + 0.5;\n  else {\n    float s = u_fit == 0 ? max(R.x / u_csize.x, R.y / u_csize.y) : min(R.x / u_csize.x, R.y / u_csize.y);\n    uv = p / (u_csize * s) + 0.5;\n  }\n  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return u_outside;\n  return texture(u_custom, vec3(uv, u_layer)).r;\n}\n\nvoid main() {\n  vec2 R = u_res;\n  vec2 uv = v_uv + u_offset;\n  // Tile: each tile has the full map; mirror: every second tile is flipped.\n  vec2 tu = uv * u_tile;\n  vec2 f = fract(tu);\n  if (u_mirror) f = mix(f, 1.0 - f, mod(floor(tu), 2.0));\n  vec2 P = f * R;\n  if (u_src == 1) { o = vec4(custom(P)); return; }\n  // Animation: rotate and scale about the frame centre.\n  vec2 c = R * 0.5;\n  float a = radians(-u_rot);\n  P = c + mat2(cos(a), sin(a), -sin(a), cos(a)) * (P - c) / u_pulse;\n  o = vec4(builtin(P));\n}\n";
+const BLUR_FRAG = "// Map blur (plan §7.5): one direction of a separable Gaussian (sigma = radius / 2).\nprecision highp float;\nuniform highp sampler2D u_in;\nuniform vec2 u_dir; // (1, 0) or (0, 1)\nuniform float u_radius;\nin vec2 v_uv;\nout vec4 o;\n\nvoid main() {\n  ivec2 size = textureSize(u_in, 0);\n  ivec2 p = ivec2(floor(v_uv * vec2(size)));\n  float sigma = max(u_radius * 0.5, 0.5);\n  float sum = 0.0, wsum = 0.0;\n  int r = int(ceil(u_radius));\n  for (int i = -64; i <= 64; i++) {\n    if (i < -r || i > r) continue;\n    ivec2 q = clamp(p + ivec2(u_dir) * i, ivec2(0), size - 1);\n    float w = exp(-float(i * i) / (2.0 * sigma * sigma));\n    sum += w * texelFetch(u_in, q, 0).r;\n    wsum += w;\n  }\n  o = vec4(sum / wsum);\n}\n";
+const ADJUST_FRAG = "// Map adjustments (plan §7.5), in the fixed order: levels -> gamma / contrast -> curve -> posterize\n// -> invert. (The transform and the tile are in mapgen.frag; the blur is mapblur.frag.)\nprecision highp float;\nuniform highp sampler2D u_in;\nuniform highp sampler2D u_curve; // 256 x 1\nuniform bool u_useCurve;\nuniform float u_black, u_white, u_gamma, u_contrast;\nuniform int u_posterize; // 0, or 2..64 levels\nuniform bool u_invert;\nin vec2 v_uv;\nout vec4 o;\n\nvoid main() {\n  float v = texelFetch(u_in, ivec2(floor(v_uv * vec2(textureSize(u_in, 0)))), 0).r;\n  v = clamp((v - u_black) / max(u_white - u_black, 1e-4), 0.0, 1.0);\n  v = pow(v, 1.0 / max(u_gamma, 1e-3));\n  float k = tan((u_contrast + 1.0) * 0.785398); // contrast -1..1 -> slope 0..inf (0 -> 1)\n  v = clamp((v - 0.5) * k + 0.5, 0.0, 1.0);\n  if (u_useCurve) {\n    float x = v * 255.0;\n    float i = floor(min(x, 254.0));\n    v = mix(texelFetch(u_curve, ivec2(int(i), 0), 0).r, texelFetch(u_curve, ivec2(int(i) + 1, 0), 0).r, x - i);\n  }\n  if (u_posterize > 1) v = min(floor(v * float(u_posterize)), float(u_posterize - 1)) / float(u_posterize - 1);\n  if (u_invert) v = 1.0 - v;\n  o = vec4(v);\n}\n";
+const FITS = { fill: 0, fit: 1, stretch: 2 };
+
+class MapGen {
+  constructor(engine) {
+    this.e = engine;
+    const gl = (this.gl = engine.gl);
+    this.float = engine.caps.floatTargets;
+    this.gen = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\nprecision highp int;\n${STORE_GLSL}\n${GEN_FRAG}`);
+    this.blur = program(gl, QUAD_VERT, `#version 300 es\n${BLUR_FRAG}`);
+    this.adjust = program(gl, QUAD_VERT, `#version 300 es\n${ADJUST_FRAG}`);
+    this.curveTex = gl.createTexture();
+    this.curveKey = '';
+    this.custom = null; // { tex, w, h, layers, count, rotation }
+    this.emptyCustom = this.makeArray(1, 1, 1);
+    this.targets = null;
+  }
+
+  // A map texture (R32F, or RGBA8 without float targets).
+  makeTarget(w, h) {
+    const gl = this.gl;
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, this.float ? gl.R32F : gl.RGBA8, w, h);
+    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
+    return t;
+  }
+
+  makeArray(w, h, layers) {
+    const gl = this.gl;
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
+    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, w, h, layers);
+    texParams(gl, gl.TEXTURE_2D_ARRAY);
+    return t;
+  }
+
+  // The work textures for a size: { w, h, raw, a, b }.
+  work(w, h) {
+    const gl = this.gl;
+    if (this.targets && this.targets.w === w && this.targets.h === h) return this.targets;
+    if (this.targets) for (const k of ['raw', 'a', 'b']) gl.deleteTexture(this.targets[k]);
+    this.targets = { w, h, raw: this.makeTarget(w, h), a: this.makeTarget(w, h), b: this.makeTarget(w, h) };
+    return this.targets;
+  }
+
+  into(tex, w, h) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.e.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.viewport(0, 0, w, h);
+  }
+
+  // Custom map: allocate for count frames of w x h (an image: count 1).
+  beginCustom(w, h, count, rotation = 0) {
+    this.clearCustom();
+    this.custom = { tex: this.makeArray(w, h, count), w, h, layers: count, count: 0, rotation };
+    return this.custom;
+  }
+
+  clearCustom() {
+    if (this.custom) this.gl.deleteTexture(this.custom.tex);
+    this.custom = null;
+  }
+
+  // Put a picture (ImageBitmap or VideoFrame) into layer i of the custom map, as luma.
+  putCustom(i, source, rotation) {
+    const gl = this.gl;
+    const e = this.e;
+    const c = this.custom;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, e.src);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    texParams(gl, gl.TEXTURE_2D, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR);
+    gl.useProgram(e.upload.prog);
+    gl.uniform1i(e.upload.u.u_src, 0);
+    gl.uniform1i(e.upload.u.u_rot, rotation || 0);
+    gl.uniform1i(e.upload.u.u_mode, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, e.fb);
+    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, c.tex, 0, i);
+    gl.viewport(0, 0, c.w, c.h);
+    drawQuad(gl);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    c.count = Math.max(c.count, i + 1);
+  }
+
+  curve(points) {
+    const gl = this.gl;
+    const key = JSON.stringify(points);
+    if (key === this.curveKey) return;
+    this.curveKey = key;
+    const table = curveTable(points);
+    gl.bindTexture(gl.TEXTURE_2D, this.curveTex);
+    if (this.float) gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, 256, 1, 0, gl.RED, gl.FLOAT, table);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 256, 1, 0, gl.RED, gl.UNSIGNED_BYTE, Uint8Array.from(table, (v) => Math.round(v * 255)));
+    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
+  }
+
+  // Render the map of frame t (map: the map settings) into out (w x h).
+  run(map, t, out, w, h) {
+    const gl = this.gl;
+    const e = this.e;
+    const W = this.work(w, h);
+    const A = map.adjust, an = map.anim;
+    const custom = (map.source === 'image' || map.source === 'video') && this.custom && this.custom.count;
+
+    // 1. Generate.
+    const g = this.gen;
+    this.into(W.raw, w, h);
+    gl.useProgram(g.prog);
+    e.bindStore(g);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, e.layersTex);
+    gl.uniform1i(g.u.u_layers, 4);
+    gl.uniform1i(g.u.u_n, e.n);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, custom ? this.custom.tex : this.emptyCustom);
+    gl.uniform1i(g.u.u_custom, 5);
+    gl.uniform2f(g.u.u_res, w, h);
+    gl.uniform1i(g.u.u_t, t);
+    gl.uniform1i(g.u.u_src, custom ? 1 : 0);
+    gl.uniform2f(g.u.u_offset, A.offsetX, A.offsetY);
+    gl.uniform2f(g.u.u_tile, Math.max(1, A.tileX), Math.max(1, A.tileY));
+    gl.uniform1i(g.u.u_mirror, A.mirrorTile ? 1 : 0);
+    if (custom) {
+      const c = this.custom, im = map.image;
+      const layer = map.source === 'video' ? videoMapFrame(t, c.count, map.video.speed, map.video.offset, map.video.end) : 0;
+      gl.uniform1f(g.u.u_layer, layer);
+      gl.uniform2f(g.u.u_csize, c.w, c.h);
+      gl.uniform1i(g.u.u_fit, FITS[im.fit] ?? 0);
+      gl.uniform1f(g.u.u_outside, im.outside);
+      gl.uniform2f(g.u.u_pos, im.x, im.y);
+      gl.uniform1f(g.u.u_scale, im.scale);
+      gl.uniform1f(g.u.u_crot, im.rotation);
+      gl.uniform2f(g.u.u_flip, im.flipX ? -1 : 1, im.flipY ? -1 : 1);
+    } else {
+      const type = MAP_INDEX[map.type] ?? 0;
+      const k = new Float32Array(12);
+      k.set(paramArray(map.type, map.params[map.type]));
+      gl.uniform1i(g.u.u_type, type);
+      gl.uniform1fv(g.u['u_k[0]'], k);
+      gl.uniform1f(g.u.u_phase, an.phaseSpeed * t);
+      gl.uniform1f(g.u.u_rot, an.rotSpeed * t);
+      gl.uniform1f(g.u.u_pulse, 1 + an.pulseAmount * Math.sin((2 * Math.PI * t) / Math.max(1, an.pulsePeriod)));
+      gl.uniform1f(g.u.u_seed, an.seedEvery > 0 ? Math.floor(t / an.seedEvery) : 0);
+    }
+    drawQuad(gl);
+
+    // 2. Blur (two passes).
+    let src = W.raw;
+    if (A.blur > 0) {
+      gl.useProgram(this.blur.prog);
+      gl.uniform1f(this.blur.u.u_radius, Math.min(64, A.blur));
+      gl.uniform1i(this.blur.u.u_in, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      this.into(W.a, w, h);
+      gl.bindTexture(gl.TEXTURE_2D, W.raw);
+      gl.uniform2f(this.blur.u.u_dir, 1, 0);
+      drawQuad(gl);
+      this.into(W.b, w, h);
+      gl.bindTexture(gl.TEXTURE_2D, W.a);
+      gl.uniform2f(this.blur.u.u_dir, 0, 1);
+      drawQuad(gl);
+      src = W.b;
+    }
+
+    // 3. Adjust.
+    const ad = this.adjust;
+    const pts = Array.isArray(A.curve) ? A.curve : CURVE_PRESETS[A.curve] || CURVE_PRESETS.linear;
+    const useCurve = JSON.stringify(pts) !== JSON.stringify(CURVE_PRESETS.linear);
+    if (useCurve) this.curve(pts);
+    this.into(out, w, h);
+    gl.useProgram(ad.prog);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.curveTex);
+    gl.uniform1i(ad.u.u_in, 0);
+    gl.uniform1i(ad.u.u_curve, 1);
+    gl.uniform1i(ad.u.u_useCurve, useCurve ? 1 : 0);
+    gl.uniform1f(ad.u.u_black, A.black);
+    gl.uniform1f(ad.u.u_white, A.white);
+    gl.uniform1f(ad.u.u_gamma, A.gamma);
+    gl.uniform1f(ad.u.u_contrast, Math.max(-0.99, Math.min(0.99, A.contrast)));
+    gl.uniform1i(ad.u.u_posterize, A.posterize);
+    gl.uniform1i(ad.u.u_invert, A.invert ? 1 : 0);
+    drawQuad(gl);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // Thumbnails (plan §12.4): each map of the list at w x h for frame t, as luma bytes.
+  thumbs(list, t, w, h) {
+    const gl = this.gl;
+    const out = this.makeTarget(w, h);
+    const save = this.targets;
+    this.targets = null;
+    const res = [];
+    const px = new Float32Array(w * h * 4);
+    const px8 = new Uint8Array(w * h * 4);
+    for (const map of list) {
+      this.run(map, t, out, w, h);
+      this.into(out, w, h);
+      const y = new Uint8Array(w * h);
+      if (this.float) {
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, px);
+        for (let i = 0; i < w * h; i++) y[i] = Math.round(Math.max(0, Math.min(1, px[i * 4])) * 255);
+      } else {
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px8);
+        for (let i = 0; i < w * h; i++) y[i] = px8[i * 4];
+      }
+      res.push(y);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (this.targets) for (const k of ['raw', 'a', 'b']) gl.deleteTexture(this.targets[k]);
+    this.targets = save;
+    gl.deleteTexture(out);
+    return res;
+  }
+}
+
+return { MapGen };
+})();
+
 // ---- gpu/engine.js
 const { Engine } = (() => {
 // The GPU engine (plan §5.1, §6.3, §6.4). It owns the WebGL2 context of the preview canvas and the
@@ -236,17 +616,23 @@ const { Engine } = (() => {
 //   { cmd: 'render', index, delay }        tests: the stored frame index - delay            -> { cmd: 'rendered', index }
 //   { cmd: 'settings', settings }          the effect settings; renders the last frame again -> { cmd: 'rendered' }
 //   { cmd: 'read' }                        render again and read the canvas (tests)         -> { cmd: 'pixels', width, height, pixels }
+//   { cmd: 'mapImage', bitmap }                       custom map: an image (luma)        -> { cmd: 'map', w, h, count }
+//   { cmd: 'mapVideoBegin', width, height, count }    custom map: a video of count frames -> { cmd: 'map', ... }
+//   { cmd: 'mapVideoFrame', i, frame, rotation }      one frame of it                     -> { cmd: 'map', ... }
+//   { cmd: 'mapClear' }
+//   { cmd: 'thumbs', maps, t, width, height }  map thumbnails (luma bytes)                -> { cmd: 'thumbs', images }
 //   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }
+
+
 
 
 
 
 const QUAD_VERT = "#version 300 es\n// One triangle that covers the target. v_uv: 0..1, v = 0 at the first row (image top, in texture space).\nout vec2 v_uv;\nvoid main() {\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  v_uv = p;\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n}\n";
 const UPLOAD_FRAG = "#version 300 es\n// Store upload (plan §6.3): the source frame (RGB, as the browser gives it), turned to the display\n// orientation and scaled to the working size, to BT.709 full-range Y (u_mode 0) or CbCr (u_mode 1).\nprecision highp float;\nuniform sampler2D u_src;\nuniform int u_rot;   // 0, 90, 180, 270: clockwise turn of the display picture\nuniform int u_mode;\nin vec2 v_uv;\nout vec4 o;\n\nvec2 srcUv(vec2 d) {\n  if (u_rot == 90) return vec2(d.y, 1.0 - d.x);\n  if (u_rot == 180) return vec2(1.0 - d.x, 1.0 - d.y);\n  if (u_rot == 270) return vec2(1.0 - d.y, d.x);\n  return d;\n}\n\nvoid main() {\n  vec3 c = texture(u_src, srcUv(v_uv)).rgb;\n  float y = dot(c, vec3(0.2126, 0.7152, 0.0722));\n  if (u_mode == 0) o = vec4(y, 0.0, 0.0, 1.0);\n  else o = vec4((c.b - y) / 1.8556 + 0.5, (c.r - y) / 1.5748 + 0.5, 0.0, 1.0);\n}\n";
-const STORE_GLSL = "// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\nuniform highp sampler2DArray u_storeY;\nuniform highp sampler2DArray u_storeC;\n\nvec3 storeRgb(vec2 uv, float layer) {\n  float y = texture(u_storeY, vec3(uv, layer)).r;\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\n}\n";
+const STORE_GLSL = "// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\nuniform highp sampler2DArray u_storeY;\nuniform highp sampler2DArray u_storeC;\nuniform highp isampler2D u_layers; // N x 1: the frame index in each store layer\nuniform int u_n;\n\nvec3 storeRgb(vec2 uv, float layer) {\n  float y = texture(u_storeY, vec3(uv, layer)).r;\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\n}\n\n// The layer of frame k, or -1 when frame k is not in the store (or k < 0).\nint layerOf(int k) {\n  if (k < 0 || u_n < 1) return -1;\n  int l = k % u_n;\n  return texelFetch(u_layers, ivec2(l, 0), 0).r == k ? l : -1;\n}\n\n// The colour of frame k at uv, and a = 1 when frame k is in the store (else black, a = 0).\nvec4 frameAt(int k, vec2 uv) {\n  int l = layerOf(k);\n  return l < 0 ? vec4(0.0) : vec4(storeRgb(uv, float(l)), 1.0);\n}\n\n// The luma of frame k at uv (0 when not in the store).\nfloat lumaAt(int k, vec2 uv) {\n  int l = layerOf(k);\n  return l < 0 ? 0.0 : texture(u_storeY, vec3(uv, float(l))).r;\n}\n";
 const SHOW_FRAG = "// Preview of one stored frame (Original view; the debug delay view of phase 3). u_layer < 0: black\n// (the frame is not in the store, or it is before frame 0: \"not online\", D8).\nuniform float u_layer;\nin vec2 v_uv;\nout vec4 o;\n\nvoid main() {\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\n  o = u_layer < 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(storeRgb(uv, u_layer), 1.0);\n}\n";
-const MAP_FRAG = "#version 300 es\n// Built-in map (plan §7.3): Linear. The map value v (0..1) for each pixel of the working size.\n// Linear: v grows along the direction of 'angle' (0° = to the right, 90° = down). The point (x, y)\n// (0..1 of the frame) has v = 0.5. 'width' = the length of the ramp, as a part of the frame extent\n// along that direction (1 = the full frame).\nprecision highp float;\nuniform vec2 u_res;\nuniform float u_angle; // degrees\nuniform vec2 u_center; // 0..1\nuniform float u_width;\nin vec2 v_uv;\nout vec4 o;\n\nvoid main() {\n  vec2 p = v_uv * u_res; // pixel centre, first row at the top\n  float a = radians(u_angle);\n  vec2 d = vec2(cos(a), sin(a));\n  float span = abs(u_res.x * d.x) + abs(u_res.y * d.y);\n  float v = clamp(dot(p - u_center * u_res, d) / max(u_width * span, 1e-3) + 0.5, 0.0, 1.0);\n  o = vec4(v, v, v, 1.0);\n}\n";
-const TIMEMAP_FRAG = "// Mode 1, Time Map (plan §7.1). For each pixel: d = map value × Max delay (frames, after the delay\n// steps), src = t − d. src < 0: black (not online, D8). Frame blend: mix the two frames around src;\n// else the frame t − round(d). Each frame comes from the store at the same pixel. A frame that is not\n// in the store is black. u_view: 0 = result, 1 = original (frame t), 2 = the map.\nuniform sampler2D u_map;\nuniform highp isampler2D u_layers; // N x 1: the frame index in each store layer\nuniform int u_n;\nuniform int u_t;\nuniform float u_max;\nuniform int u_steps;\nuniform bool u_blend;\nuniform int u_view;\nin vec2 v_uv;\nout vec4 o;\n\n// The color of frame k at uv, and in.a = 1 when frame k is in the store.\nvec4 frameAt(int k, vec2 uv) {\n  if (k < 0) return vec4(0.0);\n  int l = k % u_n;\n  if (texelFetch(u_layers, ivec2(l, 0), 0).r != k) return vec4(0.0);\n  return vec4(storeRgb(uv, float(l)), 1.0);\n}\n\nvoid main() {\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\n  if (u_view == 1) { o = vec4(frameAt(u_t, uv).rgb, 1.0); return; }\n  float v = texture(u_map, uv).r;\n  if (u_view == 2) { o = vec4(v, v, v, 1.0); return; }\n  if (u_steps > 1) v = min(floor(v * float(u_steps)), float(u_steps - 1)) / float(u_steps - 1);\n  float d = v * u_max;\n  float src = float(u_t) - d;\n  if (src < -1e-3) { o = vec4(0.0, 0.0, 0.0, 1.0); return; } // the epsilon: float error of v × Max\n  src = max(src, 0.0);\n  vec3 c;\n  if (u_blend) {\n    float k0 = floor(src);\n    float f = src - k0;\n    c = frameAt(int(k0), uv).rgb;\n    if (f > 0.0) c = mix(c, frameAt(int(k0) + 1, uv).rgb, f);\n  } else {\n    c = frameAt(u_t - int(floor(d + 0.5)), uv).rgb;\n  }\n  o = vec4(c, 1.0);\n}\n";
+const TIMEMAP_FRAG = "// Mode 1, Time Map (plan §7.1). For each pixel: d = map value × Max delay (frames, after the delay\n// steps), src = t − d. src < 0: black (not online, D8). Frame blend: mix the two frames around src;\n// else the frame t − round(d). Each frame comes from the store at the same pixel. A frame that is not\n// in the store is black. u_view: 0 = result, 1 = original (frame t), 2 = the map.\nuniform highp sampler2D u_map;\nuniform int u_t;\nuniform float u_max;\nuniform int u_steps;\nuniform bool u_blend;\nuniform int u_view;\nin vec2 v_uv;\nout vec4 o;\n\nvoid main() {\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\n  if (u_view == 1) { o = vec4(frameAt(u_t, uv).rgb, 1.0); return; }\n  float v = texture(u_map, uv).r;\n  if (u_view == 2) { o = vec4(v, v, v, 1.0); return; }\n  if (u_steps > 1) v = min(floor(v * float(u_steps)), float(u_steps - 1)) / float(u_steps - 1);\n  float d = v * u_max;\n  float src = float(u_t) - d;\n  if (src < -1e-3) { o = vec4(0.0, 0.0, 0.0, 1.0); return; } // the epsilon: float error of v × Max\n  src = max(src, 0.0);\n  vec3 c;\n  if (u_blend) {\n    float k0 = floor(src);\n    float f = src - k0;\n    c = frameAt(int(k0), uv).rgb;\n    if (f > 0.0) c = mix(c, frameAt(int(k0) + 1, uv).rgb, f);\n  } else {\n    c = frameAt(u_t - int(floor(d + 0.5)), uv).rgb;\n  }\n  o = vec4(c, 1.0);\n}\n";
 const VIEWS = { result: 0, original: 1, map: 2 };
 
 class Engine {
@@ -261,9 +647,9 @@ class Engine {
     this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);
     this.show = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${SHOW_FRAG}`);
     this.timemap = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${TIMEMAP_FRAG}`);
-    this.mapProg = program(gl, QUAD_VERT, MAP_FRAG);
+    this.mapgen = new MapGen(this);
     this.mapTex = null;
-    this.mapDirty = true;
+    this.mapKey = '';
     this.layersTex = null;
     this.settings = null;
     this.vao = gl.createVertexArray();
@@ -296,11 +682,32 @@ class Engine {
     if (m.cmd === 'settings') {
       const old = this.settings;
       this.settings = m.settings;
-      if (!old || JSON.stringify(old.map) !== JSON.stringify(m.settings.map)) this.mapDirty = true;
       if (this.n && this.last.index >= 0) this.render(this.last.index, this.last.delay);
       return { cmd: 'rendered', index: this.last.index };
     }
     if (m.cmd === 'read') return this.read();
+    if (m.cmd === 'mapImage') {
+      const b = m.bitmap;
+      const s = Math.min(1, 2048 / Math.max(b.width, b.height));
+      const c = this.mapgen.beginCustom(Math.max(1, Math.round(b.width * s)), Math.max(1, Math.round(b.height * s)), 1);
+      this.mapgen.putCustom(0, b, 0);
+      b.close();
+      return this.mapChanged(c);
+    }
+    if (m.cmd === 'mapVideoBegin') return this.mapChanged(this.mapgen.beginCustom(m.width, m.height, m.count));
+    if (m.cmd === 'mapVideoFrame') {
+      try {
+        this.mapgen.putCustom(m.i, m.frame, m.rotation);
+      } finally {
+        m.frame.close();
+      }
+      return this.mapChanged(this.mapgen.custom);
+    }
+    if (m.cmd === 'mapClear') {
+      this.mapgen.clearCustom();
+      return this.mapChanged(null);
+    }
+    if (m.cmd === 'thumbs') return { cmd: 'thumbs', images: this.mapgen.thumbs(m.maps, m.t, m.width, m.height) };
     return null;
   }
 
@@ -355,7 +762,7 @@ class Engine {
     if (this.caps.floatTargets) gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);
     else gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
     texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
-    this.mapDirty = true;
+    this.mapKey = '';
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -416,25 +823,25 @@ class Engine {
     drawQuad(gl);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.layerFrame[layer] = index;
+    if (this.settings && isDynamic(this.settings.map)) this.mapKey = ''; // self / motion read the store
     gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));
   }
 
-  // Render the map into its texture (once for each change of the map settings).
-  renderMap() {
-    const gl = this.gl;
-    const m = (this.settings && this.settings.map.linear) || { angle: 90, x: 0.5, y: 0.5, width: 1 };
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.mapTex, 0);
-    gl.viewport(0, 0, this.w, this.h);
-    gl.useProgram(this.mapProg.prog);
-    gl.uniform2f(this.mapProg.u.u_res, this.w, this.h);
-    gl.uniform1f(this.mapProg.u.u_angle, m.angle);
-    gl.uniform2f(this.mapProg.u.u_center, m.x, m.y);
-    gl.uniform1f(this.mapProg.u.u_width, m.width);
-    drawQuad(gl);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this.mapDirty = false;
+  mapChanged(c) {
+    this.mapKey = '';
+    return { cmd: 'map', ...(c ? { w: c.w, h: c.h, count: c.count, layers: c.layers } : { count: 0 }) };
+  }
+
+  // The map of frame t: rendered again when its settings change, and for each frame when it is
+  // dynamic (animation, self, motion, video map).
+  updateMap(t) {
+    if (!this.settings) return;
+    const map = this.settings.map;
+    const key = JSON.stringify(map) + (isDynamic(map) ? `@${t}` : '');
+    if (key === this.mapKey) return;
+    this.mapgen.run(map, t, this.mapTex, this.w, this.h);
+    this.mapKey = key;
   }
 
   // The layer of frame t, or -1 when it is not in the store (or t < 0).
@@ -458,7 +865,7 @@ class Engine {
   render(index, delay) {
     const gl = this.gl;
     this.last = { index, delay };
-    if (this.mapDirty) this.renderMap();
+    this.updateMap(index);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.w, this.h);
     if (delay !== undefined || !this.settings) {
@@ -501,7 +908,9 @@ return { Engine };
 
 // ---- app/settings.js
 const { DEFAULTS, clone, getPath, setPath, fixSteps } = (() => {
-// The settings (plan §7.2, §7.3). One plain object, so presets and undo (phase 11) can copy it.
+// The settings (plan §7.2 – §7.6). One plain object, so presets and undo (phase 11) can copy it.
+
+
 
 const DEFAULTS = {
   mode: 'timemap', // 'timemap' | 'slitscan' (phase 7)
@@ -512,8 +921,13 @@ const DEFAULTS = {
     blend: true, // frame blend
   },
   map: {
-    type: 'linear',
-    linear: { angle: 90, x: 0.5, y: 0.5, width: 1 },
+    source: 'builtin', // 'builtin' | 'image' | 'video'
+    type: 'linear', // a MAPS id (maps/builtin.js)
+    params: defaultParams(), // the params of each built-in map
+    image: { name: '', fit: 'fill', outside: 0, x: 0, y: 0, scale: 1, rotation: 0, flipX: false, flipY: false }, // image and video maps
+    video: { name: '', speed: 1, offset: 0, end: 'loop' },
+    adjust: { invert: false, black: 0, white: 1, gamma: 1, contrast: 0, curve: 'linear', posterize: 0, blur: 0, tileX: 1, tileY: 1, mirrorTile: false, offsetX: 0, offsetY: 0 },
+    anim: { phaseSpeed: 0, rotSpeed: 0, pulseAmount: 0, pulsePeriod: 60, seedEvery: 0 },
   },
 };
 
@@ -897,6 +1311,77 @@ class Player {
 return { makeWorker, Player };
 })();
 
+// ---- maps/mapsource.js
+const { loadImageMap, videoMapSize, loadVideoMap } = (() => {
+// Custom maps (plan §7.4): an image file (PNG / JPEG / WebP) or a video file (MP4 / MOV). The GPU
+// engine keeps them as luma (BT.709) in an R8 texture array. A video map is decoded fully once, at
+// load (with progress), so that each frame of the source has its map frame at once.
+
+
+
+const VIDEO_MAP_BUDGET = 256 * 1048576;
+
+async function loadImageMap(file, gpu) {
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    throw new Error('This image file cannot be read (PNG, JPEG, or WebP).');
+  }
+  return gpu.call({ cmd: 'mapImage', bitmap }, [bitmap]);
+}
+
+// The size and frame count for a video map of w x h with n frames: the short side at most `short`,
+// all frames in the budget and in the texture layer limit.
+function videoMapSize(w, h, n, short, maxLayers, budget = VIDEO_MAP_BUDGET) {
+  const s = Math.min(1, short / Math.min(w, h));
+  let width = Math.max(2, Math.round(w * s)), height = Math.max(2, Math.round(h * s));
+  const count = Math.max(1, Math.min(n, maxLayers, Math.floor(budget / (width * height)) || 1));
+  return { width, height, count };
+}
+
+// opts: { workerSrc, short, maxLayers, onProgress(fraction) }. Resolves with { count, width, height, frames }.
+function loadVideoMap(file, gpu, opts) {
+  const wk = makeWorker(opts.workerSrc);
+  return new Promise((resolve, reject) => {
+    let size = null;
+    let done = 0;
+    const fail = (msg) => {
+      wk.terminate();
+      reject(new Error(msg));
+    };
+    wk.onerror = (e) => fail(e.message || 'Decode worker failed.');
+    wk.onmessage = async (e) => {
+      const m = e.data;
+      if (m.cmd === 'error') return fail(m.message);
+      if (m.cmd === 'info') {
+        size = videoMapSize(m.width, m.height, m.times.length, opts.short, opts.maxLayers);
+        size.frames = m.times.length;
+        size.rotation = m.rotation;
+        await gpu.call({ cmd: 'mapVideoBegin', width: size.width, height: size.height, count: size.count });
+        wk.postMessage({ cmd: 'play', job: 1, from: 0, to: size.count - 1 });
+      } else if (m.cmd === 'frame') {
+        try {
+          await gpu.call({ cmd: 'mapVideoFrame', i: m.index, frame: m.frame, rotation: size.rotation }, [m.frame]);
+        } catch (err) {
+          return fail(err.message);
+        }
+        wk.postMessage({ cmd: 'ack' });
+        done++;
+        if (opts.onProgress) opts.onProgress(done / size.count);
+      } else if (m.cmd === 'done') {
+        wk.terminate();
+        await gpu.call({ cmd: 'caps' }); // the replies come in order: all frames are in
+        resolve(size);
+      }
+    };
+    wk.postMessage({ cmd: 'open', file });
+  });
+}
+
+return { loadImageMap, videoMapSize, loadVideoMap };
+})();
+
 // ---- app/gpu-client.js
 const { GpuClient } = (() => {
 // The page side of the GPU engine: the GPU worker when the browser has OffscreenCanvas with WebGL2,
@@ -1209,56 +1694,158 @@ return { slider, segmented, toggle, section };
 })();
 
 // ---- app/ui/inspector.js
-const { Inspector } = (() => {
-// The inspector (plan §12.4): the settings of the open sections. Phase 4: Mode, Map (Linear), Time.
+const { THUMB_W, THUMB_H, Inspector } = (() => {
+// The inspector (plan §12.4): Mode, Map (source, map grid with thumbnails, params, fit and transform,
+// adjustments, animation), Time. Settings that do not apply are hidden (§12.1).
 
 
 
+
+
+
+const THUMB_W = 72;
+const THUMB_H = 40;
+
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+};
 
 class Inspector {
-  // change(path, value): the app applies a setting change.
-  constructor(root, change) {
+  // app: { change(path, value), openMap(kind), info() -> { mapName, mapFrames } }
+  constructor(root, app) {
     this.root = root;
-    this.change = change;
+    this.app = app;
     this.rows = {};
+    this.tiles = {}; // map id -> canvas
   }
 
   // limits: { maxDelay } (the store limit, N - 1).
   build(settings, limits) {
     const S = settings;
     const r = this.root;
+    const open = {};
+    for (const d of r.querySelectorAll('details[data-name]')) open[d.dataset.name] = d.open;
     r.textContent = '';
     this.rows = {};
+    this.tiles = {};
     const add = (parent, row) => {
       this.rows[row.dataset.key] = row;
       parent.append(row);
       return row;
     };
-    const on = (key) => (v) => this.change(key, v);
+    const on = (key) => (v) => this.app.change(key, v);
+    const sec = (name, title, def = true) => {
+      const d = section(title, open[name] ?? def);
+      d.dataset.name = name;
+      r.append(d);
+      return d;
+    };
+    const num = (parent, key, label, min, max, step, def, unit) => add(parent, slider({ key, label, min, max, step, value: getPath(S, key), def, unit, onChange: on(key) }));
+    const bool = (parent, key, label) => add(parent, toggle({ key, label, value: getPath(S, key), onChange: on(key) }));
 
-    const mode = section('Mode');
+    const mode = sec('mode', 'Mode');
     add(mode, segmented({ key: 'mode', options: [['timemap', 'Time Map'], ['slitscan', 'Slit Scan', true]], value: S.mode, onChange: on('mode') }));
-    r.append(mode);
 
-    const map = section('Map');
-    add(map, segmented({ key: 'map.type', label: 'Map', options: [['linear', 'Linear']], value: S.map.type, onChange: on('map.type') }));
-    const L = S.map.linear;
-    add(map, slider({ key: 'map.linear.angle', label: 'Angle', min: 0, max: 360, step: 1, value: L.angle, def: 90, unit: '°', onChange: on('map.linear.angle') }));
-    add(map, slider({ key: 'map.linear.x', label: 'Position x', min: 0, max: 1, step: 0.01, value: L.x, def: 0.5, onChange: on('map.linear.x') }));
-    add(map, slider({ key: 'map.linear.y', label: 'Position y', min: 0, max: 1, step: 0.01, value: L.y, def: 0.5, onChange: on('map.linear.y') }));
-    add(map, slider({ key: 'map.linear.width', label: 'Width', min: 0.05, max: 4, step: 0.01, value: L.width, def: 1, onChange: on('map.linear.width') }));
-    r.append(map);
+    // Map.
+    const M = S.map;
+    const map = sec('map', 'Map');
+    add(map, segmented({ key: 'map.source', label: 'Source', options: [['builtin', 'Built-in'], ['image', 'Image'], ['video', 'Video']], value: M.source, onChange: on('map.source') }));
+    if (M.source === 'builtin') {
+      const grid = el('div', 'mapGrid');
+      for (const m of MAPS) {
+        const b = el('button', 'mapTile');
+        b.type = 'button';
+        b.dataset.map = m.id;
+        b.title = m.needs ? `${m.name} (needs Cutout: a later version)` : m.name;
+        b.disabled = !!m.needs;
+        b.classList.toggle('on', m.id === M.type);
+        const c = el('canvas');
+        c.width = THUMB_W;
+        c.height = THUMB_H;
+        this.tiles[m.id] = c;
+        b.append(c, el('span', null, m.name));
+        b.addEventListener('click', () => this.app.change('map.type', m.id));
+        grid.append(b);
+      }
+      map.append(grid);
+      const spec = MAPS.find((m) => m.id === M.type);
+      for (const [k, label, min, max, step, def, unit] of spec.params) num(map, `map.params.${M.type}.${k}`, label, min, max, step, def, unit);
+      if (M.type === 'self') map.append(el('p', 'note', 'Bright = old. Use Invert (Adjust) for bright = new.'));
+    } else {
+      const info = this.app.info();
+      const row = el('div', 'setting fileRow');
+      const btn = el('button', null, M.source === 'image' ? 'Open image…' : 'Open video…');
+      btn.type = 'button';
+      btn.dataset.act = `open-${M.source}`;
+      btn.addEventListener('click', () => this.app.openMap(M.source));
+      const name = M.source === 'image' ? M.image.name : M.video.name;
+      row.append(btn, el('span', 'fileName', name ? `${name}${M.source === 'video' && info.mapFrames ? ` · ${info.mapFrames} frames` : ''}` : 'No file'));
+      map.append(row);
+      add(map, segmented({ key: 'map.image.fit', label: 'Fit', options: [['fill', 'Fill'], ['fit', 'Fit'], ['stretch', 'Stretch']], value: M.image.fit, onChange: on('map.image.fit') }));
+      num(map, 'map.image.outside', 'Outside value', 0, 1, 0.01, 0);
+      num(map, 'map.image.x', 'Position x', -1, 1, 0.01, 0);
+      num(map, 'map.image.y', 'Position y', -1, 1, 0.01, 0);
+      num(map, 'map.image.scale', 'Scale', 0.1, 8, 0.01, 1);
+      num(map, 'map.image.rotation', 'Rotation', -180, 180, 1, 0, '°');
+      bool(map, 'map.image.flipX', 'Flip horizontal');
+      bool(map, 'map.image.flipY', 'Flip vertical');
+      if (M.source === 'video') {
+        num(map, 'map.video.speed', 'Speed', -4, 4, 0.05, 1, '×');
+        num(map, 'map.video.offset', 'Offset', -1000, 1000, 1, 0, 'f');
+        add(map, segmented({ key: 'map.video.end', label: 'End', options: [['loop', 'Loop'], ['hold', 'Hold last'], ['pingpong', 'Ping-pong']], value: M.video.end, onChange: on('map.video.end') }));
+      }
+    }
 
-    const time = section('Time');
+    const adj = sec('adjust', 'Map adjust', false);
+    bool(adj, 'map.adjust.invert', 'Invert');
+    num(adj, 'map.adjust.black', 'Black point', 0, 1, 0.01, 0);
+    num(adj, 'map.adjust.white', 'White point', 0, 1, 0.01, 1);
+    num(adj, 'map.adjust.gamma', 'Gamma', 0.1, 5, 0.01, 1);
+    num(adj, 'map.adjust.contrast', 'Contrast', -1, 1, 0.01, 0);
+    add(adj, segmented({ key: 'map.adjust.curve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: M.adjust.curve, onChange: on('map.adjust.curve') }));
+    num(adj, 'map.adjust.posterize', 'Posterize', 0, 64, 1, 0);
+    num(adj, 'map.adjust.blur', 'Blur', 0, 64, 0.5, 0, 'px');
+    num(adj, 'map.adjust.tileX', 'Tile x', 1, 16, 1, 1);
+    num(adj, 'map.adjust.tileY', 'Tile y', 1, 16, 1, 1);
+    bool(adj, 'map.adjust.mirrorTile', 'Mirror tile');
+    num(adj, 'map.adjust.offsetX', 'Offset x', -1, 1, 0.01, 0);
+    num(adj, 'map.adjust.offsetY', 'Offset y', -1, 1, 0.01, 0);
+
+    if (M.source === 'builtin') {
+      const an = sec('anim', 'Map animation', false);
+      num(an, 'map.anim.phaseSpeed', 'Phase speed', -0.2, 0.2, 0.001, 0, '/f');
+      num(an, 'map.anim.rotSpeed', 'Rotation speed', -10, 10, 0.1, 0, '°/f');
+      num(an, 'map.anim.pulseAmount', 'Pulse amount', 0, 1, 0.01, 0);
+      num(an, 'map.anim.pulsePeriod', 'Pulse period', 2, 600, 1, 60, 'f');
+      num(an, 'map.anim.seedEvery', 'New seed every', 0, 600, 1, 0, 'f');
+    }
+
+    const time = sec('time', 'Time');
     const T = S.timemap;
     add(time, slider({ key: 'timemap.maxDelay', label: 'Max delay', min: 0, max: limits.maxDelay, step: 1, value: Math.min(T.maxDelay, limits.maxDelay), def: Math.min(30, limits.maxDelay), unit: 'f', onChange: on('timemap.maxDelay') }));
     add(time, slider({ key: 'timemap.steps', label: 'Delay steps', min: 0, max: 64, step: 1, value: T.steps, def: 0, onChange: (v) => {
       const f = fixSteps(v, T.steps);
       this.rows['timemap.steps'].setValue(f);
-      this.change('timemap.steps', f);
+      this.app.change('timemap.steps', f);
     } }));
     add(time, toggle({ key: 'timemap.blend', label: 'Frame blend', value: T.blend, onChange: on('timemap.blend') }));
-    r.append(time);
+  }
+
+  // Draw map thumbnails: images = { id: Uint8Array luma (THUMB_W x THUMB_H) }.
+  drawThumbs(images) {
+    for (const [id, y] of Object.entries(images)) {
+      const c = this.tiles[id];
+      if (!c) continue;
+      const img = new ImageData(THUMB_W, THUMB_H);
+      for (let i = 0; i < y.length; i++) {
+        img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = y[i];
+        img.data[i * 4 + 3] = 255;
+      }
+      c.getContext('2d').putImageData(img, 0, 0);
+    }
   }
 
   // Show the values of the settings (after a change from outside).
@@ -1270,7 +1857,7 @@ class Inspector {
   }
 }
 
-return { Inspector };
+return { THUMB_W, THUMB_H, Inspector };
 })();
 
 // ---- app/main.js
@@ -1287,15 +1874,19 @@ const {  } = (() => {
 
 
 
+
+
+
 const $ = (id) => document.getElementById(id);
 const VERSION = '0.1.0';
 const DECODE_WORKER = "// ---- io/demux.js\nconst { demuxMp4, turnedCrop } = (() => {\n// MP4 / MOV reader (plan §3, §6.1). From neomosh src/mux/demux.js, with the audio track added.\n// It gives the video decoder configuration and each sample (offset, size, display time, sync flag),\n// so a VideoDecoder can decode every frame of the file, and the audio track for the pass-through\n// copy into the export (D16). Not fragmented. It returns null for other files.\n\nconst MAX_MOOV = 64 * 1048576;\n\nconst str4 = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);\nconst hex2 = (v) => v.toString(16).padStart(2, '0');\n\n// The boxes in b[from..to): [{ type, head (box start), start (content), end }].\nfunction boxes(b, from, to) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const out = [];\n  let o = from;\n  while (o + 8 <= to) {\n    let size = dv.getUint32(o);\n    const type = str4(b, o + 4);\n    let head = 8;\n    if (size === 1) {\n      size = Number(dv.getBigUint64(o + 8));\n      head = 16;\n    } else if (size === 0) size = to - o;\n    if (size < head || o + size > to) break;\n    out.push({ type, head: o, start: o + head, end: o + size });\n    o += size;\n  }\n  return out;\n}\n\nconst child = (b, box, type) => boxes(b, box.start, box.end).find((x) => x.type === type);\nconst path = (b, box, ...types) => types.reduce((x, t) => (x ? child(b, x, t) : null), box);\n\n// The top-level boxes of the file, read from their headers only.\nasync function topBoxes(blob) {\n  const out = [];\n  let o = 0;\n  while (o + 8 <= blob.size) {\n    const h = new Uint8Array(await blob.slice(o, Math.min(blob.size, o + 16)).arrayBuffer());\n    const dv = new DataView(h.buffer);\n    let size = dv.getUint32(0);\n    let head = 8;\n    if (size === 1 && h.length >= 16) {\n      size = Number(dv.getBigUint64(8));\n      head = 16;\n    } else if (size === 0) size = blob.size - o;\n    if (size < head) break;\n    out.push({ type: str4(h, 4), start: o + head, end: Math.min(blob.size, o + size) });\n    o += size;\n  }\n  return out;\n}\n\n// The codec string and the description for the VideoDecoder, from the sample entry.\nfunction videoCodecOf(b, entry) {\n  const t = entry.type;\n  const kids = boxes(b, entry.start + 78, entry.end); // after the VisualSampleEntry fields\n  const k = (type) => kids.find((x) => x.type === type);\n  if (t === 'avc1' || t === 'avc3') {\n    const c = k('avcC');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    return { codec: `avc1.${hex2(d[1])}${hex2(d[2])}${hex2(d[3])}`, description: d };\n  }\n  if (t === 'hvc1' || t === 'hev1') {\n    const c = k('hvcC');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    const space = ['', 'A', 'B', 'C'][d[1] >> 6];\n    const tier = (d[1] >> 5) & 1 ? 'H' : 'L';\n    let compat = ((d[2] << 24) | (d[3] << 16) | (d[4] << 8) | d[5]) >>> 0;\n    let rev = 0;\n    for (let i = 0; i < 32; i++, compat >>>= 1) rev = ((rev << 1) | (compat & 1)) >>> 0;\n    const cons = Array.from(d.subarray(6, 12));\n    while (cons.length && cons[cons.length - 1] === 0) cons.pop();\n    const parts = [`${t}.${space}${d[1] & 31}`, rev.toString(16), `${tier}${d[12]}`, ...cons.map((x) => x.toString(16).toUpperCase())];\n    return { codec: parts.join('.'), description: d };\n  }\n  if (t === 'vp09') {\n    const c = k('vpcC');\n    if (!c) return null;\n    const d = b.subarray(c.start + 4, c.end); // after version and flags\n    return { codec: `vp09.${String(d[0]).padStart(2, '0')}.${String(d[1]).padStart(2, '0')}.${String(d[2] >> 4).padStart(2, '0')}`, description: null };\n  }\n  if (t === 'av01') {\n    const c = k('av1C');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    const profile = d[1] >> 5, level = d[1] & 31, tier = d[2] >> 7 ? 'H' : 'M';\n    const depth = (d[2] >> 6) & 1 ? ((d[2] >> 5) & 1 ? 12 : 10) : 8;\n    return { codec: `av01.${profile}.${String(level).padStart(2, '0')}${tier}.${String(depth).padStart(2, '0')}`, description: d };\n  }\n  return null;\n}\n\n// MPEG-4 descriptor (ISO/IEC 14496-1): tag, size (1-4 bytes of 7 bits), content start.\nfunction descriptor(b, o, end) {\n  if (o + 2 > end) return null;\n  const tag = b[o++];\n  let size = 0;\n  for (let i = 0; i < 4 && o < end; i++) {\n    const v = b[o++];\n    size = (size << 7) | (v & 127);\n    if (!(v & 128)) break;\n  }\n  return { tag, start: o, end: Math.min(end, o + size) };\n}\n\n// esds -> { oti (objectTypeIndication), asc (AudioSpecificConfig bytes or null) }.\nfunction parseEsds(b, esds) {\n  const es = descriptor(b, esds.start + 4, esds.end); // after version and flags\n  if (!es || es.tag !== 3) return null;\n  const flags = b[es.start + 2];\n  let o = es.start + 3;\n  if (flags & 0x80) o += 2; // dependsOn_ES_ID\n  if (flags & 0x40) o += 1 + b[o]; // URL\n  if (flags & 0x20) o += 2; // OCR_ES_Id\n  const dc = descriptor(b, o, es.end);\n  if (!dc || dc.tag !== 4) return null;\n  const oti = b[dc.start];\n  const dsi = descriptor(b, dc.start + 13, dc.end);\n  return { oti, asc: dsi && dsi.tag === 5 ? b.slice(dsi.start, dsi.end) : null };\n}\n\n// The audio sample entry: { type, codec, channels, sampleSize, sampleRate, config, description }.\n// config: the raw codec box (esds or dOps, with its header), for the muxer to copy (plan §3).\nfunction audioCodecOf(b, entry) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const t = entry.type;\n  const version = dv.getUint16(entry.start + 8); // QuickTime sound description version (MOV)\n  const channels = dv.getUint16(entry.start + 16);\n  const sampleSize = dv.getUint16(entry.start + 18);\n  let sampleRate = dv.getUint32(entry.start + 24) >>> 16;\n  let kidsFrom = entry.start + 28;\n  if (version === 1) kidsFrom += 16;\n  else if (version === 2) {\n    kidsFrom += 36;\n    sampleRate = Math.round(dv.getFloat64(entry.start + 32));\n  }\n  let kids = boxes(b, kidsFrom, entry.end);\n  const wave = kids.find((x) => x.type === 'wave'); // MOV: the codec box can be in a 'wave' box\n  if (wave) kids = kids.concat(boxes(b, wave.start, wave.end));\n  const k = (type) => kids.find((x) => x.type === type);\n  if (t === 'mp4a') {\n    const esds = k('esds');\n    if (!esds) return null;\n    const e = parseEsds(b, esds);\n    if (!e) return null;\n    let codec = `mp4a.${hex2(e.oti)}`;\n    if (e.oti === 0x40 && e.asc && e.asc.length) {\n      let aot = e.asc[0] >> 3;\n      if (aot === 31 && e.asc.length > 1) aot = 32 + (((e.asc[0] & 7) << 3) | (e.asc[1] >> 5));\n      codec += `.${aot}`;\n    }\n    return { type: t, codec, channels, sampleSize, sampleRate, config: b.slice(esds.head, esds.end), description: e.asc };\n  }\n  if (t === 'Opus') {\n    const dops = k('dOps');\n    if (!dops) return null;\n    return { type: t, codec: 'opus', channels, sampleSize, sampleRate: 48000, config: b.slice(dops.head, dops.end), description: null };\n  }\n  return null;\n}\n\n// tkhd matrix -> 0, 90, 180, or 270 (clockwise, the way a player turns the picture).\nfunction rotationOf(b, tkhd) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const m = tkhd.start + (b[tkhd.start] === 1 ? 52 : 40);\n  const a = dv.getInt32(m), bb = dv.getInt32(m + 4);\n  if (a === 0 && bb > 0) return 90;\n  if (a < 0 && bb === 0) return 180;\n  if (a === 0 && bb < 0) return 270;\n  return 0;\n}\n\n// The sample table of a track: { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift }\n// or null. shift: the media time where the presentation starts (edit list).\nfunction sampleTable(b, trak) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const mdhd = path(b, trak, 'mdia', 'mdhd');\n  const stbl = path(b, trak, 'mdia', 'minf', 'stbl');\n  if (!mdhd || !stbl) return null;\n  const timescale = dv.getUint32(mdhd.start + (b[mdhd.start] === 1 ? 20 : 12));\n  const stsd = child(b, stbl, 'stsd');\n  const entry = stsd && boxes(b, stsd.start + 8, stsd.end)[0];\n  if (!entry || !timescale) return null;\n\n  // Sample sizes.\n  const stsz = child(b, stbl, 'stsz');\n  if (!stsz) return null;\n  const fixed = dv.getUint32(stsz.start + 4), count = dv.getUint32(stsz.start + 8);\n  const sizes = new Array(count);\n  for (let i = 0; i < count; i++) sizes[i] = fixed || dv.getUint32(stsz.start + 12 + 4 * i);\n  // Chunk offsets and samples per chunk -> sample offsets.\n  const stco = child(b, stbl, 'stco'), co64 = child(b, stbl, 'co64'), stsc = child(b, stbl, 'stsc');\n  if ((!stco && !co64) || !stsc) return null;\n  const co = stco || co64;\n  const nChunks = dv.getUint32(co.start + 4);\n  const chunkOff = (i) => (stco ? dv.getUint32(co.start + 8 + 4 * i) : Number(dv.getBigUint64(co.start + 8 + 8 * i)));\n  const scN = dv.getUint32(stsc.start + 4);\n  const offsets = new Array(count);\n  let s = 0;\n  for (let e = 0; e < scN && s < count; e++) {\n    const first = dv.getUint32(stsc.start + 8 + 12 * e) - 1;\n    const per = dv.getUint32(stsc.start + 12 + 12 * e);\n    const last = e + 1 < scN ? dv.getUint32(stsc.start + 8 + 12 * (e + 1)) - 1 : nChunks;\n    for (let c = first; c < last && s < count; c++) {\n      let o = chunkOff(c);\n      for (let j = 0; j < per && s < count; j++, s++) {\n        offsets[s] = o;\n        o += sizes[s];\n      }\n    }\n  }\n  if (s < count) return null;\n  // Decode times and durations, composition offsets, the edit list start.\n  const stts = child(b, stbl, 'stts'), ctts = child(b, stbl, 'ctts'), stss = child(b, stbl, 'stss');\n  if (!stts) return null;\n  const dts = new Array(count);\n  const durations = new Array(count);\n  let t = 0, k = 0, d = 0;\n  for (let e = 0, n = dv.getUint32(stts.start + 4); e < n; e++) {\n    const c = dv.getUint32(stts.start + 8 + 8 * e);\n    d = dv.getUint32(stts.start + 12 + 8 * e);\n    for (let j = 0; j < c && k < count; j++, k++, t += d) {\n      dts[k] = t;\n      durations[k] = d;\n    }\n  }\n  for (; k < count; k++, t += d) {\n    dts[k] = t;\n    durations[k] = d;\n  }\n  const cto = new Array(count).fill(0);\n  if (ctts) {\n    k = 0;\n    for (let e = 0, n = dv.getUint32(ctts.start + 4); e < n; e++) {\n      const c = dv.getUint32(ctts.start + 8 + 8 * e), o = dv.getInt32(ctts.start + 12 + 8 * e);\n      for (let j = 0; j < c && k < count; j++, k++) cto[k] = o;\n    }\n  }\n  let shift = 0;\n  const elst = path(b, trak, 'edts', 'elst');\n  if (elst) {\n    const v1 = b[elst.start] === 1;\n    const n = dv.getUint32(elst.start + 4);\n    for (let e = 0; e < n; e++) {\n      const o = elst.start + 8 + e * (v1 ? 20 : 12);\n      const mt = v1 ? Number(dv.getBigInt64(o + 8)) : dv.getInt32(o + 4);\n      if (mt >= 0) {\n        shift = mt;\n        break;\n      }\n    }\n  }\n  const sync = stss ? new Set(Array.from({ length: dv.getUint32(stss.start + 4) }, (_, i) => dv.getUint32(stss.start + 8 + 4 * i) - 1)) : null;\n  return { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift, count };\n}\n\nconst handlerOf = (b, trak) => {\n  const hdlr = path(b, trak, 'mdia', 'hdlr');\n  return hdlr ? str4(b, hdlr.start + 8) : '';\n};\n\n// blob: the file. Returns null, or:\n// { codec, description, codedWidth, codedHeight, rotation, timescale, mediaTime, samples, durationUs, audio }\n// samples (decode order): [{ offset, size, us (display time, microseconds), key, dts, duration, cto }].\n// dts, duration, cto: in timescale units. mediaTime: the edit list start.\n// audio: null, or { type, codec, channels, sampleSize, sampleRate, config, description, timescale,\n//   mediaTime (edit list start, in timescale units), samples: [{ offset, size, dts, duration, us }],\n//   durationUs }. us: the presentation time (dts - mediaTime) in microseconds.\nasync function demuxMp4(blob) {\n  let tops;\n  try {\n    tops = await topBoxes(blob);\n  } catch {\n    return null;\n  }\n  const moovTop = tops.find((x) => x.type === 'moov');\n  if (!moovTop || moovTop.end - moovTop.start > MAX_MOOV) return null;\n  if (tops.some((x) => x.type === 'moof')) return null; // fragmented: not supported\n  const b = new Uint8Array(await blob.slice(moovTop.start, moovTop.end).arrayBuffer());\n  const dv = new DataView(b.buffer);\n  const traks = boxes(b, 0, b.length).filter((x) => x.type === 'trak');\n\n  let video = null;\n  for (const trak of traks) {\n    if (handlerOf(b, trak) !== 'vide') continue;\n    const tkhd = child(b, trak, 'tkhd');\n    const st = tkhd && sampleTable(b, trak);\n    if (!st) continue;\n    const { entry, count, timescale } = st;\n    const codec = videoCodecOf(b, entry);\n    if (!codec) return null;\n    const codedWidth = dv.getUint16(entry.start + 24), codedHeight = dv.getUint16(entry.start + 26);\n    const samples = new Array(count);\n    let maxUs = 0;\n    for (let i = 0; i < count; i++) {\n      const us = Math.round(((st.dts[i] + st.cto[i] - st.shift) * 1e6) / timescale);\n      samples[i] = { offset: st.offsets[i], size: st.sizes[i], us, key: st.sync ? st.sync.has(i) : true, dts: st.dts[i], duration: st.durations[i], cto: st.cto[i] };\n      maxUs = Math.max(maxUs, us);\n    }\n    if (!count || !samples[0].key) return null;\n    video = { ...codec, codedWidth, codedHeight, rotation: rotationOf(b, tkhd), timescale, mediaTime: st.shift, samples, durationUs: maxUs };\n    break;\n  }\n  if (!video) return null;\n\n  let audio = null;\n  for (const trak of traks) {\n    if (handlerOf(b, trak) !== 'soun') continue;\n    const st = sampleTable(b, trak);\n    const a = st && st.count && audioCodecOf(b, st.entry);\n    if (!a) continue;\n    const ts = st.timescale;\n    const samples = new Array(st.count);\n    for (let i = 0; i < st.count; i++) {\n      samples[i] = { offset: st.offsets[i], size: st.sizes[i], dts: st.dts[i], duration: st.durations[i], us: Math.round(((st.dts[i] - st.shift) * 1e6) / ts) };\n    }\n    const end = st.dts[st.count - 1] + st.durations[st.count - 1] - st.shift;\n    audio = { ...a, timescale: ts, mediaTime: st.shift, samples, durationUs: Math.round((end * 1e6) / ts) };\n    break;\n  }\n  video.audio = audio;\n  return video;\n}\n\n// The source rectangle (frame coordinates) and the drawing transform for a crop in display\n// coordinates of a frame that is shown turned by 'rotation' degrees (clockwise). fw, fh: the frame\n// size (not turned). c: { sx, sy, sw, sh } in display coordinates. w, h: the output size.\n// Returns { sx, sy, sw, sh, m: [a, b, c, d, e, f], dw, dh } for setTransform(...m) and drawImage(frame,\n// sx, sy, sw, sh, 0, 0, dw, dh).\nfunction turnedCrop(rotation, fw, fh, c, w, h) {\n  switch (rotation) {\n    case 90:\n      return { sx: c.sy, sy: fh - c.sx - c.sw, sw: c.sh, sh: c.sw, m: [0, 1, -1, 0, w, 0], dw: h, dh: w };\n    case 180:\n      return { sx: fw - c.sx - c.sw, sy: fh - c.sy - c.sh, sw: c.sw, sh: c.sh, m: [-1, 0, 0, -1, w, h], dw: w, dh: h };\n    case 270:\n      return { sx: fw - c.sy - c.sh, sy: c.sx, sw: c.sh, sh: c.sw, m: [0, -1, 1, 0, 0, h], dw: h, dh: w };\n    default:\n      return { sx: c.sx, sy: c.sy, sw: c.sw, sh: c.sh, m: [1, 0, 0, 1, 0, 0], dw: w, dh: h };\n  }\n}\n\nreturn { demuxMp4, turnedCrop };\n})();\n\n// ---- io/timeline.js\nconst { decoderConfig, displaySize, buildTimeline, keyBefore, planSegments, frameAtUs, thumbIndices, isCleanStart } = (() => {\n// The frame timeline of a file (plan §5.2, §6.1, §6.2). No browser APIs, so Node tests can use it.\n// Frame t is the t-th presented frame in display order. Samples before the edit list start (us < 0)\n// are decoded as references, but they are not frames of the timeline.\n\n// The decoder configuration for a demuxMp4 result.\nfunction decoderConfig(d) {\n  return { codec: d.codec, codedWidth: d.codedWidth, codedHeight: d.codedHeight, ...(d.description ? { description: d.description } : {}) };\n}\n\n// The display size (after the tkhd rotation).\nfunction displaySize(d) {\n  return d.rotation % 180 ? { width: d.codedHeight, height: d.codedWidth } : { width: d.codedWidth, height: d.codedHeight };\n}\n\nconst median = (a) => {\n  if (!a.length) return 0;\n  const s = a.slice().sort((x, y) => x - y);\n  return s[s.length >> 1];\n};\n\n// Returns { frames: [{ us, dur, sample }], fps, durationUs, keys, indexOfUs: Map }.\n// sample: the decode index of the frame's sample. dur: microseconds to the next frame.\nfunction buildTimeline(d) {\n  const S = d.samples;\n  const order = [];\n  for (let i = 0; i < S.length; i++) if (S[i].us >= 0) order.push(i);\n  order.sort((a, b) => S[a].us - S[b].us);\n  const frames = order.map((i) => ({ us: S[i].us, dur: 0, sample: i }));\n  for (let t = 0; t + 1 < frames.length; t++) frames[t].dur = frames[t + 1].us - frames[t].us;\n  const med = median(frames.slice(0, -1).map((f) => f.dur).filter((x) => x > 0));\n  if (frames.length) {\n    const last = frames[frames.length - 1];\n    const s = S[last.sample];\n    last.dur = s.duration && d.timescale ? Math.round((s.duration * 1e6) / d.timescale) : med || 33333;\n  }\n  const fps = med ? 1e6 / med : frames.length ? 1e6 / frames[0].dur : 30;\n  const keys = [];\n  for (let i = 0; i < S.length; i++) if (S[i].key) keys.push(i);\n  const indexOfUs = new Map(frames.map((f, t) => [f.us, t]));\n  const end = frames.length ? frames[frames.length - 1].us + frames[frames.length - 1].dur : 0;\n  return { frames, fps, durationUs: end, keys, indexOfUs, samples: S };\n}\n\n// The decode index of the sync sample to start from, to show frame t: the last sync sample at or\n// before the frame's sample (decode order), with a display time at or before the frame.\nfunction keyBefore(tl, t) {\n  const f = tl.frames[t];\n  const K = tl.keys;\n  let lo = 0, hi = K.length - 1, k = 0;\n  while (lo <= hi) {\n    const m = (lo + hi) >> 1;\n    if (K[m] <= f.sample) {\n      k = m;\n      lo = m + 1;\n    } else hi = m - 1;\n  }\n  while (k > 0 && tl.samples[K[k]].us > f.us) k--;\n  return K[k];\n}\n\n// The decode work for a sorted list of frame indices: [{ start, end, frames }]. Each segment decodes\n// the samples start..end (decode order, inclusive) from a sync sample, then flushes. A frame joins the\n// current segment when the decode of that segment gets to its sync sample without a jump.\nfunction planSegments(tl, indices) {\n  const out = [];\n  let cur = null;\n  for (const t of indices) {\n    const k = keyBefore(tl, t);\n    const e = tl.frames[t].sample;\n    if (cur && k >= cur.start && k <= cur.end + 1) {\n      cur.end = Math.max(cur.end, e);\n      cur.frames.push(t);\n    } else {\n      cur = { start: k, end: e, frames: [t] };\n      out.push(cur);\n    }\n  }\n  return out;\n}\n\n// The frame index at a time (microseconds): the last frame that starts at or before it.\nfunction frameAtUs(tl, us) {\n  const F = tl.frames;\n  let lo = 0, hi = F.length - 1, r = 0;\n  while (lo <= hi) {\n    const m = (lo + hi) >> 1;\n    if (F[m].us <= us) {\n      r = m;\n      lo = m + 1;\n    } else hi = m - 1;\n  }\n  return r;\n}\n\n// Evenly spaced frame indices for the timeline thumbnails (one for each 2 %: count 50).\nfunction thumbIndices(n, count = 50) {\n  const out = [];\n  for (let i = 0; i < count && n; i++) {\n    const t = Math.min(n - 1, Math.floor(((i + 0.5) * n) / count));\n    if (!out.length || out[out.length - 1] !== t) out.push(t);\n  }\n  return out;\n}\n\n// Is this sync sample a clean start for a decoder (H.264 IDR; HEVC IDR or BLA)? An open-GOP I-frame\n// (H.264 recovery point, HEVC CRA) is a sync sample in the file, but Chrome's decoder does not start\n// there. data: the first bytes of the sample (length-prefixed NAL units). Other codecs: true.\nfunction isCleanStart(d, data) {\n  const avc = /^avc[13]\\./.test(d.codec), hevc = /^(hvc1|hev1)\\./.test(d.codec);\n  if (!(avc || hevc) || !d.description) return true;\n  const len = avc ? (d.description[4] & 3) + 1 : (d.description[21] & 3) + 1;\n  for (let o = 0; o + len < data.length;) {\n    let n = 0;\n    for (let i = 0; i < len; i++) n = n * 256 + data[o + i];\n    const h = data[o + len];\n    if (avc) {\n      const t = h & 31;\n      if (t === 5) return true;\n      if (t === 1) return false;\n    } else {\n      const t = (h >> 1) & 63;\n      if (t >= 16 && t <= 20) return true;\n      if (t < 16 || t === 21) return false;\n    }\n    o += len + n;\n  }\n  return false;\n}\n\nreturn { decoderConfig, displaySize, buildTimeline, keyBefore, planSegments, frameAtUs, thumbIndices, isCleanStart };\n})();\n\n// ---- io/decode-worker.js\nconst {  } = (() => {\n// Decode worker (plan §5.1, §6.2). Frame-exact decode of an MP4/MOV file with a VideoDecoder, not in\n// real time. Patterns from neomosh src/app/worker.js (file source): read runs of samples, feed the\n// decoder a few samples ahead, back-pressure on the frames that the page has not given back.\n//\n// Messages in:\n//   { cmd: 'open', file }                       -> 'info' or 'error'\n//   { cmd: 'seek', job, t, from }               -> 'frame' for each frame from .. t, then 'done'\n//   { cmd: 'play', job, from, to }              -> 'frame' for each frame from .. to, then 'done'\n//   { cmd: 'thumbs', job, count, width }        -> 'thumb' { i, index, bitmap } for each, then 'done'\n//   { cmd: 'stop' }                             cancel the job in progress\n//   { cmd: 'ack' }                              the page closed one frame\n// 'frame': { job, index, frame (VideoFrame, transferred), warm (true: before t) }.\n\n\n\n\nconst MAX_IN_FLIGHT = 4; // frames at the page, not given back yet\nconst MAX_QUEUE = 6; // samples in the decoder queue\n\nconst W = {\n  file: null,\n  d: null,\n  tl: null,\n  job: 0, // the job that runs; a new job or 'stop' changes it\n  inFlight: 0,\n  wake: null,\n};\n\nconst poke = () => {\n  if (W.wake) {\n    const f = W.wake;\n    W.wake = null;\n    f();\n  }\n};\nconst wait = () => new Promise((r) => (W.wake = r));\nconst post = (m, tr) => self.postMessage(m, tr || []);\n\n// Read the samples in runs of up to 4 MB that are next to each other in the file.\nclass SampleReader {\n  constructor(file, samples) {\n    this.file = file;\n    this.S = samples;\n    this.buf = null;\n    this.from = 0;\n    this.to = 0;\n  }\n\n  async read(i) {\n    const s = this.S[i];\n    if (!this.buf || s.offset < this.from || s.offset + s.size > this.to) {\n      let to = s.offset + s.size;\n      for (let j = i + 1; j < this.S.length && this.S[j].offset === to && to - s.offset < 4194304; j++) to += this.S[j].size;\n      this.buf = new Uint8Array(await this.file.slice(s.offset, to).arrayBuffer());\n      this.from = s.offset;\n      this.to = to;\n    }\n    return this.buf.subarray(s.offset - this.from, s.offset - this.from + s.size);\n  }\n}\n\n// Decode the segments of a job. want(index) -> true for a frame to give to deliver(index, frame).\n// deliver can wait (back-pressure). Returns false when the job was cancelled.\nasync function decodeSegments(job, segments, want, deliver) {\n  const S = W.tl.samples;\n  const reader = new SampleReader(W.file, S);\n  const out = [];\n  let failure = null;\n  const dec = new VideoDecoder({\n    output: (f) => {\n      out.push(f);\n      poke();\n    },\n    error: (e) => {\n      failure = e;\n      poke();\n    },\n  });\n  dec.addEventListener('dequeue', poke);\n  const live = () => job === W.job;\n  // Give or close the decoded frames.\n  const drain = async () => {\n    while (out.length) {\n      const f = out.shift();\n      const t = W.tl.indexOfUs.get(f.timestamp);\n      if (t === undefined || !want(t) || !live()) {\n        f.close();\n        continue;\n      }\n      await deliver(t, f);\n    }\n  };\n  try {\n    for (const seg of segments) {\n      if (!live()) return false;\n      if (dec.state !== 'configured') dec.configure(decoderConfig(W.d));\n      for (let i = seg.start; i <= seg.end; i++) {\n        while (live() && !failure && (dec.decodeQueueSize >= MAX_QUEUE || out.length)) {\n          if (out.length) await drain();\n          else await wait();\n        }\n        if (failure) throw failure;\n        if (!live()) return false;\n        const s = S[i];\n        dec.decode(new EncodedVideoChunk({ type: i === seg.start ? 'key' : 'delta', timestamp: s.us, data: await reader.read(i) }));\n      }\n      // The flush gives the last frames (in display order); then the next segment starts at a sync sample.\n      const flushed = dec.flush().then(() => 'ok', (e) => e);\n      let done = false;\n      flushed.then(() => {\n        done = true;\n        poke();\n      });\n      while (!done && live() && !failure) {\n        if (out.length) await drain();\n        else await wait();\n      }\n      if (!live()) return false;\n      const r = await flushed;\n      if (r !== 'ok') throw r;\n      await drain();\n      if (failure) throw failure;\n    }\n    return live();\n  } finally {\n    for (const f of out) f.close();\n    try {\n      dec.close();\n    } catch { /* closed */ }\n  }\n}\n\n// Wait until the page has fewer than MAX_IN_FLIGHT frames, then send the frame.\nasync function sendFrame(job, t, frame, warm) {\n  while (W.inFlight >= MAX_IN_FLIGHT && job === W.job) await wait();\n  if (job !== W.job) {\n    frame.close();\n    return;\n  }\n  W.inFlight++;\n  post({ cmd: 'frame', job, index: t, warm, frame }, [frame]);\n}\n\nasync function open(file) {\n  const d = await demuxMp4(file);\n  if (!d) return post({ cmd: 'error', message: 'Only MP4 and MOV files are supported.' });\n  let ok = false;\n  try {\n    ok = typeof VideoDecoder === 'function' && (await VideoDecoder.isConfigSupported(decoderConfig(d))).supported;\n  } catch {\n    ok = false;\n  }\n  if (!ok) return post({ cmd: 'error', message: `This browser cannot decode this file (codec: ${d.codec}).` });\n  const tl = buildTimeline(d);\n  if (!tl.frames.length) return post({ cmd: 'error', message: 'This file has no video frames.' });\n  // Seeks start only at clean sync samples (IDR). The first sample is always one.\n  const clean = [];\n  for (const k of tl.keys) {\n    const s = d.samples[k];\n    const head = new Uint8Array(await file.slice(s.offset, s.offset + Math.min(s.size, 4096)).arrayBuffer());\n    if (!clean.length || isCleanStart(d, head)) clean.push(k);\n  }\n  tl.keys = clean;\n  Object.assign(W, { file, d, tl });\n  const a = d.audio;\n  post({\n    cmd: 'info',\n    name: file.name,\n    codec: d.codec,\n    rotation: d.rotation,\n    codedWidth: d.codedWidth,\n    codedHeight: d.codedHeight,\n    ...displaySize(d),\n    fps: tl.fps,\n    durationUs: tl.durationUs,\n    times: tl.frames.map((f) => f.us),\n    keyFrames: tl.frames.map((f, t) => (clean.includes(f.sample) ? t : -1)).filter((t) => t >= 0),\n    audio: a ? { codec: a.codec, channels: a.channels, sampleRate: a.sampleRate, durationUs: a.durationUs } : null,\n  });\n}\n\nasync function seek(m) {\n  const n = W.tl.frames.length;\n  const t = Math.max(0, Math.min(n - 1, m.t));\n  const from = Math.max(0, Math.min(t, m.from ?? t - (m.depth || 0)));\n  const list = [];\n  for (let i = from; i <= t; i++) list.push(i);\n  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (i) => i >= from && i <= t, (i, f) => sendFrame(m.job, i, f, i < t));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\nasync function play(m) {\n  const n = W.tl.frames.length;\n  const from = Math.max(0, Math.min(n - 1, m.from));\n  const to = Math.max(from, Math.min(n - 1, m.to ?? n - 1));\n  // One segment: from the sync sample of 'from' to the last sample that 'to' needs.\n  const seg = planSegments(W.tl, [from])[0];\n  let end = seg.end;\n  for (let i = from; i <= to; i++) end = Math.max(end, W.tl.frames[i].sample);\n  seg.end = end;\n  const ok = await decodeSegments(m.job, [seg], (i) => i >= from && i <= to, (i, f) => sendFrame(m.job, i, f, false));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\nasync function thumbs(m) {\n  if (typeof OffscreenCanvas === 'undefined') return post({ cmd: 'done', job: m.job });\n  const list = thumbIndices(W.tl.frames.length, m.count || 50);\n  const { width: dw, height: dh } = displaySize(W.d);\n  const w = m.width || 160;\n  const h = Math.max(1, Math.round((w * dh) / dw));\n  const canvas = new OffscreenCanvas(w, h);\n  const ctx = canvas.getContext('2d');\n  const pos = new Map(list.map((t, i) => [t, i]));\n  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (t) => pos.has(t), async (t, f) => {\n    const c = turnedCrop(W.d.rotation, f.displayWidth, f.displayHeight, { sx: 0, sy: 0, sw: W.d.rotation % 180 ? f.displayHeight : f.displayWidth, sh: W.d.rotation % 180 ? f.displayWidth : f.displayHeight }, w, h);\n    ctx.setTransform(...c.m);\n    ctx.drawImage(f, c.sx, c.sy, c.sw, c.sh, 0, 0, c.dw, c.dh);\n    f.close();\n    const bitmap = canvas.transferToImageBitmap();\n    post({ cmd: 'thumb', job: m.job, i: pos.get(t), index: t, bitmap }, [bitmap]);\n  });\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\n// The jobs run one at a time. A new job cancels the one in progress (plan §6.2).\nlet chain = Promise.resolve();\nconst runJob = (fn, m) => {\n  W.job = m.job;\n  poke();\n  chain = chain.then(() => (m.job === W.job ? fn(m) : null)).catch((e) => {\n    if (m.job === W.job) post({ cmd: 'error', job: m.job, message: String(e && e.message ? e.message : e) });\n  });\n};\n\nself.onmessage = (e) => {\n  const m = e.data;\n  if (m.cmd === 'ack') {\n    W.inFlight = Math.max(0, W.inFlight - 1);\n    poke();\n  } else if (m.cmd === 'stop') {\n    W.job = -1;\n    poke();\n  } else if (m.cmd === 'open') {\n    W.job = -1;\n    poke();\n    chain = chain.then(() => open(m.file)).catch((err) => post({ cmd: 'error', message: String(err && err.message ? err.message : err) }));\n  } else if (m.cmd === 'seek') runJob(seek, m);\n  else if (m.cmd === 'play') runJob(play, m);\n  else if (m.cmd === 'thumbs') runJob(thumbs, m);\n};\n\nreturn {  };\n})();\n";
-const GPU_WORKER = "// ---- gpu/store.js\nconst { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText } = (() => {\n// Frame store sizes (plan §6.3, §6.4). No browser APIs, so Node tests can use it.\n\nconst MAX_STORE_LAYERS = 1000;\nconst BUDGET_DESKTOP = 1024 * 1048576;\nconst BUDGET_ANDROID = 384 * 1048576;\n\n// The working size for a display size and a short side (0 = source). Never above the source. Even.\nfunction workingSize(w, h, short) {\n  const s = short ? Math.min(1, short / Math.min(w, h)) : 1;\n  return { width: Math.max(2, Math.round((w * s) / 2) * 2), height: Math.max(2, Math.round((h * s) / 2) * 2) };\n}\n\n// YUV 4:2:0 in the store: Y (R8, full size) + CbCr (RG8, half size) = 1.5 bytes for each pixel.\nconst frameBytes = (w, h) => w * h + 2 * (w / 2) * (h / 2);\n\nconst defaultBudget = (userAgent = '') => (/Android/i.test(userAgent) ? BUDGET_ANDROID : BUDGET_DESKTOP);\n\n// N = min(MAX_ARRAY_TEXTURE_LAYERS, floor(budget / bytesPerFrame), 1000), at least 1.\nfunction layerCount(budget, maxLayers, w, h) {\n  return Math.max(1, Math.min(maxLayers, Math.floor(budget / frameBytes(w, h)), MAX_STORE_LAYERS));\n}\n\n// \"Buffer: 240 frames at 540p (≈ 330 MB)\".\nfunction bufferText(n, w, h) {\n  return `Buffer: ${n} frames at ${Math.min(w, h)}p (≈ ${Math.round((n * frameBytes(w, h)) / 1048576)} MB)`;\n}\n\nreturn { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText };\n})();\n\n// ---- gpu/gl.js\nconst { createContext, program, texParams, drawQuad } = (() => {\n// WebGL2 helpers (plan §5.3): context, programs, textures.\n\nfunction createContext(canvas) {\n  const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });\n  if (!gl) throw new Error('This browser has no WebGL2.');\n  return gl;\n}\n\nfunction shader(gl, type, src) {\n  const s = gl.createShader(type);\n  gl.shaderSource(s, src);\n  gl.compileShader(s);\n  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost()) {\n    const log = gl.getShaderInfoLog(s);\n    throw new Error(`Shader: ${log}`);\n  }\n  return s;\n}\n\n// A program with its uniform locations: { prog, u: { name: location } }.\nfunction program(gl, vert, frag) {\n  const p = gl.createProgram();\n  gl.attachShader(p, shader(gl, gl.VERTEX_SHADER, vert));\n  gl.attachShader(p, shader(gl, gl.FRAGMENT_SHADER, frag));\n  gl.linkProgram(p);\n  if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost()) throw new Error(`Program: ${gl.getProgramInfoLog(p)}`);\n  const u = {};\n  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS) || 0;\n  for (let i = 0; i < n; i++) {\n    const name = gl.getActiveUniform(p, i).name;\n    u[name] = gl.getUniformLocation(p, name);\n  }\n  return { prog: p, u };\n}\n\nfunction texParams(gl, target, filter = gl.LINEAR, minFilter = filter) {\n  gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, minFilter);\n  gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);\n  gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);\n  gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);\n}\n\n// Draw the one-triangle quad (quad.vert) into the bound target.\nfunction drawQuad(gl) {\n  gl.drawArrays(gl.TRIANGLES, 0, 3);\n}\n\nreturn { createContext, program, texParams, drawQuad };\n})();\n\n// ---- gpu/engine.js\nconst { Engine } = (() => {\n// The GPU engine (plan §5.1, §6.3, §6.4). It owns the WebGL2 context of the preview canvas and the\n// frame store. It runs in the GPU worker (OffscreenCanvas), or on the main thread as the fallback.\n//\n// handle(msg) -> a reply object (or null). Messages:\n//   { cmd: 'configure', width, height, rotation, budget, failAlloc } -> { cmd: 'configured', n, budget, bytes }\n//   { cmd: 'upload', index, frame, show }  put the frame into the store; show: render it  -> { cmd: 'uploaded', index }\n//   { cmd: 'render', index }               render frame index (the view of the settings)    -> { cmd: 'rendered', index }\n//   { cmd: 'render', index, delay }        tests: the stored frame index - delay            -> { cmd: 'rendered', index }\n//   { cmd: 'settings', settings }          the effect settings; renders the last frame again -> { cmd: 'rendered' }\n//   { cmd: 'read' }                        render again and read the canvas (tests)         -> { cmd: 'pixels', width, height, pixels }\n//   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }\n\n\n\n\nconst QUAD_VERT = \"#version 300 es\\n// One triangle that covers the target. v_uv: 0..1, v = 0 at the first row (image top, in texture space).\\nout vec2 v_uv;\\nvoid main() {\\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\\n  v_uv = p;\\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\\n}\\n\";\nconst UPLOAD_FRAG = \"#version 300 es\\n// Store upload (plan §6.3): the source frame (RGB, as the browser gives it), turned to the display\\n// orientation and scaled to the working size, to BT.709 full-range Y (u_mode 0) or CbCr (u_mode 1).\\nprecision highp float;\\nuniform sampler2D u_src;\\nuniform int u_rot;   // 0, 90, 180, 270: clockwise turn of the display picture\\nuniform int u_mode;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvec2 srcUv(vec2 d) {\\n  if (u_rot == 90) return vec2(d.y, 1.0 - d.x);\\n  if (u_rot == 180) return vec2(1.0 - d.x, 1.0 - d.y);\\n  if (u_rot == 270) return vec2(1.0 - d.y, d.x);\\n  return d;\\n}\\n\\nvoid main() {\\n  vec3 c = texture(u_src, srcUv(v_uv)).rgb;\\n  float y = dot(c, vec3(0.2126, 0.7152, 0.0722));\\n  if (u_mode == 0) o = vec4(y, 0.0, 0.0, 1.0);\\n  else o = vec4((c.b - y) / 1.8556 + 0.5, (c.r - y) / 1.5748 + 0.5, 0.0, 1.0);\\n}\\n\";\nconst STORE_GLSL = \"// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\\nuniform highp sampler2DArray u_storeY;\\nuniform highp sampler2DArray u_storeC;\\n\\nvec3 storeRgb(vec2 uv, float layer) {\\n  float y = texture(u_storeY, vec3(uv, layer)).r;\\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\\n}\\n\";\nconst SHOW_FRAG = \"// Preview of one stored frame (Original view; the debug delay view of phase 3). u_layer < 0: black\\n// (the frame is not in the store, or it is before frame 0: \\\"not online\\\", D8).\\nuniform float u_layer;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\\n  o = u_layer < 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(storeRgb(uv, u_layer), 1.0);\\n}\\n\";\nconst MAP_FRAG = \"#version 300 es\\n// Built-in map (plan §7.3): Linear. The map value v (0..1) for each pixel of the working size.\\n// Linear: v grows along the direction of 'angle' (0° = to the right, 90° = down). The point (x, y)\\n// (0..1 of the frame) has v = 0.5. 'width' = the length of the ramp, as a part of the frame extent\\n// along that direction (1 = the full frame).\\nprecision highp float;\\nuniform vec2 u_res;\\nuniform float u_angle; // degrees\\nuniform vec2 u_center; // 0..1\\nuniform float u_width;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  vec2 p = v_uv * u_res; // pixel centre, first row at the top\\n  float a = radians(u_angle);\\n  vec2 d = vec2(cos(a), sin(a));\\n  float span = abs(u_res.x * d.x) + abs(u_res.y * d.y);\\n  float v = clamp(dot(p - u_center * u_res, d) / max(u_width * span, 1e-3) + 0.5, 0.0, 1.0);\\n  o = vec4(v, v, v, 1.0);\\n}\\n\";\nconst TIMEMAP_FRAG = \"// Mode 1, Time Map (plan §7.1). For each pixel: d = map value × Max delay (frames, after the delay\\n// steps), src = t − d. src < 0: black (not online, D8). Frame blend: mix the two frames around src;\\n// else the frame t − round(d). Each frame comes from the store at the same pixel. A frame that is not\\n// in the store is black. u_view: 0 = result, 1 = original (frame t), 2 = the map.\\nuniform sampler2D u_map;\\nuniform highp isampler2D u_layers; // N x 1: the frame index in each store layer\\nuniform int u_n;\\nuniform int u_t;\\nuniform float u_max;\\nuniform int u_steps;\\nuniform bool u_blend;\\nuniform int u_view;\\nin vec2 v_uv;\\nout vec4 o;\\n\\n// The color of frame k at uv, and in.a = 1 when frame k is in the store.\\nvec4 frameAt(int k, vec2 uv) {\\n  if (k < 0) return vec4(0.0);\\n  int l = k % u_n;\\n  if (texelFetch(u_layers, ivec2(l, 0), 0).r != k) return vec4(0.0);\\n  return vec4(storeRgb(uv, float(l)), 1.0);\\n}\\n\\nvoid main() {\\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\\n  if (u_view == 1) { o = vec4(frameAt(u_t, uv).rgb, 1.0); return; }\\n  float v = texture(u_map, uv).r;\\n  if (u_view == 2) { o = vec4(v, v, v, 1.0); return; }\\n  if (u_steps > 1) v = min(floor(v * float(u_steps)), float(u_steps - 1)) / float(u_steps - 1);\\n  float d = v * u_max;\\n  float src = float(u_t) - d;\\n  if (src < -1e-3) { o = vec4(0.0, 0.0, 0.0, 1.0); return; } // the epsilon: float error of v × Max\\n  src = max(src, 0.0);\\n  vec3 c;\\n  if (u_blend) {\\n    float k0 = floor(src);\\n    float f = src - k0;\\n    c = frameAt(int(k0), uv).rgb;\\n    if (f > 0.0) c = mix(c, frameAt(int(k0) + 1, uv).rgb, f);\\n  } else {\\n    c = frameAt(u_t - int(floor(d + 0.5)), uv).rgb;\\n  }\\n  o = vec4(c, 1.0);\\n}\\n\";\nconst VIEWS = { result: 0, original: 1, map: 2 };\n\nclass Engine {\n  constructor(canvas) {\n    this.canvas = canvas;\n    const gl = (this.gl = createContext(canvas));\n    this.caps = {\n      maxLayers: gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS),\n      maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE),\n      floatTargets: !!gl.getExtension('EXT_color_buffer_float'),\n    };\n    this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);\n    this.show = program(gl, QUAD_VERT, `#version 300 es\\nprecision highp float;\\n${STORE_GLSL}\\n${SHOW_FRAG}`);\n    this.timemap = program(gl, QUAD_VERT, `#version 300 es\\nprecision highp float;\\n${STORE_GLSL}\\n${TIMEMAP_FRAG}`);\n    this.mapProg = program(gl, QUAD_VERT, MAP_FRAG);\n    this.mapTex = null;\n    this.mapDirty = true;\n    this.layersTex = null;\n    this.settings = null;\n    this.vao = gl.createVertexArray();\n    gl.bindVertexArray(this.vao);\n    this.src = gl.createTexture();\n    this.fb = gl.createFramebuffer();\n    this.storeY = this.storeC = null;\n    this.n = 0;\n    this.layerFrame = null; // the frame index in each layer, -1 = empty\n    this.last = { index: -1, delay: undefined };\n    this.lost = false;\n    canvas.addEventListener('webglcontextlost', (e) => {\n      e.preventDefault();\n      this.lost = true;\n    });\n  }\n\n  handle(m) {\n    if (m.cmd === 'caps') return { cmd: 'caps', ...this.caps };\n    if (m.cmd === 'configure') return this.configure(m);\n    if (m.cmd === 'upload') {\n      this.put(m.index, m.frame);\n      if (m.show) this.render(m.index);\n      return { cmd: 'uploaded', index: m.index };\n    }\n    if (m.cmd === 'render') {\n      this.render(m.index, m.delay);\n      return { cmd: 'rendered', index: m.index };\n    }\n    if (m.cmd === 'settings') {\n      const old = this.settings;\n      this.settings = m.settings;\n      if (!old || JSON.stringify(old.map) !== JSON.stringify(m.settings.map)) this.mapDirty = true;\n      if (this.n && this.last.index >= 0) this.render(this.last.index, this.last.delay);\n      return { cmd: 'rendered', index: this.last.index };\n    }\n    if (m.cmd === 'read') return this.read();\n    return null;\n  }\n\n  // Make the store for the working size. The budget halves until the allocation works (plan §6.4).\n  configure(m) {\n    const gl = this.gl;\n    const { width: w, height: h } = m;\n    this.w = w;\n    this.h = h;\n    this.rot = m.rotation || 0;\n    this.canvas.width = w;\n    this.canvas.height = h;\n    let budget = m.budget;\n    let fails = m.failAlloc || 0; // tests: act as if the first allocations ran out of memory\n    for (;;) {\n      this.free();\n      const n = layerCount(budget, this.caps.maxLayers, w, h);\n      while (gl.getError() !== gl.NO_ERROR) { /* clear old errors */ }\n      this.storeY = gl.createTexture();\n      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);\n      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, w, h, n);\n      texParams(gl, gl.TEXTURE_2D_ARRAY);\n      this.storeC = gl.createTexture();\n      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);\n      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG8, w / 2, h / 2, n);\n      texParams(gl, gl.TEXTURE_2D_ARRAY);\n      // Touch the last layer, so that the driver must commit the memory now.\n      this.n = n;\n      this.clearLayer(n - 1);\n      const err = gl.getError();\n      const failed = fails > 0 || err === gl.OUT_OF_MEMORY || gl.isContextLost();\n      if (!failed) break;\n      fails--;\n      if (n === 1 || gl.isContextLost()) {\n        if (gl.isContextLost()) throw new Error('The GPU context was lost.');\n        break;\n      }\n      budget = Math.floor(budget / 2);\n    }\n    this.layerFrame = new Int32Array(this.n).fill(-1);\n    this.last = { index: -1, delay: undefined };\n    // The frame index of each layer, for the shaders (R32I, N x 1).\n    if (this.layersTex) gl.deleteTexture(this.layersTex);\n    this.layersTex = gl.createTexture();\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32I, this.n, 1, 0, gl.RED_INTEGER, gl.INT, this.layerFrame);\n    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);\n    // The map (R32F when float targets exist, so long delays keep their precision; else RGBA8).\n    if (this.mapTex) gl.deleteTexture(this.mapTex);\n    this.mapTex = gl.createTexture();\n    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);\n    if (this.caps.floatTargets) gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);\n    else gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);\n    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);\n    this.mapDirty = true;\n    gl.viewport(0, 0, w, h);\n    gl.clearColor(0, 0, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h) };\n  }\n\n  free() {\n    const gl = this.gl;\n    if (this.storeY) gl.deleteTexture(this.storeY);\n    if (this.storeC) gl.deleteTexture(this.storeC);\n    this.storeY = this.storeC = null;\n  }\n\n  target(tex, layer, w, h) {\n    const gl = this.gl;\n    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);\n    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, tex, 0, layer);\n    gl.viewport(0, 0, w, h);\n  }\n\n  clearLayer(layer) {\n    const gl = this.gl;\n    this.target(this.storeY, layer, this.w, this.h);\n    gl.clearColor(0, 0, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    this.target(this.storeC, layer, this.w / 2, this.h / 2);\n    gl.clearColor(0.5, 0.5, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n  }\n\n  // Upload a VideoFrame into layer index mod N (plan §6.3), then close it.\n  put(index, frame) {\n    const gl = this.gl;\n    try {\n      gl.activeTexture(gl.TEXTURE0);\n      gl.bindTexture(gl.TEXTURE_2D, this.src);\n      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);\n      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, frame);\n      // A large source: mipmaps, so the scale down does not alias.\n      const turned = this.rot % 180 !== 0;\n      const sw = turned ? frame.displayHeight : frame.displayWidth;\n      const mip = sw > 2 * this.w;\n      if (mip) gl.generateMipmap(gl.TEXTURE_2D);\n      texParams(gl, gl.TEXTURE_2D, gl.LINEAR, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);\n    } finally {\n      frame.close();\n    }\n    const layer = index % this.n;\n    gl.useProgram(this.upload.prog);\n    gl.uniform1i(this.upload.u.u_src, 0);\n    gl.uniform1i(this.upload.u.u_rot, this.rot);\n    gl.uniform1i(this.upload.u.u_mode, 0);\n    this.target(this.storeY, layer, this.w, this.h);\n    drawQuad(gl);\n    gl.uniform1i(this.upload.u.u_mode, 1);\n    this.target(this.storeC, layer, this.w / 2, this.h / 2);\n    drawQuad(gl);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    this.layerFrame[layer] = index;\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));\n  }\n\n  // Render the map into its texture (once for each change of the map settings).\n  renderMap() {\n    const gl = this.gl;\n    const m = (this.settings && this.settings.map.linear) || { angle: 90, x: 0.5, y: 0.5, width: 1 };\n    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);\n    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.mapTex, 0);\n    gl.viewport(0, 0, this.w, this.h);\n    gl.useProgram(this.mapProg.prog);\n    gl.uniform2f(this.mapProg.u.u_res, this.w, this.h);\n    gl.uniform1f(this.mapProg.u.u_angle, m.angle);\n    gl.uniform2f(this.mapProg.u.u_center, m.x, m.y);\n    gl.uniform1f(this.mapProg.u.u_width, m.width);\n    drawQuad(gl);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    this.mapDirty = false;\n  }\n\n  // The layer of frame t, or -1 when it is not in the store (or t < 0).\n  layerOf(t) {\n    if (t < 0 || !this.n) return -1;\n    const l = t % this.n;\n    return this.layerFrame[l] === t ? l : -1;\n  }\n\n  bindStore(prog) {\n    const gl = this.gl;\n    gl.activeTexture(gl.TEXTURE1);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);\n    gl.activeTexture(gl.TEXTURE2);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);\n    gl.uniform1i(prog.u.u_storeY, 1);\n    gl.uniform1i(prog.u.u_storeC, 2);\n  }\n\n  // Render frame index to the canvas. delay (tests): show the stored frame index - delay.\n  render(index, delay) {\n    const gl = this.gl;\n    this.last = { index, delay };\n    if (this.mapDirty) this.renderMap();\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    gl.viewport(0, 0, this.w, this.h);\n    if (delay !== undefined || !this.settings) {\n      gl.useProgram(this.show.prog);\n      this.bindStore(this.show);\n      gl.uniform1f(this.show.u.u_layer, this.layerOf(index - (delay || 0)));\n      drawQuad(gl);\n      return;\n    }\n    const s = this.settings;\n    const p = this.timemap;\n    gl.useProgram(p.prog);\n    this.bindStore(p);\n    gl.activeTexture(gl.TEXTURE3);\n    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);\n    gl.activeTexture(gl.TEXTURE4);\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.uniform1i(p.u.u_map, 3);\n    gl.uniform1i(p.u.u_layers, 4);\n    gl.uniform1i(p.u.u_n, this.n);\n    gl.uniform1i(p.u.u_t, index);\n    gl.uniform1f(p.u.u_max, Math.min(s.timemap.maxDelay, this.n - 1));\n    gl.uniform1i(p.u.u_steps, s.timemap.steps);\n    gl.uniform1i(p.u.u_blend, s.timemap.blend ? 1 : 0);\n    gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);\n    drawQuad(gl);\n  }\n\n  read() {\n    const gl = this.gl;\n    this.render(this.last.index, this.last.delay);\n    const pixels = new Uint8Array(this.w * this.h * 4);\n    gl.readPixels(0, 0, this.w, this.h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);\n    return { cmd: 'pixels', width: this.w, height: this.h, pixels };\n  }\n}\n\nreturn { Engine };\n})();\n\n// ---- gpu/gpu-worker.js\nconst {  } = (() => {\n// GPU worker (plan §5.1): the engine on the OffscreenCanvas of the preview.\n// In: { id, msg } with msg.cmd 'init' (msg.canvas) or an engine message. Out: { id, reply } or { id, error }.\n\n\n\nlet engine = null;\n\nself.onmessage = (e) => {\n  const { id, msg } = e.data;\n  try {\n    let reply;\n    if (msg.cmd === 'init') {\n      engine = new Engine(msg.canvas);\n      reply = { cmd: 'caps', ...engine.caps };\n    } else reply = engine.handle(msg);\n    if (engine && engine.lost) self.postMessage({ id, error: 'The GPU context was lost.' });\n    else self.postMessage({ id, reply }, reply && reply.pixels ? [reply.pixels.buffer] : []);\n  } catch (err) {\n    if (msg.frame) try { msg.frame.close(); } catch { /* closed */ }\n    self.postMessage({ id, error: String(err && err.message ? err.message : err) });\n  }\n};\n\nreturn {  };\n})();\n";
+const GPU_WORKER = "// ---- maps/builtin.js\nconst { MAPS, MAP_INDEX, defaultParams, paramArray, isDynamic, videoMapFrame } = (() => {\n// The built-in maps (plan §7.3): ids, names, and parameters. The order of MAPS is the u_type of\n// gpu/glsl/maps.glsl; the order of the params of each map is its u_k[] order.\n// A param: [key, label, min, max, step, default, unit].\n\nconst C = [['x', 'Center x', 0, 1, 0.01, 0.5], ['y', 'Center y', 0, 1, 0.01, 0.5]];\nconst SEED = ['seed', 'Seed', 0, 999, 1, 1];\n\nconst MAPS = [\n  { id: 'linear', name: 'Linear', params: [['angle', 'Angle', 0, 360, 1, 90, '°'], ['x', 'Position x', 0, 1, 0.01, 0.5], ['y', 'Position y', 0, 1, 0.01, 0.5], ['width', 'Width', 0.05, 4, 0.01, 1]] },\n  { id: 'mirrored', name: 'Mirrored', params: [['angle', 'Angle', 0, 360, 1, 90, '°'], ['x', 'Center x', 0, 1, 0.01, 0.5], ['y', 'Center y', 0, 1, 0.01, 0.5], ['width', 'Width', 0.05, 4, 0.01, 1]] },\n  { id: 'radial', name: 'Radial', params: [...C, ['radius', 'Radius', 0.05, 2, 0.01, 0.7], ['aspect', 'Aspect', 0.25, 4, 0.01, 1]] },\n  { id: 'angular', name: 'Angular', params: [...C, ['start', 'Start angle', 0, 360, 1, 0, '°'], ['turns', 'Turns', 1, 16, 1, 1]] },\n  { id: 'spiral', name: 'Spiral', params: [...C, ['arms', 'Arms', 1, 12, 1, 2], ['tightness', 'Tightness', 0, 20, 0.1, 4]] },\n  { id: 'box', name: 'Diamond / Box', params: [...C, ['size', 'Size', 0.05, 2, 0.01, 0.5], ['roundness', 'Roundness', 0, 1, 0.01, 0, '']] },\n  { id: 'corners', name: 'Four corners', params: [['tl', 'Top left', 0, 1, 0.01, 0], ['tr', 'Top right', 0, 1, 0.01, 0.33], ['bl', 'Bottom left', 0, 1, 0.01, 0.66], ['br', 'Bottom right', 0, 1, 0.01, 1]] },\n  { id: 'stripes', name: 'Stripes', params: [['count', 'Count', 1, 64, 1, 8], ['angle', 'Angle', 0, 360, 1, 0, '°'], ['softness', 'Softness', 0, 1, 0.01, 0], ['duty', 'Duty', 0, 1, 0.01, 0.5]] },\n  { id: 'sine', name: 'Sine waves', params: [['fx', 'Frequency x', 0, 32, 0.1, 4], ['fy', 'Frequency y', 0, 32, 0.1, 0], ['angle', 'Angle', 0, 360, 1, 0, '°'], ['phase', 'Phase', 0, 1, 0.01, 0]] },\n  { id: 'rings', name: 'Rings', params: [...C, ['count', 'Count', 1, 64, 1, 8], ['softness', 'Softness', 0, 1, 0.01, 0]] },\n  { id: 'checker', name: 'Checkerboard', params: [['cells', 'Cells', 1, 64, 1, 8], ['softness', 'Softness', 0, 1, 0.01, 0]] },\n  { id: 'fbm', name: 'Value noise', params: [['scale', 'Scale', 0.5, 64, 0.1, 4], ['octaves', 'Octaves', 1, 8, 1, 4], ['roughness', 'Roughness', 0, 1, 0.01, 0.5], SEED] },\n  { id: 'ridged', name: 'Ridged noise', params: [['scale', 'Scale', 0.5, 64, 0.1, 3], ['octaves', 'Octaves', 1, 8, 1, 4], SEED] },\n  { id: 'worley', name: 'Cellular', params: [['scale', 'Scale', 1, 64, 0.1, 6], SEED, ['metric', 'Metric', 0, 2, 1, 0]] },\n  { id: 'voronoi', name: 'Voronoi cells', params: [['scale', 'Scale', 1, 64, 0.1, 6], SEED] },\n  { id: 'blocks', name: 'Random blocks', params: [['bw', 'Block width', 1, 256, 1, 32, 'px'], ['bh', 'Block height', 1, 256, 1, 32, 'px'], SEED] },\n  { id: 'rows', name: 'Random rows', params: [['size', 'Size', 1, 256, 1, 16, 'px'], ['direction', 'Columns', 0, 1, 1, 0], SEED] },\n  { id: 'bayer', name: 'Bayer dither', params: [['matrix', 'Matrix (2^n)', 1, 3, 1, 2], ['base', 'Base value', 0, 1, 0.01, 0.5]] },\n  { id: 'self', name: 'Video luminance', params: [] },\n  { id: 'motion', name: 'Motion', params: [['gain', 'Gain', 0.5, 20, 0.1, 4], ['frames', 'Smooth (frames)', 1, 8, 1, 2]] },\n  { id: 'subject', name: 'Subject mask', params: [], needs: 'cutout' },\n  { id: 'subjectdist', name: 'Subject distance', params: [], needs: 'cutout' },\n];\n\nconst MAP_INDEX = Object.fromEntries(MAPS.map((m, i) => [m.id, i]));\n\n// The default params of each map: { linear: { angle: 90, ... }, ... }.\nfunction defaultParams() {\n  return Object.fromEntries(MAPS.map((m) => [m.id, Object.fromEntries(m.params.map((p) => [p[0], p[5]]))]));\n}\n\n// The u_k[] values of a map.\nfunction paramArray(id, params) {\n  const m = MAPS[MAP_INDEX[id]];\n  return m.params.map((p) => Number((params && params[p[0]]) ?? p[5]));\n}\n\n// The map needs a new render for each frame (it changes with t).\nfunction isDynamic(map) {\n  const a = map.anim;\n  return map.source === 'video' || (map.source === 'builtin' && (map.type === 'self' || map.type === 'motion'))\n    || (map.source === 'builtin' && !!(a.phaseSpeed || a.rotSpeed || a.pulseAmount || a.seedEvery));\n}\n\n// Video map (plan §7.4): the map frame for source frame t. end: 'loop' | 'hold' | 'pingpong'.\nfunction videoMapFrame(t, count, speed, offset, end) {\n  if (count <= 1) return 0;\n  const m = Math.round(t * speed + offset);\n  if (end === 'hold') return Math.max(0, Math.min(count - 1, m));\n  if (end === 'pingpong') {\n    const p = 2 * (count - 1);\n    const r = ((m % p) + p) % p;\n    return r < count ? r : p - r;\n  }\n  return ((m % count) + count) % count;\n}\n\nreturn { MAPS, MAP_INDEX, defaultParams, paramArray, isDynamic, videoMapFrame };\n})();\n\n// ---- maps/curve.js\nconst { CURVE_PRESETS, monotoneCurve, curveTable } = (() => {\n// Curves (plan §7.5, §12.6): points [[x, y], ...] with x from 0 to 1 -> monotone cubic interpolation\n// (Fritsch–Carlson). The GPU gets a lookup table.\n\nconst CURVE_PRESETS = {\n  linear: [[0, 0], [1, 1]],\n  easeIn: [[0, 0], [0.5, 0.2], [1, 1]],\n  easeOut: [[0, 0], [0.5, 0.8], [1, 1]],\n  sCurve: [[0, 0], [0.25, 0.1], [0.75, 0.9], [1, 1]],\n  step: [[0, 0], [0.49, 0], [0.51, 1], [1, 1]],\n};\n\n// A function x -> y through the points (sorted by x), monotone between them.\nfunction monotoneCurve(points) {\n  const p = points.slice().sort((a, b) => a[0] - b[0]);\n  const n = p.length;\n  if (n < 2) return () => (n ? p[0][1] : 0);\n  const dx = [], m = [];\n  for (let i = 0; i < n - 1; i++) {\n    dx.push(p[i + 1][0] - p[i][0]);\n    m.push(dx[i] > 0 ? (p[i + 1][1] - p[i][1]) / dx[i] : 0);\n  }\n  const t = new Array(n);\n  t[0] = m[0];\n  t[n - 1] = m[n - 2];\n  for (let i = 1; i < n - 1; i++) t[i] = m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2;\n  for (let i = 0; i < n - 1; i++) {\n    if (m[i] === 0) {\n      t[i] = t[i + 1] = 0;\n      continue;\n    }\n    const a = t[i] / m[i], b = t[i + 1] / m[i], h = a * a + b * b;\n    if (h > 9) {\n      const s = 3 / Math.sqrt(h);\n      t[i] = s * a * m[i];\n      t[i + 1] = s * b * m[i];\n    }\n  }\n  return (x) => {\n    if (x <= p[0][0]) return p[0][1];\n    if (x >= p[n - 1][0]) return p[n - 1][1];\n    let i = 0;\n    while (i < n - 2 && x > p[i + 1][0]) i++;\n    const h = dx[i], u = (x - p[i][0]) / h;\n    const u2 = u * u, u3 = u2 * u;\n    return (2 * u3 - 3 * u2 + 1) * p[i][1] + (u3 - 2 * u2 + u) * h * t[i] + (-2 * u3 + 3 * u2) * p[i + 1][1] + (u3 - u2) * h * t[i + 1];\n  };\n}\n\n// 256 values of the curve, clamped to 0..1.\nfunction curveTable(points, size = 256) {\n  const f = monotoneCurve(points);\n  const out = new Float32Array(size);\n  for (let i = 0; i < size; i++) out[i] = Math.max(0, Math.min(1, f(i / (size - 1))));\n  return out;\n}\n\nreturn { CURVE_PRESETS, monotoneCurve, curveTable };\n})();\n\n// ---- gpu/store.js\nconst { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText } = (() => {\n// Frame store sizes (plan §6.3, §6.4). No browser APIs, so Node tests can use it.\n\nconst MAX_STORE_LAYERS = 1000;\nconst BUDGET_DESKTOP = 1024 * 1048576;\nconst BUDGET_ANDROID = 384 * 1048576;\n\n// The working size for a display size and a short side (0 = source). Never above the source. Even.\nfunction workingSize(w, h, short) {\n  const s = short ? Math.min(1, short / Math.min(w, h)) : 1;\n  return { width: Math.max(2, Math.round((w * s) / 2) * 2), height: Math.max(2, Math.round((h * s) / 2) * 2) };\n}\n\n// YUV 4:2:0 in the store: Y (R8, full size) + CbCr (RG8, half size) = 1.5 bytes for each pixel.\nconst frameBytes = (w, h) => w * h + 2 * (w / 2) * (h / 2);\n\nconst defaultBudget = (userAgent = '') => (/Android/i.test(userAgent) ? BUDGET_ANDROID : BUDGET_DESKTOP);\n\n// N = min(MAX_ARRAY_TEXTURE_LAYERS, floor(budget / bytesPerFrame), 1000), at least 1.\nfunction layerCount(budget, maxLayers, w, h) {\n  return Math.max(1, Math.min(maxLayers, Math.floor(budget / frameBytes(w, h)), MAX_STORE_LAYERS));\n}\n\n// \"Buffer: 240 frames at 540p (≈ 330 MB)\".\nfunction bufferText(n, w, h) {\n  return `Buffer: ${n} frames at ${Math.min(w, h)}p (≈ ${Math.round((n * frameBytes(w, h)) / 1048576)} MB)`;\n}\n\nreturn { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText };\n})();\n\n// ---- gpu/gl.js\nconst { createContext, program, texParams, drawQuad } = (() => {\n// WebGL2 helpers (plan §5.3): context, programs, textures.\n\nfunction createContext(canvas) {\n  const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });\n  if (!gl) throw new Error('This browser has no WebGL2.');\n  return gl;\n}\n\nfunction shader(gl, type, src) {\n  const s = gl.createShader(type);\n  gl.shaderSource(s, src);\n  gl.compileShader(s);\n  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost()) {\n    const log = gl.getShaderInfoLog(s);\n    throw new Error(`Shader: ${log}`);\n  }\n  return s;\n}\n\n// A program with its uniform locations: { prog, u: { name: location } }.\nfunction program(gl, vert, frag) {\n  const p = gl.createProgram();\n  gl.attachShader(p, shader(gl, gl.VERTEX_SHADER, vert));\n  gl.attachShader(p, shader(gl, gl.FRAGMENT_SHADER, frag));\n  gl.linkProgram(p);\n  if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost()) throw new Error(`Program: ${gl.getProgramInfoLog(p)}`);\n  const u = {};\n  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS) || 0;\n  for (let i = 0; i < n; i++) {\n    const name = gl.getActiveUniform(p, i).name;\n    u[name] = gl.getUniformLocation(p, name);\n  }\n  return { prog: p, u };\n}\n\nfunction texParams(gl, target, filter = gl.LINEAR, minFilter = filter) {\n  gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, minFilter);\n  gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);\n  gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);\n  gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);\n}\n\n// Draw the one-triangle quad (quad.vert) into the bound target.\nfunction drawQuad(gl) {\n  gl.drawArrays(gl.TRIANGLES, 0, 3);\n}\n\nreturn { createContext, program, texParams, drawQuad };\n})();\n\n// ---- gpu/mapgen.js\nconst { MapGen } = (() => {\n// The map pipeline of the engine (plan §7.3 – §7.6): generate -> blur (2 passes) -> adjust, into a\n// map texture. The custom map (image or video frames) is an R8 texture array.\n\n\n\n\n\nconst QUAD_VERT = \"#version 300 es\\n// One triangle that covers the target. v_uv: 0..1, v = 0 at the first row (image top, in texture space).\\nout vec2 v_uv;\\nvoid main() {\\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\\n  v_uv = p;\\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\\n}\\n\";\nconst STORE_GLSL = \"// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\\nuniform highp sampler2DArray u_storeY;\\nuniform highp sampler2DArray u_storeC;\\nuniform highp isampler2D u_layers; // N x 1: the frame index in each store layer\\nuniform int u_n;\\n\\nvec3 storeRgb(vec2 uv, float layer) {\\n  float y = texture(u_storeY, vec3(uv, layer)).r;\\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\\n}\\n\\n// The layer of frame k, or -1 when frame k is not in the store (or k < 0).\\nint layerOf(int k) {\\n  if (k < 0 || u_n < 1) return -1;\\n  int l = k % u_n;\\n  return texelFetch(u_layers, ivec2(l, 0), 0).r == k ? l : -1;\\n}\\n\\n// The colour of frame k at uv, and a = 1 when frame k is in the store (else black, a = 0).\\nvec4 frameAt(int k, vec2 uv) {\\n  int l = layerOf(k);\\n  return l < 0 ? vec4(0.0) : vec4(storeRgb(uv, float(l)), 1.0);\\n}\\n\\n// The luma of frame k at uv (0 when not in the store).\\nfloat lumaAt(int k, vec2 uv) {\\n  int l = layerOf(k);\\n  return l < 0 ? 0.0 : texture(u_storeY, vec3(uv, float(l))).r;\\n}\\n\";\nconst GEN_FRAG = \"// Map generator (plan §7.3, §7.4, §7.6). Into the raw map texture (one value for each pixel).\\n// The coordinates: offset -> tile (repeat or mirror) -> animation (rotate, pulse, about the frame\\n// centre) -> the source: a built-in map (u_type), the custom image / video map, the luma of frame t\\n// (self), or the motion of frames t-K .. t.\\n#define PI 3.14159265359\\nuniform vec2 u_res;\\nuniform int u_src;      // 0 built-in, 1 custom (image or video)\\nuniform int u_type;     // MAPS index\\nuniform float u_k[12];  // the params of the map\\nuniform float u_phase;  // phase speed × t (cycles)\\nuniform float u_rot;    // rotation speed × t (degrees)\\nuniform float u_pulse;  // the pulse scale at t\\nuniform float u_seed;   // the seed change: floor(t / every)\\nuniform vec2 u_offset;  // 0..1 of the frame\\nuniform vec2 u_tile;\\nuniform bool u_mirror;\\nuniform int u_t;\\n// Custom map (R8 array: an image = 1 layer, a video = its frames).\\nuniform highp sampler2DArray u_custom;\\nuniform float u_layer;\\nuniform vec2 u_csize;   // its size in pixels\\nuniform int u_fit;      // 0 fill, 1 fit, 2 stretch\\nuniform float u_outside;\\nuniform vec2 u_pos;     // 0..1 of the frame\\nuniform float u_scale;\\nuniform float u_crot;   // degrees\\nuniform vec2 u_flip;    // -1 or 1\\nin vec2 v_uv;\\nout vec4 o;\\n\\nuint hash3(uvec3 v) {\\n  v = v * 1664525u + 1013904223u;\\n  v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\\n  v ^= v >> 16u;\\n  v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\\n  return v.x ^ v.y ^ v.z;\\n}\\n// 0..1 for an integer cell and a seed.\\nfloat rnd(vec2 cell, float seed) {\\n  return float(hash3(uvec3(ivec3(int(floor(cell.x)) + 32768, int(floor(cell.y)) + 32768, int(seed)))) & 0xffffffu) / 16777216.0;\\n}\\nfloat vnoise(vec2 p, float seed) {\\n  vec2 i = floor(p), f = fract(p);\\n  vec2 u = f * f * (3.0 - 2.0 * f);\\n  return mix(mix(rnd(i, seed), rnd(i + vec2(1, 0), seed), u.x), mix(rnd(i + vec2(0, 1), seed), rnd(i + vec2(1, 1), seed), u.x), u.y);\\n}\\nvec2 rnd2(vec2 cell, float seed) {\\n  return vec2(rnd(cell, seed), rnd(cell, seed + 7919.0));\\n}\\n// Phase: a clamped ramp (phase 0), or a repeated ramp that moves (phase != 0).\\nfloat ramp(float s) {\\n  return u_phase == 0.0 ? clamp(s, 0.0, 1.0) : fract(s - u_phase);\\n}\\nvec2 dir(float deg) {\\n  float a = radians(deg);\\n  return vec2(cos(a), sin(a));\\n}\\n\\nfloat builtin(vec2 P) {\\n  vec2 R = u_res;\\n  float seed = u_k[3] + u_seed; // where the seed is param 3 (fbm); others set their own below\\n  if (u_type == 0) { // linear: angle, x, y, width\\n    vec2 d = dir(u_k[0]);\\n    float span = abs(R.x * d.x) + abs(R.y * d.y);\\n    return ramp(dot(P - vec2(u_k[1], u_k[2]) * R, d) / max(u_k[3] * span, 1e-3) + 0.5);\\n  }\\n  if (u_type == 1) { // mirrored: angle, x, y, width\\n    vec2 d = dir(u_k[0]);\\n    float span = abs(R.x * d.x) + abs(R.y * d.y);\\n    return ramp(abs(dot(P - vec2(u_k[1], u_k[2]) * R, d)) / max(0.5 * u_k[3] * span, 1e-3));\\n  }\\n  vec2 q = (P - vec2(u_k[0], u_k[1]) * R) / R.y; // from the centre, in frame heights\\n  if (u_type == 2) { // radial: x, y, radius, aspect\\n    q.x /= u_k[3];\\n    return ramp(length(q) / u_k[2]);\\n  }\\n  if (u_type == 3) { // angular: x, y, start, turns\\n    float a = atan(q.y, q.x) - radians(u_k[2]);\\n    return fract(a / (2.0 * PI) * u_k[3] - u_phase);\\n  }\\n  if (u_type == 4) { // spiral: x, y, arms, tightness\\n    float a = atan(q.y, q.x);\\n    return fract(a / (2.0 * PI) * u_k[2] + length(q) * u_k[3] - u_phase);\\n  }\\n  if (u_type == 5) { // box: x, y, size, roundness (0 box, 0.5 circle, 1 diamond)\\n    float r = u_k[3];\\n    float n = r < 0.5 ? exp2(4.0 - 6.0 * r) : 2.0 - 2.0 * (r - 0.5);\\n    vec2 a = abs(q) / u_k[2];\\n    float m = max(a.x, a.y);\\n    float norm = m <= 0.0 ? 0.0 : m * pow(pow(a.x / m, n) + pow(a.y / m, n), 1.0 / n);\\n    return ramp(norm);\\n  }\\n  vec2 uv = P / R;\\n  if (u_type == 6) { // four corners\\n    float v = mix(mix(u_k[0], u_k[1], uv.x), mix(u_k[2], u_k[3], uv.x), uv.y);\\n    return u_phase == 0.0 ? v : fract(v - u_phase);\\n  }\\n  vec2 h = P / R.y; // frame-height units from the top left\\n  if (u_type == 7) { // stripes: count, angle, softness, duty\\n    float f = fract(dot(h, dir(u_k[1])) * u_k[0] - u_phase);\\n    float duty = u_k[3];\\n    float f2 = f > 0.5 * (1.0 + duty) ? f - 1.0 : f;\\n    float e = min(f2, duty - f2);\\n    return clamp(e / max(u_k[2], 1e-4) + 0.5, 0.0, 1.0);\\n  }\\n  if (u_type == 8) { // sine: fx, fy, angle, phase\\n    vec2 d = dir(u_k[2]);\\n    float x = dot(h, d), y = dot(h, vec2(-d.y, d.x));\\n    float ph = u_k[3] + u_phase, s = 0.0, n = 0.0;\\n    if (u_k[0] > 0.0) { s += sin(2.0 * PI * (u_k[0] * x + ph)); n += 1.0; }\\n    if (u_k[1] > 0.0) { s += sin(2.0 * PI * (u_k[1] * y + ph)); n += 1.0; }\\n    return 0.5 + 0.5 * s / max(n, 1.0);\\n  }\\n  if (u_type == 9) { // rings: x, y, count, softness\\n    float f = fract(length(q) * u_k[2] - u_phase);\\n    return mix(f, 0.5 - 0.5 * cos(2.0 * PI * f), u_k[3]);\\n  }\\n  if (u_type == 10) { // checker: cells, softness\\n    vec2 c = h * u_k[0] + vec2(u_phase, 0.0);\\n    float s = sin(PI * c.x) * sin(PI * c.y);\\n    return u_k[1] < 1e-4 ? step(0.0, s) : clamp(0.5 + s / (2.0 * u_k[1]), 0.0, 1.0);\\n  }\\n  if (u_type == 11) { // fbm: scale, octaves, roughness, seed\\n    vec2 p = h * u_k[0] + vec2(u_phase, 0.0);\\n    float sum = 0.0, amp = 1.0, total = 0.0;\\n    for (int i = 0; i < 8; i++) {\\n      if (float(i) >= u_k[1]) break;\\n      sum += amp * vnoise(p, seed + float(i) * 101.0);\\n      total += amp;\\n      amp *= u_k[2];\\n      p *= 2.0;\\n    }\\n    return sum / max(total, 1e-4);\\n  }\\n  if (u_type == 12) { // ridged: scale, octaves, seed\\n    vec2 p = h * u_k[0] + vec2(u_phase, 0.0);\\n    float sum = 0.0, amp = 1.0, total = 0.0;\\n    for (int i = 0; i < 8; i++) {\\n      if (float(i) >= u_k[1]) break;\\n      float n = 1.0 - abs(2.0 * vnoise(p, u_k[2] + u_seed + float(i) * 101.0) - 1.0);\\n      sum += amp * n * n;\\n      total += amp;\\n      amp *= 0.5;\\n      p *= 2.0;\\n    }\\n    return sum / max(total, 1e-4);\\n  }\\n  if (u_type == 13 || u_type == 14) { // worley: scale, seed, metric; voronoi: scale, seed\\n    vec2 p = h * u_k[0] + vec2(u_phase, 0.0);\\n    vec2 i = floor(p);\\n    float best = 1e9, val = 0.0;\\n    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {\\n      vec2 c = i + vec2(x, y);\\n      vec2 d = c + rnd2(c, u_k[1] + u_seed) - p;\\n      float m = u_type == 13 && u_k[2] > 1.5 ? max(abs(d.x), abs(d.y)) : u_type == 13 && u_k[2] > 0.5 ? abs(d.x) + abs(d.y) : length(d);\\n      if (m < best) { best = m; val = rnd(c, u_k[1] + u_seed + 31.0); }\\n    }\\n    return u_type == 13 ? clamp(best, 0.0, 1.0) : val;\\n  }\\n  if (u_type == 15) { // blocks: bw, bh, seed\\n    return rnd(floor((P + vec2(u_phase * u_k[0], 0.0)) / vec2(u_k[0], u_k[1])), u_k[2] + u_seed);\\n  }\\n  if (u_type == 16) { // rows: size, direction (1 = columns), seed\\n    float c = u_k[1] > 0.5 ? P.x : P.y;\\n    return rnd(vec2(floor(c / u_k[0] + u_phase), 0.0), u_k[2] + u_seed);\\n  }\\n  if (u_type == 17) { // bayer: matrix (2^n), base\\n    int n = int(u_k[0] + 0.5);\\n    ivec2 ip = ivec2(floor(P));\\n    int b = 0;\\n    for (int i = 0; i < 3; i++) {\\n      if (i >= n) break;\\n      int sh = n - 1 - i;\\n      int x = (ip.x >> i) & 1, y = (ip.y >> i) & 1;\\n      b |= ((x ^ y) << (2 * sh + 1)) | (y << (2 * sh));\\n    }\\n    float size = float(1 << (2 * n));\\n    return u_k[1] > (float(b) + 0.5) / size ? 1.0 : 0.0;\\n  }\\n  if (u_type == 18) return lumaAt(u_t, P / R); // self: the luma of frame t\\n  if (u_type == 19) { // motion: gain, frames\\n    float s = 0.0;\\n    int K = int(u_k[1] + 0.5);\\n    for (int k = 0; k < 8; k++) {\\n      if (k >= K) break;\\n      if (layerOf(u_t - k - 1) < 0) break;\\n      s += abs(lumaAt(u_t - k, P / R) - lumaAt(u_t - k - 1, P / R));\\n    }\\n    return clamp(s / float(K) * u_k[0], 0.0, 1.0);\\n  }\\n  return 0.0; // subject maps: phase 8\\n}\\n\\nfloat custom(vec2 P) {\\n  vec2 R = u_res;\\n  vec2 p = P - R * 0.5 - u_pos * R;\\n  float a = radians(-u_crot);\\n  p = mat2(cos(a), sin(a), -sin(a), cos(a)) * p / max(u_scale, 1e-3);\\n  p *= u_flip;\\n  vec2 uv;\\n  if (u_fit == 2) uv = p / R + 0.5;\\n  else {\\n    float s = u_fit == 0 ? max(R.x / u_csize.x, R.y / u_csize.y) : min(R.x / u_csize.x, R.y / u_csize.y);\\n    uv = p / (u_csize * s) + 0.5;\\n  }\\n  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return u_outside;\\n  return texture(u_custom, vec3(uv, u_layer)).r;\\n}\\n\\nvoid main() {\\n  vec2 R = u_res;\\n  vec2 uv = v_uv + u_offset;\\n  // Tile: each tile has the full map; mirror: every second tile is flipped.\\n  vec2 tu = uv * u_tile;\\n  vec2 f = fract(tu);\\n  if (u_mirror) f = mix(f, 1.0 - f, mod(floor(tu), 2.0));\\n  vec2 P = f * R;\\n  if (u_src == 1) { o = vec4(custom(P)); return; }\\n  // Animation: rotate and scale about the frame centre.\\n  vec2 c = R * 0.5;\\n  float a = radians(-u_rot);\\n  P = c + mat2(cos(a), sin(a), -sin(a), cos(a)) * (P - c) / u_pulse;\\n  o = vec4(builtin(P));\\n}\\n\";\nconst BLUR_FRAG = \"// Map blur (plan §7.5): one direction of a separable Gaussian (sigma = radius / 2).\\nprecision highp float;\\nuniform highp sampler2D u_in;\\nuniform vec2 u_dir; // (1, 0) or (0, 1)\\nuniform float u_radius;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  ivec2 size = textureSize(u_in, 0);\\n  ivec2 p = ivec2(floor(v_uv * vec2(size)));\\n  float sigma = max(u_radius * 0.5, 0.5);\\n  float sum = 0.0, wsum = 0.0;\\n  int r = int(ceil(u_radius));\\n  for (int i = -64; i <= 64; i++) {\\n    if (i < -r || i > r) continue;\\n    ivec2 q = clamp(p + ivec2(u_dir) * i, ivec2(0), size - 1);\\n    float w = exp(-float(i * i) / (2.0 * sigma * sigma));\\n    sum += w * texelFetch(u_in, q, 0).r;\\n    wsum += w;\\n  }\\n  o = vec4(sum / wsum);\\n}\\n\";\nconst ADJUST_FRAG = \"// Map adjustments (plan §7.5), in the fixed order: levels -> gamma / contrast -> curve -> posterize\\n// -> invert. (The transform and the tile are in mapgen.frag; the blur is mapblur.frag.)\\nprecision highp float;\\nuniform highp sampler2D u_in;\\nuniform highp sampler2D u_curve; // 256 x 1\\nuniform bool u_useCurve;\\nuniform float u_black, u_white, u_gamma, u_contrast;\\nuniform int u_posterize; // 0, or 2..64 levels\\nuniform bool u_invert;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  float v = texelFetch(u_in, ivec2(floor(v_uv * vec2(textureSize(u_in, 0)))), 0).r;\\n  v = clamp((v - u_black) / max(u_white - u_black, 1e-4), 0.0, 1.0);\\n  v = pow(v, 1.0 / max(u_gamma, 1e-3));\\n  float k = tan((u_contrast + 1.0) * 0.785398); // contrast -1..1 -> slope 0..inf (0 -> 1)\\n  v = clamp((v - 0.5) * k + 0.5, 0.0, 1.0);\\n  if (u_useCurve) {\\n    float x = v * 255.0;\\n    float i = floor(min(x, 254.0));\\n    v = mix(texelFetch(u_curve, ivec2(int(i), 0), 0).r, texelFetch(u_curve, ivec2(int(i) + 1, 0), 0).r, x - i);\\n  }\\n  if (u_posterize > 1) v = min(floor(v * float(u_posterize)), float(u_posterize - 1)) / float(u_posterize - 1);\\n  if (u_invert) v = 1.0 - v;\\n  o = vec4(v);\\n}\\n\";\nconst FITS = { fill: 0, fit: 1, stretch: 2 };\n\nclass MapGen {\n  constructor(engine) {\n    this.e = engine;\n    const gl = (this.gl = engine.gl);\n    this.float = engine.caps.floatTargets;\n    this.gen = program(gl, QUAD_VERT, `#version 300 es\\nprecision highp float;\\nprecision highp int;\\n${STORE_GLSL}\\n${GEN_FRAG}`);\n    this.blur = program(gl, QUAD_VERT, `#version 300 es\\n${BLUR_FRAG}`);\n    this.adjust = program(gl, QUAD_VERT, `#version 300 es\\n${ADJUST_FRAG}`);\n    this.curveTex = gl.createTexture();\n    this.curveKey = '';\n    this.custom = null; // { tex, w, h, layers, count, rotation }\n    this.emptyCustom = this.makeArray(1, 1, 1);\n    this.targets = null;\n  }\n\n  // A map texture (R32F, or RGBA8 without float targets).\n  makeTarget(w, h) {\n    const gl = this.gl;\n    const t = gl.createTexture();\n    gl.bindTexture(gl.TEXTURE_2D, t);\n    gl.texStorage2D(gl.TEXTURE_2D, 1, this.float ? gl.R32F : gl.RGBA8, w, h);\n    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);\n    return t;\n  }\n\n  makeArray(w, h, layers) {\n    const gl = this.gl;\n    const t = gl.createTexture();\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);\n    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, w, h, layers);\n    texParams(gl, gl.TEXTURE_2D_ARRAY);\n    return t;\n  }\n\n  // The work textures for a size: { w, h, raw, a, b }.\n  work(w, h) {\n    const gl = this.gl;\n    if (this.targets && this.targets.w === w && this.targets.h === h) return this.targets;\n    if (this.targets) for (const k of ['raw', 'a', 'b']) gl.deleteTexture(this.targets[k]);\n    this.targets = { w, h, raw: this.makeTarget(w, h), a: this.makeTarget(w, h), b: this.makeTarget(w, h) };\n    return this.targets;\n  }\n\n  into(tex, w, h) {\n    const gl = this.gl;\n    gl.bindFramebuffer(gl.FRAMEBUFFER, this.e.fb);\n    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);\n    gl.viewport(0, 0, w, h);\n  }\n\n  // Custom map: allocate for count frames of w x h (an image: count 1).\n  beginCustom(w, h, count, rotation = 0) {\n    this.clearCustom();\n    this.custom = { tex: this.makeArray(w, h, count), w, h, layers: count, count: 0, rotation };\n    return this.custom;\n  }\n\n  clearCustom() {\n    if (this.custom) this.gl.deleteTexture(this.custom.tex);\n    this.custom = null;\n  }\n\n  // Put a picture (ImageBitmap or VideoFrame) into layer i of the custom map, as luma.\n  putCustom(i, source, rotation) {\n    const gl = this.gl;\n    const e = this.e;\n    const c = this.custom;\n    gl.activeTexture(gl.TEXTURE0);\n    gl.bindTexture(gl.TEXTURE_2D, e.src);\n    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);\n    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);\n    gl.generateMipmap(gl.TEXTURE_2D);\n    texParams(gl, gl.TEXTURE_2D, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR);\n    gl.useProgram(e.upload.prog);\n    gl.uniform1i(e.upload.u.u_src, 0);\n    gl.uniform1i(e.upload.u.u_rot, rotation || 0);\n    gl.uniform1i(e.upload.u.u_mode, 0);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, e.fb);\n    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, c.tex, 0, i);\n    gl.viewport(0, 0, c.w, c.h);\n    drawQuad(gl);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    c.count = Math.max(c.count, i + 1);\n  }\n\n  curve(points) {\n    const gl = this.gl;\n    const key = JSON.stringify(points);\n    if (key === this.curveKey) return;\n    this.curveKey = key;\n    const table = curveTable(points);\n    gl.bindTexture(gl.TEXTURE_2D, this.curveTex);\n    if (this.float) gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, 256, 1, 0, gl.RED, gl.FLOAT, table);\n    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 256, 1, 0, gl.RED, gl.UNSIGNED_BYTE, Uint8Array.from(table, (v) => Math.round(v * 255)));\n    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);\n  }\n\n  // Render the map of frame t (map: the map settings) into out (w x h).\n  run(map, t, out, w, h) {\n    const gl = this.gl;\n    const e = this.e;\n    const W = this.work(w, h);\n    const A = map.adjust, an = map.anim;\n    const custom = (map.source === 'image' || map.source === 'video') && this.custom && this.custom.count;\n\n    // 1. Generate.\n    const g = this.gen;\n    this.into(W.raw, w, h);\n    gl.useProgram(g.prog);\n    e.bindStore(g);\n    gl.activeTexture(gl.TEXTURE4);\n    gl.bindTexture(gl.TEXTURE_2D, e.layersTex);\n    gl.uniform1i(g.u.u_layers, 4);\n    gl.uniform1i(g.u.u_n, e.n);\n    gl.activeTexture(gl.TEXTURE5);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, custom ? this.custom.tex : this.emptyCustom);\n    gl.uniform1i(g.u.u_custom, 5);\n    gl.uniform2f(g.u.u_res, w, h);\n    gl.uniform1i(g.u.u_t, t);\n    gl.uniform1i(g.u.u_src, custom ? 1 : 0);\n    gl.uniform2f(g.u.u_offset, A.offsetX, A.offsetY);\n    gl.uniform2f(g.u.u_tile, Math.max(1, A.tileX), Math.max(1, A.tileY));\n    gl.uniform1i(g.u.u_mirror, A.mirrorTile ? 1 : 0);\n    if (custom) {\n      const c = this.custom, im = map.image;\n      const layer = map.source === 'video' ? videoMapFrame(t, c.count, map.video.speed, map.video.offset, map.video.end) : 0;\n      gl.uniform1f(g.u.u_layer, layer);\n      gl.uniform2f(g.u.u_csize, c.w, c.h);\n      gl.uniform1i(g.u.u_fit, FITS[im.fit] ?? 0);\n      gl.uniform1f(g.u.u_outside, im.outside);\n      gl.uniform2f(g.u.u_pos, im.x, im.y);\n      gl.uniform1f(g.u.u_scale, im.scale);\n      gl.uniform1f(g.u.u_crot, im.rotation);\n      gl.uniform2f(g.u.u_flip, im.flipX ? -1 : 1, im.flipY ? -1 : 1);\n    } else {\n      const type = MAP_INDEX[map.type] ?? 0;\n      const k = new Float32Array(12);\n      k.set(paramArray(map.type, map.params[map.type]));\n      gl.uniform1i(g.u.u_type, type);\n      gl.uniform1fv(g.u['u_k[0]'], k);\n      gl.uniform1f(g.u.u_phase, an.phaseSpeed * t);\n      gl.uniform1f(g.u.u_rot, an.rotSpeed * t);\n      gl.uniform1f(g.u.u_pulse, 1 + an.pulseAmount * Math.sin((2 * Math.PI * t) / Math.max(1, an.pulsePeriod)));\n      gl.uniform1f(g.u.u_seed, an.seedEvery > 0 ? Math.floor(t / an.seedEvery) : 0);\n    }\n    drawQuad(gl);\n\n    // 2. Blur (two passes).\n    let src = W.raw;\n    if (A.blur > 0) {\n      gl.useProgram(this.blur.prog);\n      gl.uniform1f(this.blur.u.u_radius, Math.min(64, A.blur));\n      gl.uniform1i(this.blur.u.u_in, 0);\n      gl.activeTexture(gl.TEXTURE0);\n      this.into(W.a, w, h);\n      gl.bindTexture(gl.TEXTURE_2D, W.raw);\n      gl.uniform2f(this.blur.u.u_dir, 1, 0);\n      drawQuad(gl);\n      this.into(W.b, w, h);\n      gl.bindTexture(gl.TEXTURE_2D, W.a);\n      gl.uniform2f(this.blur.u.u_dir, 0, 1);\n      drawQuad(gl);\n      src = W.b;\n    }\n\n    // 3. Adjust.\n    const ad = this.adjust;\n    const pts = Array.isArray(A.curve) ? A.curve : CURVE_PRESETS[A.curve] || CURVE_PRESETS.linear;\n    const useCurve = JSON.stringify(pts) !== JSON.stringify(CURVE_PRESETS.linear);\n    if (useCurve) this.curve(pts);\n    this.into(out, w, h);\n    gl.useProgram(ad.prog);\n    gl.activeTexture(gl.TEXTURE0);\n    gl.bindTexture(gl.TEXTURE_2D, src);\n    gl.activeTexture(gl.TEXTURE1);\n    gl.bindTexture(gl.TEXTURE_2D, this.curveTex);\n    gl.uniform1i(ad.u.u_in, 0);\n    gl.uniform1i(ad.u.u_curve, 1);\n    gl.uniform1i(ad.u.u_useCurve, useCurve ? 1 : 0);\n    gl.uniform1f(ad.u.u_black, A.black);\n    gl.uniform1f(ad.u.u_white, A.white);\n    gl.uniform1f(ad.u.u_gamma, A.gamma);\n    gl.uniform1f(ad.u.u_contrast, Math.max(-0.99, Math.min(0.99, A.contrast)));\n    gl.uniform1i(ad.u.u_posterize, A.posterize);\n    gl.uniform1i(ad.u.u_invert, A.invert ? 1 : 0);\n    drawQuad(gl);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n  }\n\n  // Thumbnails (plan §12.4): each map of the list at w x h for frame t, as luma bytes.\n  thumbs(list, t, w, h) {\n    const gl = this.gl;\n    const out = this.makeTarget(w, h);\n    const save = this.targets;\n    this.targets = null;\n    const res = [];\n    const px = new Float32Array(w * h * 4);\n    const px8 = new Uint8Array(w * h * 4);\n    for (const map of list) {\n      this.run(map, t, out, w, h);\n      this.into(out, w, h);\n      const y = new Uint8Array(w * h);\n      if (this.float) {\n        gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, px);\n        for (let i = 0; i < w * h; i++) y[i] = Math.round(Math.max(0, Math.min(1, px[i * 4])) * 255);\n      } else {\n        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px8);\n        for (let i = 0; i < w * h; i++) y[i] = px8[i * 4];\n      }\n      res.push(y);\n    }\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    if (this.targets) for (const k of ['raw', 'a', 'b']) gl.deleteTexture(this.targets[k]);\n    this.targets = save;\n    gl.deleteTexture(out);\n    return res;\n  }\n}\n\nreturn { MapGen };\n})();\n\n// ---- gpu/engine.js\nconst { Engine } = (() => {\n// The GPU engine (plan §5.1, §6.3, §6.4). It owns the WebGL2 context of the preview canvas and the\n// frame store. It runs in the GPU worker (OffscreenCanvas), or on the main thread as the fallback.\n//\n// handle(msg) -> a reply object (or null). Messages:\n//   { cmd: 'configure', width, height, rotation, budget, failAlloc } -> { cmd: 'configured', n, budget, bytes }\n//   { cmd: 'upload', index, frame, show }  put the frame into the store; show: render it  -> { cmd: 'uploaded', index }\n//   { cmd: 'render', index }               render frame index (the view of the settings)    -> { cmd: 'rendered', index }\n//   { cmd: 'render', index, delay }        tests: the stored frame index - delay            -> { cmd: 'rendered', index }\n//   { cmd: 'settings', settings }          the effect settings; renders the last frame again -> { cmd: 'rendered' }\n//   { cmd: 'read' }                        render again and read the canvas (tests)         -> { cmd: 'pixels', width, height, pixels }\n//   { cmd: 'mapImage', bitmap }                       custom map: an image (luma)        -> { cmd: 'map', w, h, count }\n//   { cmd: 'mapVideoBegin', width, height, count }    custom map: a video of count frames -> { cmd: 'map', ... }\n//   { cmd: 'mapVideoFrame', i, frame, rotation }      one frame of it                     -> { cmd: 'map', ... }\n//   { cmd: 'mapClear' }\n//   { cmd: 'thumbs', maps, t, width, height }  map thumbnails (luma bytes)                -> { cmd: 'thumbs', images }\n//   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }\n\n\n\n\n\n\nconst QUAD_VERT = \"#version 300 es\\n// One triangle that covers the target. v_uv: 0..1, v = 0 at the first row (image top, in texture space).\\nout vec2 v_uv;\\nvoid main() {\\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\\n  v_uv = p;\\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\\n}\\n\";\nconst UPLOAD_FRAG = \"#version 300 es\\n// Store upload (plan §6.3): the source frame (RGB, as the browser gives it), turned to the display\\n// orientation and scaled to the working size, to BT.709 full-range Y (u_mode 0) or CbCr (u_mode 1).\\nprecision highp float;\\nuniform sampler2D u_src;\\nuniform int u_rot;   // 0, 90, 180, 270: clockwise turn of the display picture\\nuniform int u_mode;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvec2 srcUv(vec2 d) {\\n  if (u_rot == 90) return vec2(d.y, 1.0 - d.x);\\n  if (u_rot == 180) return vec2(1.0 - d.x, 1.0 - d.y);\\n  if (u_rot == 270) return vec2(1.0 - d.y, d.x);\\n  return d;\\n}\\n\\nvoid main() {\\n  vec3 c = texture(u_src, srcUv(v_uv)).rgb;\\n  float y = dot(c, vec3(0.2126, 0.7152, 0.0722));\\n  if (u_mode == 0) o = vec4(y, 0.0, 0.0, 1.0);\\n  else o = vec4((c.b - y) / 1.8556 + 0.5, (c.r - y) / 1.5748 + 0.5, 0.0, 1.0);\\n}\\n\";\nconst STORE_GLSL = \"// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\\nuniform highp sampler2DArray u_storeY;\\nuniform highp sampler2DArray u_storeC;\\nuniform highp isampler2D u_layers; // N x 1: the frame index in each store layer\\nuniform int u_n;\\n\\nvec3 storeRgb(vec2 uv, float layer) {\\n  float y = texture(u_storeY, vec3(uv, layer)).r;\\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\\n}\\n\\n// The layer of frame k, or -1 when frame k is not in the store (or k < 0).\\nint layerOf(int k) {\\n  if (k < 0 || u_n < 1) return -1;\\n  int l = k % u_n;\\n  return texelFetch(u_layers, ivec2(l, 0), 0).r == k ? l : -1;\\n}\\n\\n// The colour of frame k at uv, and a = 1 when frame k is in the store (else black, a = 0).\\nvec4 frameAt(int k, vec2 uv) {\\n  int l = layerOf(k);\\n  return l < 0 ? vec4(0.0) : vec4(storeRgb(uv, float(l)), 1.0);\\n}\\n\\n// The luma of frame k at uv (0 when not in the store).\\nfloat lumaAt(int k, vec2 uv) {\\n  int l = layerOf(k);\\n  return l < 0 ? 0.0 : texture(u_storeY, vec3(uv, float(l))).r;\\n}\\n\";\nconst SHOW_FRAG = \"// Preview of one stored frame (Original view; the debug delay view of phase 3). u_layer < 0: black\\n// (the frame is not in the store, or it is before frame 0: \\\"not online\\\", D8).\\nuniform float u_layer;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\\n  o = u_layer < 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(storeRgb(uv, u_layer), 1.0);\\n}\\n\";\nconst TIMEMAP_FRAG = \"// Mode 1, Time Map (plan §7.1). For each pixel: d = map value × Max delay (frames, after the delay\\n// steps), src = t − d. src < 0: black (not online, D8). Frame blend: mix the two frames around src;\\n// else the frame t − round(d). Each frame comes from the store at the same pixel. A frame that is not\\n// in the store is black. u_view: 0 = result, 1 = original (frame t), 2 = the map.\\nuniform highp sampler2D u_map;\\nuniform int u_t;\\nuniform float u_max;\\nuniform int u_steps;\\nuniform bool u_blend;\\nuniform int u_view;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\\n  if (u_view == 1) { o = vec4(frameAt(u_t, uv).rgb, 1.0); return; }\\n  float v = texture(u_map, uv).r;\\n  if (u_view == 2) { o = vec4(v, v, v, 1.0); return; }\\n  if (u_steps > 1) v = min(floor(v * float(u_steps)), float(u_steps - 1)) / float(u_steps - 1);\\n  float d = v * u_max;\\n  float src = float(u_t) - d;\\n  if (src < -1e-3) { o = vec4(0.0, 0.0, 0.0, 1.0); return; } // the epsilon: float error of v × Max\\n  src = max(src, 0.0);\\n  vec3 c;\\n  if (u_blend) {\\n    float k0 = floor(src);\\n    float f = src - k0;\\n    c = frameAt(int(k0), uv).rgb;\\n    if (f > 0.0) c = mix(c, frameAt(int(k0) + 1, uv).rgb, f);\\n  } else {\\n    c = frameAt(u_t - int(floor(d + 0.5)), uv).rgb;\\n  }\\n  o = vec4(c, 1.0);\\n}\\n\";\nconst VIEWS = { result: 0, original: 1, map: 2 };\n\nclass Engine {\n  constructor(canvas) {\n    this.canvas = canvas;\n    const gl = (this.gl = createContext(canvas));\n    this.caps = {\n      maxLayers: gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS),\n      maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE),\n      floatTargets: !!gl.getExtension('EXT_color_buffer_float'),\n    };\n    this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);\n    this.show = program(gl, QUAD_VERT, `#version 300 es\\nprecision highp float;\\n${STORE_GLSL}\\n${SHOW_FRAG}`);\n    this.timemap = program(gl, QUAD_VERT, `#version 300 es\\nprecision highp float;\\n${STORE_GLSL}\\n${TIMEMAP_FRAG}`);\n    this.mapgen = new MapGen(this);\n    this.mapTex = null;\n    this.mapKey = '';\n    this.layersTex = null;\n    this.settings = null;\n    this.vao = gl.createVertexArray();\n    gl.bindVertexArray(this.vao);\n    this.src = gl.createTexture();\n    this.fb = gl.createFramebuffer();\n    this.storeY = this.storeC = null;\n    this.n = 0;\n    this.layerFrame = null; // the frame index in each layer, -1 = empty\n    this.last = { index: -1, delay: undefined };\n    this.lost = false;\n    canvas.addEventListener('webglcontextlost', (e) => {\n      e.preventDefault();\n      this.lost = true;\n    });\n  }\n\n  handle(m) {\n    if (m.cmd === 'caps') return { cmd: 'caps', ...this.caps };\n    if (m.cmd === 'configure') return this.configure(m);\n    if (m.cmd === 'upload') {\n      this.put(m.index, m.frame);\n      if (m.show) this.render(m.index);\n      return { cmd: 'uploaded', index: m.index };\n    }\n    if (m.cmd === 'render') {\n      this.render(m.index, m.delay);\n      return { cmd: 'rendered', index: m.index };\n    }\n    if (m.cmd === 'settings') {\n      const old = this.settings;\n      this.settings = m.settings;\n      if (this.n && this.last.index >= 0) this.render(this.last.index, this.last.delay);\n      return { cmd: 'rendered', index: this.last.index };\n    }\n    if (m.cmd === 'read') return this.read();\n    if (m.cmd === 'mapImage') {\n      const b = m.bitmap;\n      const s = Math.min(1, 2048 / Math.max(b.width, b.height));\n      const c = this.mapgen.beginCustom(Math.max(1, Math.round(b.width * s)), Math.max(1, Math.round(b.height * s)), 1);\n      this.mapgen.putCustom(0, b, 0);\n      b.close();\n      return this.mapChanged(c);\n    }\n    if (m.cmd === 'mapVideoBegin') return this.mapChanged(this.mapgen.beginCustom(m.width, m.height, m.count));\n    if (m.cmd === 'mapVideoFrame') {\n      try {\n        this.mapgen.putCustom(m.i, m.frame, m.rotation);\n      } finally {\n        m.frame.close();\n      }\n      return this.mapChanged(this.mapgen.custom);\n    }\n    if (m.cmd === 'mapClear') {\n      this.mapgen.clearCustom();\n      return this.mapChanged(null);\n    }\n    if (m.cmd === 'thumbs') return { cmd: 'thumbs', images: this.mapgen.thumbs(m.maps, m.t, m.width, m.height) };\n    return null;\n  }\n\n  // Make the store for the working size. The budget halves until the allocation works (plan §6.4).\n  configure(m) {\n    const gl = this.gl;\n    const { width: w, height: h } = m;\n    this.w = w;\n    this.h = h;\n    this.rot = m.rotation || 0;\n    this.canvas.width = w;\n    this.canvas.height = h;\n    let budget = m.budget;\n    let fails = m.failAlloc || 0; // tests: act as if the first allocations ran out of memory\n    for (;;) {\n      this.free();\n      const n = layerCount(budget, this.caps.maxLayers, w, h);\n      while (gl.getError() !== gl.NO_ERROR) { /* clear old errors */ }\n      this.storeY = gl.createTexture();\n      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);\n      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, w, h, n);\n      texParams(gl, gl.TEXTURE_2D_ARRAY);\n      this.storeC = gl.createTexture();\n      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);\n      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG8, w / 2, h / 2, n);\n      texParams(gl, gl.TEXTURE_2D_ARRAY);\n      // Touch the last layer, so that the driver must commit the memory now.\n      this.n = n;\n      this.clearLayer(n - 1);\n      const err = gl.getError();\n      const failed = fails > 0 || err === gl.OUT_OF_MEMORY || gl.isContextLost();\n      if (!failed) break;\n      fails--;\n      if (n === 1 || gl.isContextLost()) {\n        if (gl.isContextLost()) throw new Error('The GPU context was lost.');\n        break;\n      }\n      budget = Math.floor(budget / 2);\n    }\n    this.layerFrame = new Int32Array(this.n).fill(-1);\n    this.last = { index: -1, delay: undefined };\n    // The frame index of each layer, for the shaders (R32I, N x 1).\n    if (this.layersTex) gl.deleteTexture(this.layersTex);\n    this.layersTex = gl.createTexture();\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32I, this.n, 1, 0, gl.RED_INTEGER, gl.INT, this.layerFrame);\n    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);\n    // The map (R32F when float targets exist, so long delays keep their precision; else RGBA8).\n    if (this.mapTex) gl.deleteTexture(this.mapTex);\n    this.mapTex = gl.createTexture();\n    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);\n    if (this.caps.floatTargets) gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);\n    else gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);\n    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);\n    this.mapKey = '';\n    gl.viewport(0, 0, w, h);\n    gl.clearColor(0, 0, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h) };\n  }\n\n  free() {\n    const gl = this.gl;\n    if (this.storeY) gl.deleteTexture(this.storeY);\n    if (this.storeC) gl.deleteTexture(this.storeC);\n    this.storeY = this.storeC = null;\n  }\n\n  target(tex, layer, w, h) {\n    const gl = this.gl;\n    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);\n    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, tex, 0, layer);\n    gl.viewport(0, 0, w, h);\n  }\n\n  clearLayer(layer) {\n    const gl = this.gl;\n    this.target(this.storeY, layer, this.w, this.h);\n    gl.clearColor(0, 0, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    this.target(this.storeC, layer, this.w / 2, this.h / 2);\n    gl.clearColor(0.5, 0.5, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n  }\n\n  // Upload a VideoFrame into layer index mod N (plan §6.3), then close it.\n  put(index, frame) {\n    const gl = this.gl;\n    try {\n      gl.activeTexture(gl.TEXTURE0);\n      gl.bindTexture(gl.TEXTURE_2D, this.src);\n      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);\n      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, frame);\n      // A large source: mipmaps, so the scale down does not alias.\n      const turned = this.rot % 180 !== 0;\n      const sw = turned ? frame.displayHeight : frame.displayWidth;\n      const mip = sw > 2 * this.w;\n      if (mip) gl.generateMipmap(gl.TEXTURE_2D);\n      texParams(gl, gl.TEXTURE_2D, gl.LINEAR, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);\n    } finally {\n      frame.close();\n    }\n    const layer = index % this.n;\n    gl.useProgram(this.upload.prog);\n    gl.uniform1i(this.upload.u.u_src, 0);\n    gl.uniform1i(this.upload.u.u_rot, this.rot);\n    gl.uniform1i(this.upload.u.u_mode, 0);\n    this.target(this.storeY, layer, this.w, this.h);\n    drawQuad(gl);\n    gl.uniform1i(this.upload.u.u_mode, 1);\n    this.target(this.storeC, layer, this.w / 2, this.h / 2);\n    drawQuad(gl);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    this.layerFrame[layer] = index;\n    if (this.settings && isDynamic(this.settings.map)) this.mapKey = ''; // self / motion read the store\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));\n  }\n\n  mapChanged(c) {\n    this.mapKey = '';\n    return { cmd: 'map', ...(c ? { w: c.w, h: c.h, count: c.count, layers: c.layers } : { count: 0 }) };\n  }\n\n  // The map of frame t: rendered again when its settings change, and for each frame when it is\n  // dynamic (animation, self, motion, video map).\n  updateMap(t) {\n    if (!this.settings) return;\n    const map = this.settings.map;\n    const key = JSON.stringify(map) + (isDynamic(map) ? `@${t}` : '');\n    if (key === this.mapKey) return;\n    this.mapgen.run(map, t, this.mapTex, this.w, this.h);\n    this.mapKey = key;\n  }\n\n  // The layer of frame t, or -1 when it is not in the store (or t < 0).\n  layerOf(t) {\n    if (t < 0 || !this.n) return -1;\n    const l = t % this.n;\n    return this.layerFrame[l] === t ? l : -1;\n  }\n\n  bindStore(prog) {\n    const gl = this.gl;\n    gl.activeTexture(gl.TEXTURE1);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);\n    gl.activeTexture(gl.TEXTURE2);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);\n    gl.uniform1i(prog.u.u_storeY, 1);\n    gl.uniform1i(prog.u.u_storeC, 2);\n  }\n\n  // Render frame index to the canvas. delay (tests): show the stored frame index - delay.\n  render(index, delay) {\n    const gl = this.gl;\n    this.last = { index, delay };\n    this.updateMap(index);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    gl.viewport(0, 0, this.w, this.h);\n    if (delay !== undefined || !this.settings) {\n      gl.useProgram(this.show.prog);\n      this.bindStore(this.show);\n      gl.uniform1f(this.show.u.u_layer, this.layerOf(index - (delay || 0)));\n      drawQuad(gl);\n      return;\n    }\n    const s = this.settings;\n    const p = this.timemap;\n    gl.useProgram(p.prog);\n    this.bindStore(p);\n    gl.activeTexture(gl.TEXTURE3);\n    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);\n    gl.activeTexture(gl.TEXTURE4);\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.uniform1i(p.u.u_map, 3);\n    gl.uniform1i(p.u.u_layers, 4);\n    gl.uniform1i(p.u.u_n, this.n);\n    gl.uniform1i(p.u.u_t, index);\n    gl.uniform1f(p.u.u_max, Math.min(s.timemap.maxDelay, this.n - 1));\n    gl.uniform1i(p.u.u_steps, s.timemap.steps);\n    gl.uniform1i(p.u.u_blend, s.timemap.blend ? 1 : 0);\n    gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);\n    drawQuad(gl);\n  }\n\n  read() {\n    const gl = this.gl;\n    this.render(this.last.index, this.last.delay);\n    const pixels = new Uint8Array(this.w * this.h * 4);\n    gl.readPixels(0, 0, this.w, this.h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);\n    return { cmd: 'pixels', width: this.w, height: this.h, pixels };\n  }\n}\n\nreturn { Engine };\n})();\n\n// ---- gpu/gpu-worker.js\nconst {  } = (() => {\n// GPU worker (plan §5.1): the engine on the OffscreenCanvas of the preview.\n// In: { id, msg } with msg.cmd 'init' (msg.canvas) or an engine message. Out: { id, reply } or { id, error }.\n\n\n\nlet engine = null;\n\nself.onmessage = (e) => {\n  const { id, msg } = e.data;\n  try {\n    let reply;\n    if (msg.cmd === 'init') {\n      engine = new Engine(msg.canvas);\n      reply = { cmd: 'caps', ...engine.caps };\n    } else reply = engine.handle(msg);\n    if (engine && engine.lost) self.postMessage({ id, error: 'The GPU context was lost.' });\n    else self.postMessage({ id, reply }, reply && reply.pixels ? [reply.pixels.buffer] : []);\n  } catch (err) {\n    if (msg.frame) try { msg.frame.close(); } catch { /* closed */ }\n    self.postMessage({ id, error: String(err && err.message ? err.message : err) });\n  }\n};\n\nreturn {  };\n})();\n";
 
 let player, preview, timeline, gpu, inspector;
 const settings = clone(DEFAULTS);
 // The store state: { short (the preview setting), width, height, n, bytes, budget }.
 const store = { short: 540, budget: 0, failAlloc: 0 };
+const mapInfo = { mapFrames: 0 };
 
 function showMessage(text) {
   const m = $('message');
@@ -1328,13 +1919,65 @@ async function configureStore() {
   if (settings.timemap.maxDelay > r.n - 1) settings.timemap.maxDelay = r.n - 1;
   inspector.build(settings, limits());
   await applySettings();
+  updateThumbs();
   return r;
 }
 
 const limits = () => ({ maxDelay: Math.max(0, store.n - 1) });
 
-// The history that the effect needs: Mode 1, the Max delay.
-const effectDepth = () => (settings.mode === 'timemap' && settings.view !== 'original' ? settings.timemap.maxDelay : 0);
+// The history that the effect needs: Mode 1, the Max delay (and the frames of the Motion map).
+function effectDepth() {
+  if (settings.mode !== 'timemap' || settings.view === 'original') return 0;
+  const m = settings.map;
+  const motion = m.source === 'builtin' && m.type === 'motion' ? m.params.motion.frames + 1 : 0;
+  return Math.max(settings.timemap.maxDelay, motion);
+}
+
+// The map thumbnails (plan §12.4): each built-in map with its params, at the current frame.
+let thumbTimer = 0;
+function updateThumbs(only) {
+  clearTimeout(thumbTimer);
+  thumbTimer = setTimeout(async () => {
+    if (!player.info || settings.map.source !== 'builtin') return;
+    const ids = only ? [only] : MAPS.filter((m) => !m.needs).map((m) => m.id);
+    const maps = ids.map((id) => ({ ...clone(settings.map), source: 'builtin', type: id, anim: { ...settings.map.anim }, adjust: settings.map.adjust }));
+    const r = await gpu.call({ cmd: 'thumbs', maps, t: Math.max(0, player.current), width: THUMB_W, height: THUMB_H });
+    inspector.drawThumbs(Object.fromEntries(ids.map((id, i) => [id, r.images[i]])));
+  }, only ? 120 : 30);
+}
+
+// Open a custom map file (plan §7.4).
+function openMap(kind) {
+  const input = $('mapFileInput');
+  input.accept = kind === 'image' ? 'image/png,image/jpeg,image/webp' : 'video/mp4,video/quicktime,.mp4,.mov,.m4v';
+  input.dataset.kind = kind;
+  input.value = '';
+  input.click();
+}
+
+async function loadMapFile(file, kind) {
+  if (!file) return;
+  showMessage('');
+  try {
+    if (kind === 'image') {
+      await loadImageMap(file, gpu);
+      settings.map.image.name = file.name;
+    } else {
+      const caps = await gpu.call({ cmd: 'caps' });
+      const r = await loadVideoMap(file, gpu, { workerSrc: DECODE_WORKER, short: Math.min(store.height || 540, 540), maxLayers: caps.maxLayers, onProgress: setProgress });
+      settings.map.video.name = file.name;
+      mapInfo.mapFrames = r.count;
+      setProgress(null);
+    }
+    settings.map.source = kind;
+  } catch (e) {
+    setProgress(null);
+    showMessage(e.message);
+    return;
+  }
+  inspector.build(settings, limits());
+  await applySettings();
+}
 
 // Send the settings to the engine. When the effect needs more history, a seek decodes it.
 async function applySettings() {
@@ -1349,7 +1992,12 @@ async function applySettings() {
 // A setting changed in the UI.
 function change(path, value) {
   setPath(settings, path, value);
-  inspector.refresh(settings);
+  if (path === 'map.source' || path === 'map.type' || path === 'mode') {
+    inspector.build(settings, limits());
+    updateThumbs();
+  } else inspector.refresh(settings);
+  if (path.startsWith('map.params.')) updateThumbs(path.split('.')[2]);
+  else if (path.startsWith('map.adjust.') || path.startsWith('map.anim.')) updateThumbs();
   if (path === 'view') for (const b of document.querySelectorAll('#viewBar button')) b.classList.toggle('on', b.dataset.view === value);
   applySettings();
 }
@@ -1435,11 +2083,12 @@ async function start() {
     onProgress: setProgress,
   });
   timeline = new Timeline($('transport'), player);
-  inspector = new Inspector($('inspector'), change);
+  inspector = new Inspector($('inspector'), { change, openMap, info: () => mapInfo });
   inspector.build(settings, { maxDelay: 999 });
   gpu.call({ cmd: 'settings', settings: clone(settings) });
   for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
-  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings });
+  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs });
+  $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));
   $('resSelect').addEventListener('change', async (e) => {
     store.short = Number(e.target.value);
     if (!player.info) return;

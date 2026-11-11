@@ -7,7 +7,7 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **phase 4 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, and **Mode 1 — Time Map** with the Linear map. The other maps, Slit Scan, the cutout, the compositor, and the export come in the next phases.
+> Status: v0.1.0, **phase 5 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, and **Mode 1 — Time Map** with the full map library, image and video maps, map adjustments, and map animation. Slit Scan, the cutout, the compositor, and the export come in the next phases.
 
 ## How to use
 
@@ -31,10 +31,15 @@ A greyscale map gives each pixel a delay. Black = the current frame. White = the
 | Max delay (white) | 0 … N − 1 frames (N: the buffer of the status bar) | 30 |
 | Delay steps | 0 (smooth), 2 … 64 | 0 |
 | Frame blend | On / Off. On: a delay between two frames mixes them (no steps on smooth gradients) | On |
-| Map | Linear (more maps in phase 5) | Linear |
-| Linear: Angle | 0–360° (0° = to the right, 90° = down) | 90° |
-| Linear: Position x, y | 0–1 (the point with the middle value) | 0.5, 0.5 |
-| Linear: Width | 0.05–4 (the ramp length, 1 = the full frame) | 1 |
+| Map source | Built-in / Image / Video | Built-in: Linear |
+
+**Built-in maps** (each with its own parameters; the grid in the inspector shows a thumbnail of each one): Linear, Mirrored, Radial, Angular, Spiral, Diamond / Box, Four corners, Stripes, Sine waves, Rings, Checkerboard, Value noise (fBm), Ridged noise, Cellular (Worley), Voronoi cells, Random blocks, Random rows / columns, Bayer dither, Video luminance (the luma of the current frame: bright = old), and Motion (the change between frames: moving areas = old). Subject mask and Subject distance need the cutout (a later version).
+
+**Image map** (PNG, JPEG, WebP) and **video map** (MP4, MOV): converted to luma (BT.709). Fit: **Fill** (cover and crop), **Fit** (contain; the empty area has the Outside value), **Stretch**. Transform: position, scale, rotation, flip. A video map is frame-locked: map frame = source frame × Speed + Offset, with **Loop**, **Hold last**, or **Ping-pong** at the end. It is decoded once when you open it (at most 540 px on the short side, 256 MB).
+
+**Map adjust** (all sources, in this order): offset and tile (repeat or mirror) → blur → levels (black and white point) → gamma and contrast → curve (Linear, Ease in, Ease out, S, Step) → posterize → invert.
+
+**Map animation** (built-in maps): Phase speed (the map moves in its direction; ramps repeat), Rotation speed (°/frame), Pulse (scale: amount and period), New seed every k frames.
 
 The view switch above the preview shows **Result**, **Original** (the source frame), or **Map** (the map in grey). Double-click a setting label to reset it.
 
@@ -49,6 +54,7 @@ Input: MP4 and MOV only (not fragmented). Output: MP4, H.264.
 - Fragmented MP4 files are not supported.
 - Audio pass-through supports AAC (`mp4a`) and Opus.
 - Open-GOP files (keyframes that are not IDR) seek more slowly: Chrome's decoder must start at an IDR frame.
+- A video map keeps at most 256 MB of frames; a longer map video holds its last frame that fits.
 - Without float render targets, the map has 8-bit precision: with a long Max delay, the delays have steps of Max delay / 255 frames.
 - The frame store keeps 8-bit YUV 4:2:0 (BT.709, full range): a small colour change is possible on fine colour edges.
 - The edit list start is used; an edit list with more than one segment is read as one segment.
@@ -80,7 +86,8 @@ The last command writes the test videos (plan §13.1) to `samples/`. The tests m
 | Folder | Content |
 |---|---|
 | `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `preview.js`, `ui/` (timeline, inspector, widgets) |
-| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, map, Time Map render), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
+| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
+| `src/maps/` | `builtin.js` (the map list and parameters), `curve.js` (monotone curves), `mapsource.js` (image and video maps) |
 | `src/io/` | `demux.js` (MP4/MOV reader), `mp4.js` (MP4 muxer), `timeline.js` (frame order, seek plan), `decode-worker.js` |
 | `tools/` | `build.mjs`, `make-fixtures.mjs` |
 | `tests/` | Node tests, FFmpeg checks, Playwright tests |
