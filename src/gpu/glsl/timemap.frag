@@ -23,7 +23,7 @@ void main() {
   float d = v * u_max;
   float src = float(u_t) - d;
   // Not online (D8): black with Replace; transparent (the base shows) with Blend (§10.1).
-  if (src < -1e-3) { o = vec4(u_comp == 0 ? vec3(0.0) : base, 1.0); return; } // the epsilon: float error of v × Max
+  if (src < -1e-3) { o = vec4(subjectOver(u_comp == 0 ? vec3(0.0) : base, base, uv), 1.0); return; } // the epsilon: float error of v × Max
   src = max(src, 0.0);
   vec2 suv = uv + v * u_shift; // spatial offset: the delayed pixel also moves
   vec3 c;
@@ -36,5 +36,5 @@ void main() {
     c = frameAt(u_t - int(floor(d + 0.5)), suv).rgb;
   }
   c = ageLook(c, d);
-  o = vec4(u_comp == 0 ? c : composite(base, c, u_opacity * decayAlpha(d)), 1.0);
+  o = vec4(subjectOver(u_comp == 0 ? c : composite(base, c, u_opacity * decayAlpha(d)), base, uv), 1.0);
 }

@@ -7,6 +7,7 @@
 //   { cmd: 'seek', job, t, from }               -> 'frame' for each frame from .. t, then 'done'
 //   { cmd: 'play', job, from, to }              -> 'frame' for each frame from .. to, then 'done'
 //   { cmd: 'thumbs', job, count, width }        -> 'thumb' { i, index, bitmap } for each, then 'done'
+//   { cmd: 'list', job, indices }               -> 'frame' for each frame of the list, then 'done'
 //   { cmd: 'stop' }                             cancel the job in progress
 //   { cmd: 'ack' }                              the page closed one frame
 // 'frame': { job, index, frame (VideoFrame, transferred), warm (true: before t) }.
@@ -222,6 +223,15 @@ async function thumbs(m) {
   if (ok) post({ cmd: 'done', job: m.job });
 }
 
+// Some frames (any order of indices): 'frame' for each one (for the clean plate).
+async function list(m) {
+  const n = W.tl.frames.length;
+  const want = [...new Set(m.indices)].filter((t) => t >= 0 && t < n).sort((a, b) => a - b);
+  const set = new Set(want);
+  const ok = await decodeSegments(m.job, planSegments(W.tl, want), (t) => set.has(t), (t, f) => sendFrame(m.job, t, f, false));
+  if (ok) post({ cmd: 'done', job: m.job });
+}
+
 // The jobs run one at a time. A new job cancels the one in progress (plan §6.2).
 let chain = Promise.resolve();
 const runJob = (fn, m) => {
@@ -247,4 +257,5 @@ self.onmessage = (e) => {
   } else if (m.cmd === 'seek') runJob(seek, m);
   else if (m.cmd === 'play') runJob(play, m);
   else if (m.cmd === 'thumbs') runJob(thumbs, m);
+  else if (m.cmd === 'list') runJob(list, m);
 };

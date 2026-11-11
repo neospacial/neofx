@@ -53,18 +53,18 @@ void main() {
   vec2 p = uv * u_res - u_L;
   float s = dot(p, u_d);
   float x = (dot(p, u_e) + u_c + 0.5) / u_len;
-  if (s < -1e-3) { o = vec4(u_view == 2 ? base * 0.3 : base, 1.0); return; }
+  if (s < -1e-3) { o = vec4(u_view == 2 ? base * 0.3 : subjectOver(base, base, uv), 1.0); return; }
   s = max(s, 0.0);
   float a = 0.0;
   vec4 c;
   if (!u_timeOn) {
     c = row(u_t, x);
   } else {
-    if (s > S(u_M)) { o = vec4(u_view == 2 ? base * 0.3 : base, 1.0); return; } // older than Max age
+    if (s > S(u_M)) { o = vec4(u_view == 2 ? base * 0.3 : subjectOver(base, base, uv), 1.0); return; } // older than Max age
     a = ageOf(s);
     float src = float(u_t) - a;
     if (u_view == 2) { o = vec4(src < -1e-3 ? vec3(0.0) : heat(a / float(max(u_M, 1))), 1.0); return; }
-    if (src < -1e-3) { o = vec4(u_comp == 0 ? vec3(0.0) : base, 1.0); return; } // not online
+    if (src < -1e-3) { o = vec4(subjectOver(u_comp == 0 ? vec3(0.0) : base, base, uv), 1.0); return; } // not online
     src = max(src, 0.0);
     if (u_sharp) c = row(int(floor(src + 0.5)), x);
     else {
@@ -74,7 +74,7 @@ void main() {
     }
   }
   if (u_view == 2) { o = vec4(heat(0.0), 1.0); return; }
-  if (c.a == 0.0) { o = vec4(u_comp == 0 ? vec3(0.0) : base, 1.0); return; } // the row is not there yet
+  if (c.a == 0.0) { o = vec4(subjectOver(u_comp == 0 ? vec3(0.0) : base, base, uv), 1.0); return; } // the row is not there yet
   vec3 col = ageLook(c.rgb, a);
-  o = vec4(u_comp == 0 ? col : composite(base, col, u_opacity * decayAlpha(a)), 1.0);
+  o = vec4(subjectOver(u_comp == 0 ? col : composite(base, col, u_opacity * decayAlpha(a)), base, uv), 1.0);
 }

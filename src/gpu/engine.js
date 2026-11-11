@@ -15,6 +15,13 @@
 //   { cmd: 'thumbs', maps, t, width, height }  map thumbnails (luma bytes)                -> { cmd: 'thumbs', images }
 //   { cmd: 'slitFrame', index, frame }     analysis pass: the slit history row of a frame    -> { cmd: 'slit', filled, rows }
 //   { cmd: 'slitStatus' }                                                                   -> { cmd: 'slit', filled, rows }
+//   { cmd: 'plateGrab', frame }            a frame as the store keeps it                   -> { cmd: 'yuv', Y, C }
+//   { cmd: 'plateYuv', Y, C } / { cmd: 'plateImage', bitmap } / { cmd: 'plateFrame', index }
+//                                          the clean plate (plan §9.2)                      -> { cmd: 'plate', ok }
+//   { cmd: 'matteStroke', points, size, hardness, mode } / { cmd: 'matteClear' }  garbage matte -> { cmd: 'matte' }
+//   { cmd: 'maskImportBegin', width, height, count } / { cmd: 'maskImportFrame', i, frame, rotation } / { cmd: 'maskImportClear' }
+//   { cmd: 'pick', index, u, v }           the colour of frame index at (u, v)              -> { cmd: 'color', rgb }
+//   { cmd: 'readMask', index }             tests: the mask of frame index (bytes, top row first) -> { cmd: 'mask', width, height, pixels }
 //   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }
 
 import { createContext, program, texParams, drawQuad } from './gl.js';
@@ -24,6 +31,8 @@ import { isDynamic } from '../maps/builtin.js';
 import { curveTable, CURVE_PRESETS } from '../maps/curve.js';
 import { BLEND_INDEX, DECAY_INDEX, hexRgb } from './blend.js';
 import { Slit } from './slit.js';
+import { Mask } from './mask.js';
+import { usesMask } from '../maps/builtin.js';
 
 const QUAD_VERT = "@GLSL:gpu/glsl/quad.vert";
 const UPLOAD_FRAG = "@GLSL:gpu/glsl/upload.frag";
@@ -33,6 +42,7 @@ const TIMEMAP_FRAG = "@GLSL:gpu/glsl/timemap.frag";
 const COMPOSITE_GLSL = "@GLSL:gpu/glsl/composite.glsl";
 const AGE_GLSL = "@GLSL:gpu/glsl/age.glsl";
 const COMPTEST_FRAG = "@GLSL:gpu/glsl/comptest.frag";
+const SUBJECT_GLSL = "@GLSL:gpu/glsl/subject.glsl";
 const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\n';
 const VIEWS = { result: 0, original: 1, map: 2 };
 
@@ -47,12 +57,13 @@ export class Engine {
     };
     this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);
     this.show = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${SHOW_FRAG}`);
-    this.timemap = program(gl, QUAD_VERT, `${HEAD}${STORE_GLSL}\n${COMPOSITE_GLSL}\n${AGE_GLSL}\n${TIMEMAP_FRAG}`);
+    this.timemap = program(gl, QUAD_VERT, `${HEAD}${STORE_GLSL}\n${COMPOSITE_GLSL}\n${SUBJECT_GLSL}\n${AGE_GLSL}\n${TIMEMAP_FRAG}`);
     this.comptest = null; // made on the first test call
     this.decayTex = gl.createTexture();
     this.decayKey = '';
     this.mapgen = new MapGen(this);
     this.slit = new Slit(this);
+    this.mask = new Mask(this);
     this.mapTex = null;
     this.mapKey = '';
     this.layersTex = null;
@@ -97,6 +108,24 @@ export class Engine {
       return { cmd: 'slit', filled: this.slit.filled(), rows: this.slit.H };
     }
     if (m.cmd === 'slitStatus') return { cmd: 'slit', filled: this.slit.filled(), rows: this.slit.H };
+    if (m.cmd === 'plateGrab') return this.mask.grabYuv(m.frame);
+    if (m.cmd === 'plateYuv') return this.rerender({ cmd: 'plate', ok: this.mask.setPlateYuv(m.Y, m.C) });
+    if (m.cmd === 'plateImage') return this.rerender({ cmd: 'plate', ok: this.mask.setPlateImage(m.bitmap) !== false });
+    if (m.cmd === 'plateFrame') return this.rerender({ cmd: 'plate', ok: this.mask.setPlateFrame(m.index) });
+    if (m.cmd === 'matteStroke') return this.rerender((this.mask.stroke(m.points, m.size, m.hardness, m.mode), { cmd: 'matte' }));
+    if (m.cmd === 'matteClear') return this.rerender((this.mask.clearMatte(), { cmd: 'matte' }));
+    if (m.cmd === 'maskImportBegin') return (this.mask.beginImport(m.width, m.height, m.count), { cmd: 'import' });
+    if (m.cmd === 'maskImportFrame') {
+      try {
+        this.mask.importFrame(m.i, m.frame, m.rotation);
+      } finally {
+        m.frame.close();
+      }
+      return { cmd: 'import' };
+    }
+    if (m.cmd === 'maskImportClear') return this.rerender((this.mask.clearImport(), { cmd: 'import' }));
+    if (m.cmd === 'pick') return this.pick(m);
+    if (m.cmd === 'readMask') return this.readMask(m.index);
     if (m.cmd === 'mapImage') {
       const b = m.bitmap;
       const s = Math.min(1, 2048 / Math.max(b.width, b.height));
@@ -175,6 +204,7 @@ export class Engine {
     texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
     this.mapKey = '';
     const slit = this.slit.configure(w, h, m.frames || 1);
+    this.mask.configure(w, h);
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -251,6 +281,67 @@ export class Engine {
     }
   }
 
+  // The cutout mask is needed: Cutout on, the Mask view, or a map that uses it.
+  maskNeeded() {
+    const s = this.settings;
+    return s.cutout.mode !== 'off' || s.view === 'mask' || (s.mode === 'timemap' && usesMask(s.map));
+  }
+
+  // Render the last frame again (after a change of the cutout inputs), then give the reply.
+  rerender(reply) {
+    if (this.n && this.last.index >= 0) this.render(this.last.index, this.last.delay);
+    return reply;
+  }
+
+  // The luma of a picture (ImageBitmap or VideoFrame), turned, into layer i (w x h) of an R8 array.
+  lumaInto(tex, i, w, h, source, rotation) {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.src);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    texParams(gl, gl.TEXTURE_2D, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR);
+    gl.useProgram(this.upload.prog);
+    gl.uniform1i(this.upload.u.u_src, 0);
+    gl.uniform1i(this.upload.u.u_rot, rotation || 0);
+    gl.uniform1i(this.upload.u.u_mode, 0);
+    this.target(tex, i, w, h);
+    drawQuad(gl);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // The colour of stored frame index at (u, v) (0..1 of the picture), for the eyedropper.
+  pick(m) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.w, this.h);
+    gl.useProgram(this.show.prog);
+    this.bindStore(this.show);
+    gl.uniform1f(this.show.u.u_layer, this.layerOf(m.index));
+    drawQuad(gl);
+    const x = Math.min(this.w - 1, Math.max(0, Math.floor(m.u * this.w)));
+    const y = Math.min(this.h - 1, Math.max(0, Math.floor(m.v * this.h)));
+    const px = new Uint8Array(4);
+    gl.readPixels(x, this.h - 1 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    this.rerender(null);
+    return { cmd: 'color', rgb: [px[0], px[1], px[2]] };
+  }
+
+  // Tests: the final mask of frame index (bytes, the first row at the top).
+  readMask(index) {
+    const gl = this.gl;
+    this.mask.update(index); // a no-op when the mask of index is there (it keeps the temporal state)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.mask.tex.out, 0);
+    const px = new Uint8Array(this.w * this.h * 4);
+    gl.readPixels(0, 0, this.w, this.h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const out = new Uint8Array(this.w * this.h);
+    for (let i = 0; i < out.length; i++) out[i] = px[i * 4];
+    return { cmd: 'mask', width: this.w, height: this.h, pixels: out };
+  }
+
   mapChanged(c) {
     this.mapKey = '';
     return { cmd: 'map', ...(c ? { w: c.w, h: c.h, count: c.count, layers: c.layers } : { count: 0 }) };
@@ -261,7 +352,7 @@ export class Engine {
   updateMap(t) {
     if (!this.settings) return;
     const map = this.settings.map;
-    const key = JSON.stringify(map) + (isDynamic(map) ? `@${t}` : '');
+    const key = JSON.stringify(map) + (isDynamic(map) ? `@${t}` : '') + (usesMask(map) ? this.mask.key : '');
     if (key === this.mapKey) return;
     this.mapgen.run(map, t, this.mapTex, this.w, this.h);
     this.mapKey = key;
@@ -288,9 +379,15 @@ export class Engine {
   render(index, delay) {
     const gl = this.gl;
     this.last = { index, delay };
-    if (!this.settings || this.settings.mode !== 'slitscan') this.updateMap(index);
+    const s0 = this.settings;
+    if (s0 && delay === undefined && this.maskNeeded()) this.mask.update(index);
+    if (!s0 || s0.mode !== 'slitscan') this.updateMap(index);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.w, this.h);
+    if (s0 && delay === undefined && s0.view === 'mask') {
+      this.mask.render();
+      return;
+    }
     if (delay !== undefined || !this.settings) {
       gl.useProgram(this.show.prog);
       this.bindStore(this.show);
@@ -322,6 +419,7 @@ export class Engine {
     const L = s.look;
     const a = (L.offsetAngle * Math.PI) / 180;
     gl.uniform2f(p.u.u_shift, (L.offset * Math.cos(a)) / this.w, (L.offset * Math.sin(a)) / this.h);
+    this.mask.subjectUniforms(p, s.cutout.mode === 'overlay');
     drawQuad(gl);
   }
 

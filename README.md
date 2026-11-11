@@ -7,7 +7,7 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **phase 7 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, the **compositor**, and **Mode 2 — Slit Scan** with the line source. The cutout, the subject-edge source, and the export come in the next phases.
+> Status: v0.1.0, **phase 8 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, the **compositor**, **Mode 2 — Slit Scan** with the line source, and the **cutout** (subject mask without a machine-learning model, Overlay). The subject-edge source, Scan object, and the export come in the next phases.
 
 ## How to use
 
@@ -20,7 +20,7 @@ The status bar shows the frame store: for example "Buffer: 240 frames at 540p (�
 
 Each seek is frame-exact: the app decodes from the last clean keyframe (IDR) to the frame. Playback uses the file's own frame times, so variable frame rate files play at their true speed. When the device is too slow, the preview drops frames and the status bar shows "Preview N fps" in amber.
 
-Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out.
+Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out; M the Mask view.
 
 ## Mode 1 — Time Map
 
@@ -63,6 +63,23 @@ Drag the line on the preview: the centre point moves it, the round handle turns 
 
 The age at a distance s is A(s), the inverse of S(a) = ∫ rate. When the line changes, an **analysis pass** decodes the full video in the background and fills the slit history (one row for each frame, up to 4096 frames); the status bar shows "Analysis N %". Until it ends, the trail uses the rows that are there (the frames in the frame store at once); the other rows are black. The **Map** view shows the age as heat colours.
 
+## Cutout
+
+The cutout finds the subject without a machine-learning model. It is made for footage from a tripod. **Overlay** puts the subject (the current frame, not changed by the effect) on top of the effect, in Mode 1 and Mode 2. The **Mask** view (or the M key) shows the mask in white. The Subject mask and Subject distance maps of Mode 1 also use it.
+
+Mask pipeline, in this order:
+
+1. **Methods** (each on or off, combined with Union or Intersect):
+   - **Background difference** against a **clean plate**: **Auto** (the median of 31 frames over the video; it is made when you first need it), **This frame**, or an **Image** of the empty scene. Threshold, softness, light tolerance (a lower weight for brightness changes), shadow suppression.
+   - **Chroma key**: the key colour (**Pick** it on the preview), tolerance, softness, spill suppression (on the subject layer).
+   - **Luma key**: low, high, softness, invert.
+   - Or a **mask video** (Mask import): a black-and-white video, one frame for each source frame. It replaces the methods.
+2. **Garbage matte**: paint **Always subject** / **Never subject** / **Erase** on the preview (brush size, hardness). The matte is the same for the full video.
+3. **Clean up**: Open (removes small spots), Close (fills small gaps), Fill holes (enclosed areas smaller than a part of the frame), Keep largest region.
+4. **Grow / shrink** (−32 … 32 px), **Temporal smooth** (a mix with the mask of the previous frame) with **Hysteresis**, **Feather**.
+
+**Subject layer** (Overlay): blend mode, opacity, its own grow / shrink and feather, an outline (width and colour).
+
 ## Composite and Look
 
 **Effect composite**: **Replace** (default) shows the effect as it is; pixels that are not online are black. **Blend** puts the effect on the original video with a blend mode and an alpha; pixels that are not online are transparent (the original shows).
@@ -94,6 +111,9 @@ Input: MP4 and MOV only (not fragmented). Output: MP4, H.264.
 - Audio pass-through supports AAC (`mp4a`) and Opus.
 - Open-GOP files (keyframes that are not IDR) seek more slowly: Chrome's decoder must start at an IDR frame.
 - The slit history holds at most 4096 frames (and the GPU texture size limit). In a longer video, a seek far back shows black trails until the frames play again.
+- The cutout is made for a camera that does not move. Temporal smooth and hysteresis use the mask of the previous frame: they apply in playback (and export), not to a single seek.
+- Grow / shrink and the outline use a square kernel: corners grow a little more than round edges.
+- A clean plate from This frame or an Image is not kept when the preview resolution changes (make it again); Auto is made again.
 - A video map keeps at most 256 MB of frames; a longer map video holds its last frame that fits.
 - Without float render targets, the map has 8-bit precision: with a long Max delay, the delays have steps of Max delay / 255 frames.
 - The frame store keeps 8-bit YUV 4:2:0 (BT.709, full range): a small colour change is possible on fine colour edges.
@@ -125,8 +145,9 @@ The last command writes the test videos (plan §13.1) to `samples/`. The tests m
 
 | Folder | Content |
 |---|---|
-| `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `analysis.js` (Mode 2 analysis pass), `preview.js`, `ui/` (timeline, inspector, widgets, line handles) |
-| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `slit.js` (slit history, analysis rows, Mode 2 render), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
+| `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `analysis.js` (Mode 2 analysis pass), `preview.js`, `ui/` (timeline, inspector, widgets, line handles, eyedropper and matte brush) |
+| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `slit.js` (slit history, analysis rows, Mode 2 render), `mask.js` (cutout mask pipeline, clean plate, matte, subject layer), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
+| `src/analysis/` | `cleanplate.js` (median), `regions.js` (fill holes, keep largest), `analysis-worker.js` |
 | `src/modes/` | `slit.js` (Mode 2: rate types, S and A, line geometry) |
 | `src/maps/` | `builtin.js` (the map list and parameters), `curve.js` (monotone curves), `mapsource.js` (image and video maps) |
 | `src/io/` | `demux.js` (MP4/MOV reader), `mp4.js` (MP4 muxer), `timeline.js` (frame order, seek plan), `decode-worker.js` |

@@ -25,6 +25,7 @@ export class Inspector {
     this.app = app;
     this.rows = {};
     this.tiles = {}; // map id -> canvas
+    this.thumbCache = {}; // map id -> the last thumbnail (luma), drawn again after a rebuild
   }
 
   // limits: { maxDelay (the store limit, N - 1), maxAge (the slit history rows) }.
@@ -77,6 +78,7 @@ export class Inspector {
           grid.append(b);
         }
         map.append(grid);
+      this.drawThumbs({ ...this.thumbCache });
         const spec = MAPS.find((m) => m.id === M.type);
         for (const [k, label, min, max, step, def, unit] of spec.params) num(map, `map.params.${M.type}.${k}`, label, min, max, step, def, unit);
         if (M.type === 'self') map.append(el('p', 'note', 'Bright = old. Use Invert (Adjust) for bright = new.'));
@@ -161,6 +163,108 @@ export class Inspector {
       }
     }
 
+    // Cutout (§9): the subject mask, and the subject layer on top (Overlay).
+    const Cu = S.cutout;
+    const cut = sec('cutout', 'Cutout', false);
+    add(cut, segmented({ key: 'cutout.mode', label: 'Cutout', options: [['off', 'Off'], ['overlay', 'Overlay'], ['scan', 'Scan object', true]], value: Cu.mode, onChange: on('cutout.mode') }));
+    const sub = (text) => cut.append(Object.assign(document.createElement('div'), { className: 'subhead', textContent: text }));
+    const btn = (row, text, act, fn, isOn) => {
+      const b = Object.assign(document.createElement('button'), { type: 'button', textContent: text });
+      b.dataset.act = act;
+      b.classList.toggle('on', !!isOn);
+      b.addEventListener('click', fn);
+      row.append(b);
+      return b;
+    };
+    const tools = this.app.tools || {};
+    sub('Background difference');
+    bool(cut, 'cutout.bgdiff.on', 'Use');
+    if (Cu.bgdiff.on) {
+      add(cut, segmented({ key: 'cutout.plate', label: 'Clean plate', options: [['auto', 'Auto'], ['frame', 'This frame'], ['image', 'Image']], value: Cu.plate, onChange: (v) => this.app.plate(v) }));
+      const pr = Object.assign(document.createElement('div'), { className: 'toolRow' });
+      btn(pr, Cu.plate === 'auto' ? 'Make again' : Cu.plate === 'frame' ? 'Use this frame' : 'Open image…', 'plate', () => this.app.plate(Cu.plate));
+      pr.append(Object.assign(document.createElement('span'), { className: 'fileName', textContent: tools.plateText || 'No clean plate' }));
+      cut.append(pr);
+      num(cut, 'cutout.bgdiff.threshold', 'Threshold', 0, 1, 0.005, 0.12);
+      num(cut, 'cutout.bgdiff.softness', 'Softness', 0, 0.5, 0.005, 0.06);
+      num(cut, 'cutout.bgdiff.lightTol', 'Light tolerance', 0, 1, 0.01, 0.5);
+      num(cut, 'cutout.bgdiff.shadow', 'Shadow', 0, 1, 0.01, 0);
+    }
+    sub('Chroma key');
+    bool(cut, 'cutout.chroma.on', 'Use');
+    if (Cu.chroma.on) {
+      const row = document.createElement('div');
+      row.className = 'setting color';
+      row.dataset.key = 'cutout.chroma.key';
+      const lab = Object.assign(document.createElement('label'), { textContent: 'Key colour' });
+      const inp = Object.assign(document.createElement('input'), { type: 'color', value: Cu.chroma.key });
+      inp.addEventListener('input', () => this.app.change('cutout.chroma.key', inp.value));
+      row.setValue = (v) => (inp.value = v);
+      const tr = Object.assign(document.createElement('div'), { className: 'toolRow' });
+      btn(tr, 'Pick', 'pick', () => this.app.setTool('pick'), tools.tool === 'pick');
+      row.append(lab, inp, tr);
+      add(cut, row);
+      num(cut, 'cutout.chroma.tolerance', 'Tolerance', 0, 0.5, 0.005, 0.08);
+      num(cut, 'cutout.chroma.softness', 'Softness', 0, 0.5, 0.005, 0.05);
+      num(cut, 'cutout.chroma.spill', 'Spill', 0, 1, 0.01, 0.5);
+    }
+    sub('Luma key');
+    bool(cut, 'cutout.luma.on', 'Use');
+    if (Cu.luma.on) {
+      num(cut, 'cutout.luma.low', 'Low', 0, 1, 0.005, 0.7);
+      num(cut, 'cutout.luma.high', 'High', 0, 1, 0.005, 1);
+      num(cut, 'cutout.luma.softness', 'Softness', 0, 0.5, 0.005, 0.05);
+      bool(cut, 'cutout.luma.invert', 'Invert');
+    }
+    add(cut, segmented({ key: 'cutout.combine', label: 'Combine', options: [['union', 'Union'], ['intersect', 'Intersect']], value: Cu.combine, onChange: on('cutout.combine') }));
+    sub('Garbage matte');
+    const mr = Object.assign(document.createElement('div'), { className: 'toolRow' });
+    btn(mr, 'Always subject', 'always', () => this.app.setTool('always'), tools.tool === 'always');
+    btn(mr, 'Never subject', 'never', () => this.app.setTool('never'), tools.tool === 'never');
+    btn(mr, 'Erase', 'erase', () => this.app.setTool('erase'), tools.tool === 'erase');
+    btn(mr, 'Clear', 'clearMatte', () => this.app.clearMatte());
+    cut.append(mr);
+    add(cut, slider({ key: 'tools.brushSize', label: 'Brush size', min: 2, max: 400, step: 1, value: tools.brush ? tools.brush.size : 40, def: 40, unit: 'px', onChange: (v) => (tools.brush.size = v) }));
+    add(cut, slider({ key: 'tools.brushHardness', label: 'Hardness', min: 0, max: 1, step: 0.01, value: tools.brush ? tools.brush.hardness : 0.7, def: 0.7, onChange: (v) => (tools.brush.hardness = v) }));
+    sub('Clean up');
+    num(cut, 'cutout.open', 'Open', 0, 16, 1, 0, 'px');
+    num(cut, 'cutout.close', 'Close', 0, 16, 1, 0, 'px');
+    num(cut, 'cutout.fillHoles', 'Fill holes', 0, 20, 0.1, 0, '%');
+    bool(cut, 'cutout.keepLargest', 'Keep largest');
+    num(cut, 'cutout.grow', 'Grow / shrink', -32, 32, 1, 0, 'px');
+    num(cut, 'cutout.smooth', 'Temporal smooth', 0, 0.95, 0.01, 0);
+    bool(cut, 'cutout.hysteresis', 'Hysteresis');
+    if (Cu.hysteresis) {
+      num(cut, 'cutout.tLow', 'Off below', 0, 1, 0.01, 0.35);
+      num(cut, 'cutout.tHigh', 'On above', 0, 1, 0.01, 0.65);
+    }
+    num(cut, 'cutout.feather', 'Feather', 0, 32, 0.5, 0, 'px');
+    sub('Mask import');
+    const ir = Object.assign(document.createElement('div'), { className: 'toolRow' });
+    btn(ir, 'Open mask video…', 'importMask', () => this.app.importMask());
+    if (Cu.import.name) btn(ir, 'Remove', 'removeMask', () => this.app.removeMask());
+    ir.append(Object.assign(document.createElement('span'), { className: 'fileName', textContent: Cu.import.name || 'No mask video' }));
+    cut.append(ir);
+    if (Cu.mode === 'overlay') {
+      const Sb = S.subject;
+      const sl = sec('subject', 'Subject layer');
+      add(sl, select({ key: 'subject.blend', label: 'Blend mode', options: BLEND_MODES, value: Sb.blend, onChange: on('subject.blend') }));
+      add(sl, slider({ key: 'subject.opacity', label: 'Opacity', min: 0, max: 1, step: 0.01, value: Sb.opacity, def: 1, onChange: on('subject.opacity') }));
+      num(sl, 'subject.grow', 'Grow / shrink', -32, 32, 1, 0, 'px');
+      num(sl, 'subject.feather', 'Feather', 0, 32, 0.5, 0, 'px');
+      num(sl, 'subject.outline', 'Outline', 0, 32, 1, 0, 'px');
+      if (Sb.outline > 0) {
+        const row = document.createElement('div');
+        row.className = 'setting color';
+        row.dataset.key = 'subject.outlineColor';
+        const inp = Object.assign(document.createElement('input'), { type: 'color', value: Sb.outlineColor });
+        inp.addEventListener('input', () => this.app.change('subject.outlineColor', inp.value));
+        row.setValue = (v) => (inp.value = v);
+        row.append(Object.assign(document.createElement('label'), { textContent: 'Outline colour' }), inp);
+        add(sl, row);
+      }
+    }
+
     // Composite (§10): Replace shows the effect as it is; Blend puts it on the original.
     const Cp = S.composite;
     const comp = sec('composite', 'Composite');
@@ -192,6 +296,7 @@ export class Inspector {
 
   // Draw map thumbnails: images = { id: Uint8Array luma (THUMB_W x THUMB_H) }.
   drawThumbs(images) {
+    Object.assign(this.thumbCache, images);
     for (const [id, y] of Object.entries(images)) {
       const c = this.tiles[id];
       if (!c) continue;
@@ -207,6 +312,7 @@ export class Inspector {
   // Show the values of the settings (after a change from outside).
   refresh(settings) {
     for (const [key, row] of Object.entries(this.rows)) {
+      if (key.startsWith('tools.')) continue;
       const v = getPath(settings, key);
       row.setValue(typeof v === 'boolean' ? String(v) : v);
     }

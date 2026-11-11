@@ -55,12 +55,17 @@ vec3 blendColor(vec3 b, vec3 s, int m) {
   return setLum(b, lum(s)); // 18 luminosity
 }
 
-// The effect colour cs with alpha a over the opaque base cb.
-vec3 composite(vec3 cb, vec3 cs, float a) {
-  if (u_linear) {
+// A colour cs with alpha a over the opaque base cb, with blend mode `mode`.
+vec3 compositeWith(vec3 cb, vec3 cs, float a, int mode, bool lin) {
+  if (lin) {
     cb = toLinear(cb);
     cs = toLinear(cs);
   }
-  vec3 r = clamp((1.0 - a) * cb + a * blendColor(cb, cs, u_blendMode), 0.0, 1.0);
-  return u_linear ? toSrgb(r) : r;
+  vec3 r = clamp((1.0 - a) * cb + a * blendColor(cb, cs, mode), 0.0, 1.0);
+  return lin ? toSrgb(r) : r;
+}
+
+// The effect colour cs with alpha a over the opaque base cb (the effect blend mode).
+vec3 composite(vec3 cb, vec3 cs, float a) {
+  return compositeWith(cb, cs, a, u_blendMode, u_linear);
 }

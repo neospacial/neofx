@@ -35,6 +35,7 @@
         <button type="button" data-view="result" class="on">Result</button>
         <button type="button" data-view="original">Original</button>
         <button type="button" data-view="map">Map</button>
+        <button type="button" data-view="mask">Mask</button>
       </div>
       <canvas id="view" hidden></canvas>
       <div id="progress" hidden></div>
@@ -63,8 +64,10 @@
     <canvas class="strip" aria-label="Timeline"></canvas>
   </footer>
   <input id="mapFileInput" type="file" hidden>
+  <input id="plateFileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+  <input id="maskFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
   <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
 </div>
-<!--@modules:maps/builtin.js,maps/curve.js,modes/slit.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/main.js-->
+<!--@modules:maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/main.js-->
 </body>
 </html>

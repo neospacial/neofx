@@ -15,6 +15,9 @@ uniform vec2 u_offset;  // 0..1 of the frame
 uniform vec2 u_tile;
 uniform bool u_mirror;
 uniform int u_t;
+uniform highp sampler2D u_mask;  // the subject mask (Subject mask map)
+uniform highp sampler2D u_dist;  // the nearest subject pixel (Subject distance map)
+uniform vec2 u_workRes;
 // Custom map (R8 array: an image = 1 layer, a video = its frames).
 uniform highp sampler2DArray u_custom;
 uniform float u_layer;
@@ -188,7 +191,14 @@ float builtin(vec2 P) {
     }
     return clamp(s / float(K) * u_k[0], 0.0, 1.0);
   }
-  return 0.0; // subject maps: phase 8
+  if (u_type == 20) return mix(u_k[1], u_k[0], texture(u_mask, P / R).r); // subject: subject value, background value
+  if (u_type == 21) { // subject distance: falloff (working px)
+    vec2 q = P / R * u_workRes;
+    ivec2 sz = textureSize(u_dist, 0);
+    vec2 sd = texelFetch(u_dist, clamp(ivec2(q), ivec2(0), sz - 1), 0).rg;
+    return sd.x < 0.0 ? 1.0 : clamp(length(sd - q) / max(u_k[0], 1.0), 0.0, 1.0);
+  }
+  return 0.0;
 }
 
 float custom(vec2 P) {

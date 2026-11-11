@@ -14,13 +14,20 @@ import { loadImageMap, loadVideoMap } from '../maps/mapsource.js';
 import { THUMB_W, THUMB_H } from './ui/inspector.js';
 import { Analysis } from './analysis.js';
 import { LineHandles } from './ui/handles.js';
+import { PreviewTools } from './ui/tools.js';
+import { plateIndices } from '../analysis/cleanplate.js';
+import { makeWorker } from './player.js';
+import { usesMask } from '../maps/builtin.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
 const DECODE_WORKER = "@WORKER:io/demux.js,io/timeline.js,io/decode-worker.js";
-const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,modes/slit.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/engine.js,gpu/gpu-worker.js";
+const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/engine.js,gpu/gpu-worker.js";
+const ANALYSIS_WORKER = "@WORKER:analysis/cleanplate.js,analysis/analysis-worker.js";
 
-let player, preview, timeline, gpu, inspector, analysis, handles;
+let player, preview, timeline, gpu, inspector, analysis, handles, tools;
+// The state of the preview tools and the clean plate (not part of the settings).
+const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false };
 let currentFile = null;
 const settings = clone(DEFAULTS);
 // The store state: { short (the preview setting), width, height, n, bytes, budget }.
@@ -55,6 +62,7 @@ async function configureStore() {
   Object.assign(store, { width, height, n: r.n, bytes: r.bytes, usedBudget: r.budget, rows: r.rows });
   if (settings.slitscan.maxAge > r.rows) settings.slitscan.maxAge = r.rows;
   if (analysis) analysis.doneKey = ''; // the history is new and empty
+  toolState.plateOk = false; // the clean plate and the mask textures are new
   player.setStore(r.n);
   preview.setSize(width, height);
   // The Max delay cannot be more than N - 1 (plan §6.4).
@@ -64,7 +72,145 @@ async function configureStore() {
   updateThumbs();
   handles.update();
   scheduleAnalysis();
+  ensurePlate();
   return r;
+}
+
+// The cutout needs the mask (plan §9): Cutout on, the Mask view, or a subject map.
+const maskUsed = () => settings.cutout.mode !== 'off' || settings.view === 'mask' || (settings.mode === 'timemap' && usesMask(settings.map));
+
+// Background difference needs a clean plate: make the Auto plate when the mask is used first.
+function ensurePlate() {
+  if (player.info && maskUsed() && settings.cutout.bgdiff.on && !toolState.plateOk && !plateJob && settings.cutout.plate === 'auto') makePlate('auto');
+}
+
+// The clean plate (plan §9.2). Auto: the median of 31 frames (decode worker + analysis worker).
+let plateJob = null;
+async function makePlate(kind) {
+  if (!player.info) return;
+  settings.cutout.plate = kind;
+  if (kind === 'frame') {
+    const r = await gpu.call({ cmd: 'plateFrame', index: Math.max(0, player.current) });
+    Object.assign(toolState, { plateOk: r.ok, plateText: r.ok ? `Frame ${player.current}` : 'No frame' });
+  } else if (kind === 'image') {
+    const input = $('plateFileInput');
+    input.value = '';
+    input.click();
+    return;
+  } else {
+    if (plateJob) plateJob.terminate();
+    const wk = (plateJob = makeWorker(DECODE_WORKER));
+    const list = plateIndices(player.frameCount);
+    toolState.plateText = 'Making the clean plate…';
+    inspector.build(settings, limits());
+    // Each frame as the store keeps it (Y, CbCr), from the GPU.
+    const frames = await new Promise((resolve, reject) => {
+      const Y = [], C = [];
+      wk.onmessage = async (e) => {
+        const m = e.data;
+        if (m.cmd === 'info') wk.postMessage({ cmd: 'list', job: 1, indices: list });
+        else if (m.cmd === 'frame') {
+          const r = await gpu.call({ cmd: 'plateGrab', frame: m.frame }, [m.frame]);
+          wk.postMessage({ cmd: 'ack' });
+          Y.push(r.Y);
+          C.push(r.C);
+          setProgress((0.9 * Y.length) / list.length);
+          if (Y.length === list.length) resolve({ Y, C });
+        } else if (m.cmd === 'error') reject(new Error(m.message));
+      };
+      wk.postMessage({ cmd: 'open', file: currentFile });
+    }).catch((e) => {
+      showMessage(e.message);
+      return null;
+    });
+    wk.terminate();
+    if (plateJob !== wk) return;
+    plateJob = null;
+    if (!frames) return setProgress(null);
+    const aw = makeWorker(ANALYSIS_WORKER);
+    const med = await new Promise((resolve) => {
+      aw.onmessage = (e) => resolve(e.data);
+      aw.postMessage({ cmd: 'median', Y: frames.Y, C: frames.C }, [...frames.Y, ...frames.C].map((a) => a.buffer));
+    });
+    aw.terminate();
+    setProgress(null);
+    await gpu.call({ cmd: 'plateYuv', Y: med.Y, C: med.C }, [med.Y.buffer, med.C.buffer]);
+    Object.assign(toolState, { plateOk: true, plateText: `Median of ${frames.Y.length} frames` });
+  }
+  inspector.build(settings, limits());
+}
+
+async function plateImage(file) {
+  if (!file) return;
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    await gpu.call({ cmd: 'plateImage', bitmap }, [bitmap]);
+    Object.assign(toolState, { plateOk: true, plateText: file.name });
+  } catch {
+    showMessage('This image file cannot be read (PNG, JPEG, or WebP).');
+  }
+  inspector.build(settings, limits());
+}
+
+// Mask import (plan §9.3): a black-and-white mask video, one frame for each source frame.
+function importMask() {
+  const input = $('maskFileInput');
+  input.value = '';
+  input.click();
+}
+
+async function loadMaskVideo(file) {
+  if (!file || !player.info) return;
+  const wk = makeWorker(DECODE_WORKER);
+  try {
+    await new Promise((resolve, reject) => {
+      let count = 0, rot = 0, done = 0;
+      wk.onmessage = async (e) => {
+        const m = e.data;
+        if (m.cmd === 'error') return reject(new Error(m.message));
+        if (m.cmd === 'info') {
+          count = Math.min(m.times.length, player.frameCount);
+          rot = m.rotation;
+          await gpu.call({ cmd: 'maskImportBegin', width: store.width, height: store.height, count });
+          wk.postMessage({ cmd: 'play', job: 1, from: 0, to: count - 1 });
+        } else if (m.cmd === 'frame') {
+          await gpu.call({ cmd: 'maskImportFrame', i: m.index, frame: m.frame, rotation: rot }, [m.frame]);
+          wk.postMessage({ cmd: 'ack' });
+          setProgress(++done / count);
+        } else if (m.cmd === 'done') {
+          await gpu.call({ cmd: 'caps' }); // all frames are in
+          resolve();
+        }
+      };
+      wk.postMessage({ cmd: 'open', file });
+    });
+    settings.cutout.import = { on: true, name: file.name };
+  } catch (e) {
+    showMessage(e.message);
+  }
+  wk.terminate();
+  setProgress(null);
+  inspector.build(settings, limits());
+  await applySettings();
+}
+
+async function removeMask() {
+  settings.cutout.import = { on: false, name: '' };
+  await gpu.call({ cmd: 'maskImportClear' });
+  inspector.build(settings, limits());
+  await applySettings();
+}
+
+function setTool(tool) {
+  tools.setTool(tool);
+}
+
+async function pick(u, v) {
+  const r = await gpu.call({ cmd: 'pick', index: Math.max(0, player.current), u, v });
+  const hex = `#${r.rgb.map((c) => c.toString(16).padStart(2, '0')).join('')}`;
+  settings.cutout.chroma.on = true;
+  change('cutout.chroma.key', hex);
+  tools.setTool(null);
 }
 
 const limits = () => ({ maxDelay: Math.max(0, store.n - 1), maxAge: Math.max(1, store.rows || 1) });
@@ -153,7 +299,8 @@ async function applySettings() {
 // A setting changed in the UI.
 function change(path, value) {
   setPath(settings, path, value);
-  const rebuild = ['map.source', 'map.type', 'mode', 'composite.mode', 'composite.decay', 'look.tint', 'slitscan.time', 'slitscan.rateType'];
+  const rebuild = ['map.source', 'map.type', 'mode', 'composite.mode', 'composite.decay', 'look.tint', 'slitscan.time', 'slitscan.rateType',
+    'cutout.mode', 'cutout.bgdiff.on', 'cutout.chroma.on', 'cutout.luma.on', 'cutout.hysteresis', 'subject.outline'];
   if (rebuild.includes(path) || (path === 'look.offset' && (value > 0) !== !!document.querySelector('[data-key="look.offsetAngle"]'))) {
     inspector.build(settings, limits());
     updateThumbs();
@@ -163,6 +310,7 @@ function change(path, value) {
   if (path === 'view') for (const b of document.querySelectorAll('#viewBar button')) b.classList.toggle('on', b.dataset.view === value);
   handles.update();
   if (path === 'mode' || path.startsWith('slitscan.')) scheduleAnalysis();
+  if (path === 'view' || path.startsWith('cutout.') || path.startsWith('map.')) ensurePlate();
   applySettings();
 }
 
@@ -181,6 +329,10 @@ async function openFile(file) {
   showMessage('');
   timeline.reset();
   if (analysis) analysis.stop();
+  if (plateJob) plateJob.terminate();
+  plateJob = null;
+  Object.assign(toolState, { plateOk: false, plateText: '' });
+  settings.cutout.import = { on: false, name: '' };
   currentFile = file;
   let info;
   try {
@@ -215,6 +367,7 @@ function keys(e) {
   else if (k === 'End') P.seek(P.frameCount - 1);
   else if (k === 'i' || k === 'I') timeline.setIn();
   else if (k === 'o' || k === 'O') timeline.setOut();
+  else if (k === 'm' || k === 'M') change('view', settings.view === 'mask' ? 'result' : 'mask');
   else return;
   e.preventDefault();
 }
@@ -250,7 +403,7 @@ async function start() {
     onProgress: setProgress,
   });
   timeline = new Timeline($('transport'), player);
-  handles = new LineHandles($('preview'), $('view'), { change, settings });
+  handles = new LineHandles($('preview'), $('view'), { change, settings, tools: toolState });
   analysis = new Analysis(DECODE_WORKER, gpu, {
     onProgress: (f) => {
       setProgress(f);
@@ -262,11 +415,26 @@ async function start() {
     },
     onDone: () => status(),
   });
-  inspector = new Inspector($('inspector'), { change, openMap, info: () => mapInfo });
+  tools = new PreviewTools($('preview'), $('view'), {
+    pick,
+    stroke: (points, mode) => gpu.call({ cmd: 'matteStroke', points, size: toolState.brush.size, hardness: toolState.brush.hardness, mode }),
+    brush: toolState.brush,
+    onTool: (t) => {
+      toolState.tool = t;
+      for (const b of document.querySelectorAll('#inspector .toolRow button[data-act]')) b.classList.toggle('on', b.dataset.act === t);
+      handles.update();
+    },
+  });
+  inspector = new Inspector($('inspector'), {
+    change, openMap, info: () => mapInfo, tools: toolState, setTool, plate: makePlate, importMask, removeMask,
+    clearMatte: () => gpu.call({ cmd: 'matteClear' }),
+  });
   inspector.build(settings, { maxDelay: 999 });
   gpu.call({ cmd: 'settings', settings: clone(settings) });
   for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
-  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey });
+  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
+  $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));
   $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));
   $('resSelect').addEventListener('change', async (e) => {
     store.short = Number(e.target.value);

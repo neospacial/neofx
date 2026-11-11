@@ -26,8 +26,8 @@ export const MAPS = [
   { id: 'bayer', name: 'Bayer dither', params: [['matrix', 'Matrix (2^n)', 1, 3, 1, 2], ['base', 'Base value', 0, 1, 0.01, 0.5]] },
   { id: 'self', name: 'Video luminance', params: [] },
   { id: 'motion', name: 'Motion', params: [['gain', 'Gain', 0.5, 20, 0.1, 4], ['frames', 'Smooth (frames)', 1, 8, 1, 2]] },
-  { id: 'subject', name: 'Subject mask', params: [], needs: 'cutout' },
-  { id: 'subjectdist', name: 'Subject distance', params: [], needs: 'cutout' },
+  { id: 'subject', name: 'Subject mask', params: [['subject', 'Subject value', 0, 1, 0.01, 1], ['background', 'Background value', 0, 1, 0.01, 0]], usesMask: true },
+  { id: 'subjectdist', name: 'Subject distance', params: [['falloff', 'Falloff', 1, 1000, 1, 120, 'px']], usesMask: true },
 ];
 
 export const MAP_INDEX = Object.fromEntries(MAPS.map((m, i) => [m.id, i]));
@@ -43,10 +43,13 @@ export function paramArray(id, params) {
   return m.params.map((p) => Number((params && params[p[0]]) ?? p[5]));
 }
 
+// A built-in map that needs the subject mask (plan §9).
+export const usesMask = (map) => map.source === 'builtin' && (map.type === 'subject' || map.type === 'subjectdist');
+
 // The map needs a new render for each frame (it changes with t).
 export function isDynamic(map) {
   const a = map.anim;
-  return map.source === 'video' || (map.source === 'builtin' && (map.type === 'self' || map.type === 'motion'))
+  return map.source === 'video' || (map.source === 'builtin' && ['self', 'motion', 'subject', 'subjectdist'].includes(map.type))
     || (map.source === 'builtin' && !!(a.phaseSpeed || a.rotSpeed || a.pulseAmount || a.seedEvery));
 }
 

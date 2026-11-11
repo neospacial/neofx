@@ -338,7 +338,7 @@ export const tests = [
     },
   },
   {
-    name: 'map thumbnails: a grid of all maps (subject maps disabled), drawn from the GPU; a click selects the map',
+    name: 'map thumbnails: a grid of all maps, drawn from the GPU; a click selects the map',
     timeout: 120000,
     async fn() {
       await withApp(async (page) => {
@@ -348,14 +348,16 @@ export const tests = [
           await window.neofx.player.seek(40);
           window.neofx.updateThumbs();
         });
-        await page.waitForTimeout(600);
+        // Wait until the thumbnails are drawn (a real failure still times out here).
+        await page.waitForFunction(() => [...document.querySelectorAll('.mapTile canvas')].filter((c) => c.getContext('2d').getImageData(0, 0, 72, 40).data.some((v, i) => i % 4 === 0 && v > 0)).length >= 20, null, { timeout: 15000 });
         const r = await page.evaluate(() => {
           const tiles = [...document.querySelectorAll('.mapTile')];
           const lin = document.querySelector('.mapTile[data-map="linear"] canvas').getContext('2d').getImageData(0, 0, 72, 40).data;
           return { n: tiles.length, disabled: tiles.filter((t) => t.disabled).map((t) => t.dataset.map), drawn: tiles.filter((t) => !t.disabled && t.querySelector('canvas').getContext('2d').getImageData(0, 0, 72, 40).data.some((v, i) => i % 4 === 0 && v > 0)).length, lin: [lin[0], lin[(39 * 72) * 4]] };
         });
-        assert(r.n === 22 && r.disabled.join() === 'subject,subjectdist', `tiles ${r.n}, disabled ${r.disabled}`);
-        assert(r.drawn === 20, `${r.drawn} thumbnails drawn`);
+        // Phase 8: the subject maps are on (a subject mask with no cutout is black).
+        assert(r.n === 22 && r.disabled.length === 0, `tiles ${r.n}, disabled ${r.disabled}`);
+        assert(r.drawn >= 20, `${r.drawn} thumbnails drawn`);
         assert(r.lin[0] < 10 && r.lin[1] > 245, `linear thumbnail: top ${r.lin[0]}, bottom ${r.lin[1]}`);
         await page.click('.mapTile[data-map="spiral"]');
         await page.waitForFunction(() => window.neofx.settings.map.type === 'spiral' && document.querySelector('.mapTile.on').dataset.map === 'spiral');

@@ -76,25 +76,14 @@ export class MapGen {
 
   // Put a picture (ImageBitmap or VideoFrame) into layer i of the custom map, as luma.
   putCustom(i, source, rotation) {
-    const gl = this.gl;
-    const e = this.e;
     const c = this.custom;
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, e.src);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    texParams(gl, gl.TEXTURE_2D, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR);
-    gl.useProgram(e.upload.prog);
-    gl.uniform1i(e.upload.u.u_src, 0);
-    gl.uniform1i(e.upload.u.u_rot, rotation || 0);
-    gl.uniform1i(e.upload.u.u_mode, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, e.fb);
-    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, c.tex, 0, i);
-    gl.viewport(0, 0, c.w, c.h);
-    drawQuad(gl);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.e.lumaInto(c.tex, i, c.w, c.h, source, rotation);
     c.count = Math.max(c.count, i + 1);
+  }
+
+  empty2D() {
+    if (!this.empty) this.empty = this.makeTarget(1, 1);
+    return this.empty;
   }
 
   curve(points) {
@@ -131,6 +120,19 @@ export class MapGen {
     gl.uniform1i(g.u.u_custom, 5);
     gl.uniform2f(g.u.u_res, w, h);
     gl.uniform1i(g.u.u_t, t);
+    // The subject maps: the mask and the jump flood distance (plan §7.3, §9).
+    const mk = e.mask;
+    const subj = map.source === 'builtin' && (map.type === 'subject' || map.type === 'subjectdist') && mk.tex;
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, subj ? mk.tex.out : this.empty2D());
+    gl.uniform1i(g.u.u_mask, 6);
+    const dist = subj && map.type === 'subjectdist' ? mk.distance() : null;
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D, dist || this.empty2D());
+    gl.uniform1i(g.u.u_dist, 7);
+    gl.uniform2f(g.u.u_workRes, e.w, e.h);
+    this.into(W.raw, w, h);
+    gl.useProgram(g.prog);
     gl.uniform1i(g.u.u_src, custom ? 1 : 0);
     gl.uniform2f(g.u.u_offset, A.offsetX, A.offsetY);
     gl.uniform2f(g.u.u_tile, Math.max(1, A.tileX), Math.max(1, A.tileY));

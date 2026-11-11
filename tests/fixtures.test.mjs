@@ -31,7 +31,7 @@ export const tests = [
     fn() {
       if (!hasFfmpeg()) return console.log('      (skipped: no FFmpeg with libx264)');
       const f = makeFixtures(FIX_DIR);
-      assert(Object.keys(f).length === 7, `fixtures: ${Object.keys(f)}`);
+      assert(Object.keys(f).length === 10, `fixtures: ${Object.keys(f)}`);
       const plain = groundTruth(f['code.mp4']);
       assert(JSON.stringify(plain.codes) === JSON.stringify(seq(0, 90)), `code.mp4 codes ${plain.codes.slice(0, 10)}`);
       assert(JSON.stringify(groundTruth(f['code_opengop.mp4']).codes) === JSON.stringify(seq(0, 90)), 'open GOP codes');

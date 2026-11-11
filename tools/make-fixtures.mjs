@@ -18,6 +18,26 @@ const codeFilter = `geq=lum='255*mod(floor((N+1)/pow(2,mod(floor(X/${CODE_BLOCK}
 const codeIn = () => ['-f', 'lavfi', '-i', `color=c=black:s=${W}x${H}:r=${FPS}`];
 const x264 = (extra = []) => ['-frames:v', String(N), '-c:v', 'libx264', '-crf', '12', '-pix_fmt', 'yuv420p', ...extra];
 
+// The disc of the cutout fixtures at frame N (FFmpeg expressions and JS).
+const DISC = { cx: '60+3*N', cy: '120+40*sin(N/8)', r: 32 };
+export function subjectAt(n) {
+  return { cx: 60 + 3 * n, cy: 120 + 40 * Math.sin(n / 8), r: 32 };
+}
+// The ground truth of pixel (x, y) at frame n: in the disc (the hole is part of the subject).
+export const inSubject = (n, x, y) => {
+  const d = subjectAt(n);
+  return Math.hypot(x - d.cx, y - d.cy) < d.r;
+};
+const subjectIn = (bg) => ['-f', 'lavfi', '-i', bg];
+// geq: the disc (luma Y, chroma cb / cr), a dark hole (radius 7, 10 px right of the centre), and
+// (with square) a still bright square at x 280..295, y 10..25. Chroma planes are half size.
+function subjectFilter(Y, cb, cr, square = true) {
+  const inDisc = (k) => `lt(hypot(${k}*X-(${DISC.cx}),${k}*Y-(${DISC.cy})),${DISC.r})`;
+  const inHole = `lt(hypot(X-(${DISC.cx})-10,Y-(${DISC.cy})),7)`;
+  const sq = square ? `if(between(X,280,295)*between(Y,10,25),240,p(X,Y))` : 'p(X,Y)';
+  return `geq=lum='if(${inDisc(1)},if(${inHole},40,${Y}),${sq})':cb='if(${inDisc(2)},${cb},p(X,Y))':cr='if(${inDisc(2)},${cr},p(X,Y))'`;
+}
+
 // name -> (out, dir) => FFmpeg arguments (inputs ... outputs, without the file).
 export const FIXTURES = {
   // B-frames, closed GOP, keyframe each 24 frames.
@@ -32,6 +52,13 @@ export const FIXTURES = {
   'code_vfr.mp4': () => [...codeIn(), '-vf', `${codeFilter},setpts='N/${FPS}/TB+if(gt(N,40),0.2/TB,0)+if(eq(mod(N,7),3),0.011/TB,0)'`, '-fps_mode', 'passthrough', ...x264(['-bf', '2', '-g', '30'])],
   // Colours that move (compositor tests).
   'color.mp4': () => ['-f', 'lavfi', '-i', `testsrc2=size=${W}x${H}:rate=${FPS}`, ...x264(['-bf', '2'])],
+  // Cutout (plan §13.1): a disc that moves on a still noise background (tripod), with a dark hole
+  // in the disc and a still bright square (top right). Ground truth: subjectAt() (disc and hole).
+  'subject.mp4': () => [...subjectIn('color=c=0x5a5a5a:s=320x240:r=30,noise=alls=30:allf=u'), '-vf', subjectFilter(220, 70, 200), '-frames:v', '60', '-c:v', 'libx264', '-crf', '10', '-pix_fmt', 'yuv420p'],
+  // The same disc on a green screen.
+  'greenscreen.mp4': () => [...subjectIn('color=c=0x30c040:s=320x240:r=30,noise=alls=6:allf=u'), '-vf', subjectFilter(170, 150, 190, false), '-frames:v', '60', '-c:v', 'libx264', '-crf', '10', '-pix_fmt', 'yuv420p'],
+  // The ground-truth mask as a video (white disc on black), for the mask import.
+  'subjectmask.mp4': () => ['-f', 'lavfi', '-i', 'color=c=black:s=320x240:r=30', '-vf', `geq=lum='if(lt(hypot(X-(${DISC.cx}),Y-(${DISC.cy})),${DISC.r}),255,0)':cb=128:cr=128`, '-frames:v', '60', '-c:v', 'libx264', '-crf', '4', '-pix_fmt', 'yuv420p'],
   // AAC audio.
   'code_aac.mp4': () => [...codeIn(), '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3', '-vf', codeFilter, ...x264(['-bf', '2']), '-c:a', 'aac', '-shortest'],
 };

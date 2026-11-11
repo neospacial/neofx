@@ -10,6 +10,7 @@ const COMPOSITE_GLSL = "@GLSL:gpu/glsl/composite.glsl";
 const AGE_GLSL = "@GLSL:gpu/glsl/age.glsl";
 const ROW_FRAG = "@GLSL:gpu/glsl/slitrow.frag";
 const SCAN_FRAG = "@GLSL:gpu/glsl/slitscan.frag";
+const SUBJECT_GLSL = "@GLSL:gpu/glsl/subject.glsl";
 const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\n';
 const VIEWS = { result: 0, original: 1, map: 2 };
 
@@ -18,7 +19,7 @@ export class Slit {
     this.e = engine;
     const gl = (this.gl = engine.gl);
     this.rowProg = program(gl, QUAD_VERT, `#version 300 es\n${ROW_FRAG}`);
-    this.scan = program(gl, QUAD_VERT, `${HEAD}${STORE_GLSL}\n${COMPOSITE_GLSL}\n${AGE_GLSL}\n${SCAN_FRAG}`);
+    this.scan = program(gl, QUAD_VERT, `${HEAD}${STORE_GLSL}\n${COMPOSITE_GLSL}\n${SUBJECT_GLSL}\n${AGE_GLSL}\n${SCAN_FRAG}`);
     this.hist = this.rowsTex = this.Stex = this.stY = this.stC = null;
     this.H = 0;
     this.rowFrame = null;
@@ -185,6 +186,7 @@ export class Slit {
     gl.uniform1i(p.u.u_sharp, sl.sampling === 'blend' ? 0 : 1);
     gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);
     e.compositeUniforms(p, s, this.M);
+    e.mask.subjectUniforms(p, s.cutout.mode === 'overlay');
     drawQuad(gl);
   }
 }

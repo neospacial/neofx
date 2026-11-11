@@ -4,7 +4,7 @@ import { defaultParams } from '../maps/builtin.js';
 
 export const DEFAULTS = {
   mode: 'timemap', // 'timemap' | 'slitscan' (phase 7)
-  view: 'result', // 'result' | 'original' | 'map'
+  view: 'result', // 'result' | 'original' | 'map' | 'mask'
   timemap: {
     maxDelay: 30, // frames (white); the store limits it to N - 1
     steps: 0, // 0 = smooth, else 2..64
@@ -34,6 +34,26 @@ export const DEFAULTS = {
     maxAge: 600, // frames
     sampling: 'sharp', // 'sharp' (nearest frame) | 'blend' (mix 2 frames)
   },
+  cutout: {
+    mode: 'off', // 'off' | 'overlay' | 'scan' (Mode 2, phase 9) (plan §9.4)
+    bgdiff: { on: true, lightTol: 0.5, threshold: 0.12, softness: 0.06, shadow: 0 },
+    chroma: { on: false, key: '#00ff00', tolerance: 0.08, softness: 0.05, spill: 0.5 },
+    luma: { on: false, low: 0.7, high: 1, softness: 0.05, invert: false },
+    combine: 'union', // 'union' | 'intersect'
+    plate: 'auto', // the clean plate: 'auto' (median) | 'frame' | 'image'
+    open: 0, // px
+    close: 0, // px
+    fillHoles: 0, // % of the frame (0 = off)
+    keepLargest: false,
+    grow: 0, // px, −32 .. 32
+    smooth: 0, // temporal smooth 0 .. 0.95
+    hysteresis: false,
+    tLow: 0.35,
+    tHigh: 0.65,
+    feather: 0, // px
+    import: { on: false, name: '' }, // a mask video (plan §9.3)
+  },
+  subject: { blend: 'normal', opacity: 1, grow: 0, feather: 0, outline: 0, outlineColor: '#ffffff' }, // §10.4
   composite: {
     mode: 'replace', // effect composite: 'replace' | 'blend' (§10.1)
     blend: 'normal', // gpu/blend.js BLEND_MODES

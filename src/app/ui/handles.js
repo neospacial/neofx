@@ -74,7 +74,7 @@ export class LineHandles {
 
   update() {
     const S = this.app.settings;
-    const show = S.mode === 'slitscan' && S.view !== 'original' && !this.canvas.hidden;
+    const show = S.mode === 'slitscan' && S.view !== 'original' && S.view !== 'mask' && !this.canvas.hidden && !(this.app.tools && this.app.tools.tool);
     this.svg.style.display = show ? '' : 'none';
     this.snapBtn.style.display = show ? '' : 'none';
     if (!show) return;
