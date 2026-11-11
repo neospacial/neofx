@@ -50,7 +50,9 @@ const settings = clone(DEFAULTS);
 const store = { short: 540, budget: 0, failAlloc: 0 };
 const mapInfo = { mapFrames: 0 };
 
+let lostMessage = ''; // after a GPU reset, this message stays
 function showMessage(text) {
+  if (lostMessage) text = lostMessage;
   const m = $('message');
   m.textContent = text || '';
   m.hidden = !text;
@@ -74,7 +76,7 @@ function status() {
 async function configureStore() {
   const info = player.info;
   const { width, height } = workingSize(info.width, info.height, store.short);
-  const r = await gpu.call({ cmd: 'configure', width, height, rotation: info.rotation, budget: store.budget || defaultBudget(navigator.userAgent), failAlloc: store.failAlloc, frames: info.times.length });
+  const r = await gpu.call({ cmd: 'configure', width, height, rotation: info.rotation, budget: store.budget || defaultBudget(navigator.userAgent, navigator.maxTouchPoints), failAlloc: store.failAlloc, frames: info.times.length });
   Object.assign(store, { width, height, n: r.n, bytes: r.bytes, usedBudget: r.budget, rows: r.rows, edgeRows: r.edgeRows });
   if (settings.slitscan.maxAge > r.rows) settings.slitscan.maxAge = r.rows;
   if (r.edgeRows && settings.slitscan.maxAgeEdge > r.edgeRows) settings.slitscan.maxAgeEdge = r.edgeRows;
@@ -301,6 +303,7 @@ function openMap(kind) {
   // video/*: the iOS picker closes when a video is touched (a list of types gives a picker without
   // a Done button on iPad). The app checks the file itself (MP4 / MOV).
   input.accept = kind === 'image' ? 'image/png,image/jpeg,image/webp' : 'video/*';
+  input.multiple = kind === 'video';
   input.dataset.kind = kind;
   input.value = '';
   input.click();
@@ -384,11 +387,41 @@ function setProgress(f) {
 }
 
 // The loading indicator (a file opens; it can take some seconds for a large file).
-function setLoading(text) {
+// onCancel: a Cancel button (the wait for the iOS picker).
+function setLoading(text, onCancel = null) {
   const el = $('loading');
   el.hidden = !text;
   $('loadingText').textContent = text || '';
   document.body.classList.toggle('loading', !!text);
+  const c = $('loadingCancel');
+  c.hidden = !onCancel;
+  c.onclick = onCancel;
+}
+
+// The video pickers. multiple: the iOS photo picker then has an Add button (with one file it has
+// none on iPad: the user taps outside). After the pick, iOS copies (and can convert) the video
+// before the page gets it, often for many seconds: on a touch device, the loading indicator shows
+// from the moment the picker opens, until the file comes (change), the picker is closed without
+// a file (cancel), or Cancel is touched.
+let pickerWait = null;
+function watchPicker(input) {
+  input.addEventListener('click', () => {
+    if (!(navigator.maxTouchPoints > 0)) return;
+    if (input === $('mapFileInput') && input.dataset.kind !== 'video') return;
+    const job = (pickerWait = {});
+    setLoading('Waiting for the video… (iOS prepares a video from Photos before the page gets it: a long video takes a while.)', () => {
+      if (pickerWait === job) pickerWait = null;
+      setLoading(null);
+    });
+  });
+  const end = () => {
+    if (!pickerWait) return;
+    pickerWait = null;
+    setLoading(null);
+  };
+  input.addEventListener('cancel', end);
+  // Before the handlers that open the file (they show their own text).
+  input.addEventListener('change', end); // (several files: the first one is used)
 }
 
 async function openFile(file) {
@@ -451,7 +484,7 @@ async function exportVideo(opts, onProgress = () => {}) {
     info: () => player.info,
     configure: async (w, h) => {
       await gpu.call({ cmd: 'settings', settings: clone(settings) });
-      const r = await gpu.call({ cmd: 'configure', width: w, height: h, rotation: player.info.rotation, budget: store.usedBudget || store.budget || defaultBudget(navigator.userAgent), frames: player.frameCount });
+      const r = await gpu.call({ cmd: 'configure', width: w, height: h, rotation: player.info.rotation, budget: store.usedBudget || store.budget || defaultBudget(navigator.userAgent, navigator.maxTouchPoints), frames: player.frameCount });
       await gpu.call({ cmd: 'settings', settings: clone(settings) });
       return r;
     },
@@ -484,7 +517,7 @@ async function exportVideo(opts, onProgress = () => {}) {
 // The export dialog: a warning when the Max delay does not fit the buffer at that size (plan §6.4).
 function exportCheck(w, h) {
   if (settings.mode !== 'timemap') return '';
-  const n = layerCount(store.usedBudget || defaultBudget(navigator.userAgent), gpuCaps.maxLayers, w, h);
+  const n = layerCount(store.usedBudget || defaultBudget(navigator.userAgent, navigator.maxTouchPoints), gpuCaps.maxLayers, w, h);
   const depth = settings.timemap.maxDelay;
   return depth > n - 1 ? `The Max delay (${depth} frames) is more than the buffer at ${Math.min(w, h)}p (${n} frames). Choose a lower resolution, or a smaller Max delay.` : '';
 }
@@ -891,6 +924,13 @@ async function start() {
   preview = new Preview($('view'), $('preview'));
   const forceMain = /[?&]gpu=main\b/.test(location.search);
   gpu = new GpuClient($('view'), GPU_WORKER, p.offscreen && !forceMain);
+  // The browser reset the GPU (most often: the device ran out of memory). Stop the playback (a
+  // loop would keep sending frames to a dead context) and say what to do.
+  gpu.onLost = () => {
+    if (player) player.pause();
+    lostMessage = 'The GPU stopped: the browser reset it, most often because the device ran out of memory. Reload the page, then choose a lower Preview resolution (or a shorter Max delay).';
+    showMessage(lostMessage);
+  };
   try {
     gpuCaps = await gpu.ready;
   } catch (e) {
@@ -997,6 +1037,7 @@ async function start() {
   });
   $('exportBtn').addEventListener('click', () => exportDialog.open());
   Object.assign(window.neofx, { undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  for (const id of ['fileInput', 'maskFileInput', 'mapFileInput']) watchPicker($(id));
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));
   $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));

@@ -190,7 +190,7 @@ export class Mask {
     const gl = this.gl;
     const e = this.e;
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, e.src);
+    gl.bindTexture(gl.TEXTURE_2D, e.src2);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     upload();
     gl.generateMipmap(gl.TEXTURE_2D);
