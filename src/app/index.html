@@ -19,12 +19,13 @@
     <button id="redoBtn" class="wide" type="button" disabled aria-label="Redo" title="Redo (Shift+Ctrl+Z)">↷</button>
     <span class="spacer"></span>
     <span id="status" aria-live="polite"></span>
-    <button id="menuBtn" class="narrow" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false">⋯</button>
+    <button id="menuBtn" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false">⋯</button>
     <button id="exportBtn" type="button" disabled>Export</button>
     <div id="menu" role="menu" hidden>
-      <button type="button" role="menuitem" data-act="presets">Presets</button>
-      <button type="button" role="menuitem" data-act="undo">Undo</button>
-      <button type="button" role="menuitem" data-act="redo">Redo</button>
+      <button type="button" role="menuitem" data-act="presets" class="narrow">Presets</button>
+      <button type="button" role="menuitem" data-act="undo" class="narrow">Undo</button>
+      <button type="button" role="menuitem" data-act="redo" class="narrow">Redo</button>
+      <button type="button" role="menuitem" data-act="bench">Performance test…</button>
     </div>
   </header>
 
@@ -80,12 +81,25 @@
     <canvas class="strip" aria-label="Timeline"></canvas>
   </footer>
   <dialog id="exportDialog" aria-label="Export"></dialog>
+  <dialog id="benchDialog" aria-label="Performance test">
+    <form method="dialog" class="exportForm">
+      <h2>Performance test</h2>
+      <p class="note">Plays the open video for a few seconds in each mode at 540p, exports up to 150 frames at 1080p (not saved), and reads the frame buffer limit. Keep this tab in front while it runs.</p>
+      <p id="benchStep" class="exportText"></p>
+      <textarea id="benchOut" rows="9" readonly hidden></textarea>
+      <div class="exportButtons">
+        <button type="button" id="benchClose">Close</button>
+        <button type="button" id="benchCopy" hidden>Copy</button>
+        <button type="button" id="benchRun" class="primary">Run</button>
+      </div>
+    </form>
+  </dialog>
   <input id="presetFileInput" type="file" accept=".json,application/json" hidden>
   <input id="mapFileInput" type="file" hidden>
   <input id="plateFileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
   <input id="maskFileInput" type="file" accept="video/*" multiple hidden>
   <input id="fileInput" type="file" accept="video/*" multiple hidden>
 </div>
-<!--@modules:io/demux.js,io/mp4.js,io/encoder-config.js,maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/curve.js,app/random.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/export.js,app/ui/exportdialog.js,app/history.js,app/presets.js,app/ui/layout.js,app/ui/startscreen.js,app/main.js-->
+<!--@modules:io/demux.js,io/mp4.js,io/encoder-config.js,maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/curve.js,app/random.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/export.js,app/ui/exportdialog.js,app/history.js,app/presets.js,app/ui/layout.js,app/ui/startscreen.js,app/bench.js,app/main.js-->
 </body>
 </html>

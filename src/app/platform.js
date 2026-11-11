@@ -15,7 +15,13 @@ export async function checkPlatform() {
   }
   const floatTargets = !!gl.getExtension('EXT_color_buffer_float') || !!gl.getExtension('EXT_color_buffer_half_float');
   if (!floatTargets) out.notes.push('No float render targets: some modes lose precision.');
+  let renderer = '';
+  try {
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  } catch { /* not given */ }
   out.gl = {
+    renderer,
     floatTargets,
     maxLayers: gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS),
     maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE),
@@ -31,7 +37,10 @@ export async function checkPlatform() {
   if (!out.encoder) out.notes.push('No H.264 encoder: export is disabled.');
   out.offscreen = typeof OffscreenCanvas !== 'undefined' && (() => {
     try {
-      return !!new OffscreenCanvas(1, 1).getContext('webgl2');
+      const g = new OffscreenCanvas(1, 1).getContext('webgl2');
+      const ext = g && g.getExtension('WEBGL_lose_context');
+      if (ext) ext.loseContext(); // give the test context back (iOS has few contexts)
+      return !!g;
     } catch {
       return false;
     }

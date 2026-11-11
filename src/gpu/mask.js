@@ -475,7 +475,16 @@ export class Mask {
     const e = this.e;
     const s = Math.min(1, FIX_SIZE / Math.max(e.w, e.h));
     const w = Math.max(1, Math.round(e.w * s)), h = Math.max(1, Math.round(e.h * s));
-    const small = this.tex2(w, h, gl.RGBA8);
+    // The two textures of this size are made once (not for each frame: WebKit frees deleted
+    // textures late).
+    if (this.fixKey !== `${w}x${h}`) {
+      if (this.fixSmall) gl.deleteTexture(this.fixSmall);
+      gl.deleteTexture(this.fixTex);
+      this.fixSmall = this.tex2(w, h, gl.RGBA8);
+      this.fixTex = this.tex2(w, h, gl.RG8);
+      this.fixKey = `${w}x${h}`;
+    }
+    const small = this.fixSmall;
     this.into(small, w, h);
     gl.useProgram(this.post.prog);
     gl.activeTexture(gl.TEXTURE0);
@@ -486,7 +495,6 @@ export class Mask {
     drawQuad(gl);
     const px = new Uint8Array(w * h * 4);
     gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
-    gl.deleteTexture(small);
     const b = new Uint8Array(w * h);
     for (let i = 0; i < w * h; i++) b[i] = px[i * 4] > 127 ? 1 : 0;
     const r = cleanRegions(b, w, h, fillPercent, keepLargest);
@@ -495,13 +503,10 @@ export class Mask {
       rg[i * 2] = r.fill[i] * 255;
       rg[i * 2 + 1] = r.remove[i] * 255;
     }
-    gl.deleteTexture(this.fixTex);
-    this.fixTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.fixTex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, w, h, 0, gl.RG, gl.UNSIGNED_BYTE, rg);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RG, gl.UNSIGNED_BYTE, rg);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
-    texParams(gl, gl.TEXTURE_2D);
   }
 
   // Jump flooding: the nearest subject pixel of each pixel (for the Subject distance map).

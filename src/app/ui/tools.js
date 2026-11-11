@@ -12,6 +12,12 @@ export class PreviewTools {
     this.cursor.className = 'brushCursor';
     this.cursor.hidden = true;
     area.append(this.cursor);
+    this.bind(canvas);
+  }
+
+  // The listeners on the preview canvas (again when the canvas is new: a GPU restart).
+  bind(canvas) {
+    this.canvas = canvas;
     let pts = null, sent = 0, raf = 0;
     const uv = (e) => {
       const b = canvas.getBoundingClientRect();
@@ -50,6 +56,7 @@ export class PreviewTools {
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
     canvas.addEventListener('pointerleave', () => (this.cursor.hidden = true));
+    canvas.style.cursor = this.tool === 'pick' ? 'crosshair' : this.tool ? 'none' : '';
   }
 
   setTool(tool) {

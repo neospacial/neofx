@@ -5,7 +5,7 @@ import { checkPlatform } from './platform.js';
 import { Player } from './player.js';
 import { GpuClient } from './gpu-client.js';
 import { Preview } from './preview.js';
-import { workingSize, defaultBudget, bufferText } from '../gpu/store.js';
+import { workingSize, defaultBudget, bufferText, isIOS } from '../gpu/store.js';
 import { Timeline } from './ui/timeline.js';
 import { Inspector } from './ui/inspector.js';
 import { DEFAULTS, clone, setPath } from './settings.js';
@@ -26,6 +26,7 @@ import { rng, randomizeSection } from './random.js';
 import { PRESETS, applyPreset, presetFile, parsePresetFile, dataUrlBlob, merge } from './presets.js';
 import { initLayout } from './ui/layout.js';
 import { startDemos } from './ui/startscreen.js';
+import { runBench } from './bench.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
@@ -50,9 +51,7 @@ const settings = clone(DEFAULTS);
 const store = { short: 540, budget: 0, failAlloc: 0 };
 const mapInfo = { mapFrames: 0 };
 
-let lostMessage = ''; // after a GPU reset, this message stays
 function showMessage(text) {
-  if (lostMessage) text = lostMessage;
   const m = $('message');
   m.textContent = text || '';
   m.hidden = !text;
@@ -69,7 +68,8 @@ function status() {
   if (analysis && analysis.running) parts.unshift(`Analysis ${Math.round(analysis.progress * 100)} %`);
   if (slow) parts.push(`Preview ${Math.round(fps)} fps`);
   else parts.push(`${info.width}×${info.height}`);
-  s.textContent = parts.join(' · ');
+  const text = parts.join(' · ');
+  if (s.textContent !== text) s.textContent = text; // (each shown frame: no layout when the same)
 }
 
 // Make the store for the working size (plan §6.4). The store is empty after this.
@@ -167,6 +167,7 @@ async function plateImage(file) {
     const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
     await gpu.call({ cmd: 'plateImage', bitmap }, [bitmap]);
     Object.assign(toolState, { plateOk: true, plateText: file.name });
+    gpuState.plateFile = file;
   } catch {
     showMessage('This image file cannot be read (PNG, JPEG, or WebP).');
   }
@@ -206,6 +207,7 @@ async function loadMaskVideo(file) {
       wk.postMessage({ cmd: 'open', file });
     });
     settings.cutout.import = { on: true, name: file.name };
+    gpuState.maskFile = file;
   } catch (e) {
     showMessage(e.message);
   }
@@ -327,6 +329,7 @@ async function loadMapFile(file, kind) {
       const caps = await gpu.call({ cmd: 'caps' });
       const r = await loadVideoMap(file, gpu, { workerSrc: DECODE_WORKER, short: Math.min(store.height || 540, 540), maxLayers: caps.maxLayers, onProgress: setProgress });
       settings.map.video.name = file.name;
+      gpuState.mapVideoFile = file;
       mapInfo.mapFrames = r.count;
       setProgress(null);
     }
@@ -453,6 +456,7 @@ async function openFile(file) {
     plateJob = null;
     Object.assign(toolState, { plateOk: false, plateText: '' });
     settings.cutout.import = { on: false, name: '' };
+    gpuState.maskFile = gpuState.plateFile = null;
     currentFile = file;
     let info;
     try {
@@ -516,16 +520,23 @@ async function exportVideo(opts, onProgress = () => {}) {
     if (an) an.stop();
     if (rejectAnalysis) rejectAnalysis(new Error('Export cancelled'));
   };
+  exportLost = false;
   try {
     return await ex.run(opts, onProgress);
+  } catch (e) {
+    if (exportLost) throw new Error('The browser reset the GPU during the export (most often: not enough memory). Try again, at a lower resolution.');
+    throw e;
   } finally {
     settings.view = view;
     exporter = null;
-    // The preview again (the engine store is new; the delay cap of the preview loop).
-    await configureStore();
-    await syncWrap(true);
-    await player.seek(Math.max(0, player.current));
-    status();
+    // The preview again (the engine store is new; the delay cap of the preview loop). After a GPU
+    // reset, the restart does it.
+    if (!exportLost) {
+      await configureStore();
+      await syncWrap(true);
+      await player.seek(Math.max(0, player.current));
+      status();
+    }
   }
 }
 
@@ -923,12 +934,171 @@ async function loadPreset(file) {
     const bitmap = await createImageBitmap(dataUrlBlob(p.assets.matte), { resizeWidth: m.width, resizeHeight: m.height, colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
     await gpu.call({ cmd: 'matteSet', bitmap }, [bitmap]);
     toolState.matteVersion++;
+    snapMatte();
   }
   if (video) {
     notes.unshift(`This preset uses the video map "${video}": open it.`);
     openMap('video');
   }
   showMessage(notes.join(' '));
+}
+
+// ---- The GPU engine, and its restart (the browser can reset the GPU: out of memory, a tab in the
+// background on iOS). The engine runs in the GPU worker (OffscreenCanvas) where the browser has it,
+// but on iOS on the main thread (WebKit's OffscreenCanvas WebGL in a worker is newer, and the page
+// flashed there). ?gpu=main forces the main thread.
+function makeGpu(canvas) {
+  const forceMain = /[?&]gpu=main\b/.test(location.search) || isIOS(navigator.userAgent, navigator.maxTouchPoints);
+  const g = new GpuClient(canvas, GPU_WORKER, platform.offscreen && !forceMain);
+  g.onLost = () => restartGpu();
+  return g;
+}
+
+// What the engine holds that is not in the settings: kept here, so a restart can put it back.
+const gpuState = { matte: null, mapVideoFile: null, maskFile: null, plateFile: null };
+const gpuLosses = [];
+let restarting = null;
+let exportLost = false;
+
+// The garbage matte, read back (after the strokes end), so a GPU restart keeps it.
+let matteTimer = 0;
+function snapMatte() {
+  clearTimeout(matteTimer);
+  matteTimer = setTimeout(async () => {
+    try {
+      const m = await gpu.call({ cmd: 'matteGet' });
+      gpuState.matte = m.empty ? null : m;
+    } catch { /* the GPU restarts */ }
+  }, 400);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const visible = () => new Promise((r) => {
+  if (!document.hidden) return r();
+  const f = () => {
+    if (document.hidden) return;
+    document.removeEventListener('visibilitychange', f);
+    r();
+  };
+  document.addEventListener('visibilitychange', f);
+});
+
+// A new canvas, a new context, a new engine; then the store, the settings, the custom map, the
+// mask video, the clean plate, the matte, and the frame on the preview, as they were. The store
+// budget halves (most resets are out of memory).
+function restartGpu() {
+  if (restarting) return restarting;
+  restarting = (async () => {
+    const t = Math.max(0, player ? player.current : 0);
+    if (player) player.pause();
+    stopReverse();
+    if (analysis) analysis.stop();
+    if (exporter) {
+      exportLost = true;
+      exporter.cancel();
+    }
+    const now = Date.now();
+    gpuLosses.push(now);
+    while (gpuLosses.length && now - gpuLosses[0] > 120000) gpuLosses.shift();
+    if (store.usedBudget) store.budget = Math.max(48 * 1048576, Math.floor(store.usedBudget / 2));
+    setLoading('The browser reset the GPU. Restoring the preview…');
+    try {
+      await visible();
+      await sleep(300);
+      while (exporter) await sleep(100); // the export stops first
+      gpu.dispose();
+      const old = $('view');
+      const c = old.cloneNode(false);
+      old.replaceWith(c);
+      preview.canvas = c;
+      handles.canvas = c;
+      tools.bind(c);
+      gpu = makeGpu(c);
+      gpuCaps = await gpu.ready;
+      analysis.gpu = gpu;
+      window.neofx.gpu = gpu;
+      if (player.info) {
+        await configureStore();
+        player.setWrap(false);
+        await syncWrap(true);
+        if (settings.map.source === 'image' && mapInfo.imageDataUrl) await loadImageMap(dataUrlBlob(mapInfo.imageDataUrl), gpu).catch(() => {});
+        if (settings.map.source === 'video' && gpuState.mapVideoFile) await loadMapFile(gpuState.mapVideoFile, 'video');
+        if (settings.cutout.import.on && gpuState.maskFile) await loadMaskVideo(gpuState.maskFile);
+        if (settings.cutout.plate === 'image' && gpuState.plateFile) await plateImage(gpuState.plateFile);
+        else if (settings.cutout.plate === 'frame') toolState.plateOk = false;
+        if (gpuState.matte) {
+          const m = await gpu.call({ cmd: 'matteGet' });
+          const src = gpuState.matte;
+          const bitmap = await createImageBitmap(new ImageData(new Uint8ClampedArray(src.pixels.buffer.slice(0)), src.width, src.height), { resizeWidth: m.width, resizeHeight: m.height, colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+          await gpu.call({ cmd: 'matteSet', bitmap }, [bitmap]);
+          toolState.matteVersion++;
+        }
+        await applySettings();
+        ensurePlate();
+        scheduleAnalysis();
+        await player.seek(t);
+        status();
+      } else await gpu.call({ cmd: 'settings', settings: clone(settings) });
+      showMessage(gpuLosses.length >= 3
+        ? 'The browser has reset the GPU several times (most often: not enough memory). Choose a lower Preview resolution or a shorter Max delay.'
+        : 'The browser reset the GPU; the preview was restored.');
+    } catch (e) {
+      showMessage(`The GPU cannot be restored (${e.message}). Reload the page.`);
+    } finally {
+      setLoading(null);
+      restarting = null;
+    }
+  })();
+  return restarting;
+}
+
+// A tab in the background: playback stops (no frames to a GPU that the system can take back).
+// Back: the engine is checked (a lost context restarts it), and the frame is drawn again.
+function onVisibility() {
+  if (document.hidden) {
+    if (player) player.pause();
+    stopReverse();
+    return;
+  }
+  setTimeout(async () => {
+    if (!gpu || restarting || document.hidden) return;
+    let lost = false;
+    try {
+      lost = (await gpu.call({ cmd: 'alive' })).lost;
+    } catch {
+      lost = true;
+    }
+    if (lost) restartGpu();
+    else if (player && player.info && player.vcur >= 0 && !player.busy) gpu.call({ cmd: 'render', index: player.vcur }).catch(() => {});
+  }, 250);
+}
+
+// The performance test (phase 12, plan §13.4).
+async function benchmark(opts) {
+  return runBench({
+    player, store, version: VERSION, gpuMode: gpu.mode, gpuName: platform.gl && platform.gl.renderer,
+    info: () => player.info,
+    settings: () => clone(settings),
+    look: (patch) => replaceSettings(merge(settings, patch)),
+    restore: (saved) => replaceSettings(saved),
+    setShort: async (short) => {
+      store.short = short;
+      $('resSelect').value = String(short);
+      await configureStore();
+      await player.seek(0);
+      status();
+    },
+    bufferAt: (w, h) => layerCount(store.usedBudget || defaultBudget(navigator.userAgent, navigator.maxTouchPoints), gpuCaps.maxLayers, w, h),
+    exportVideo,
+    onStep: (t) => ($('benchStep').textContent = t),
+  }, opts);
+}
+
+function openBench() {
+  const d = $('benchDialog');
+  $('benchStep').textContent = player.info ? '' : 'Open a video first.';
+  $('benchRun').disabled = !player.info;
+  d.showModal();
 }
 
 async function start() {
@@ -942,15 +1112,8 @@ async function start() {
   }
   if (p.notes.length) showMessage(p.notes.join(' '));
   preview = new Preview($('view'), $('preview'));
-  const forceMain = /[?&]gpu=main\b/.test(location.search);
-  gpu = new GpuClient($('view'), GPU_WORKER, p.offscreen && !forceMain);
-  // The browser reset the GPU (most often: the device ran out of memory). Stop the playback (a
-  // loop would keep sending frames to a dead context) and say what to do.
-  gpu.onLost = () => {
-    if (player) player.pause();
-    lostMessage = 'The GPU stopped: the browser reset it, most often because the device ran out of memory. Reload the page, then choose a lower Preview resolution (or a shorter Max delay).';
-    showMessage(lostMessage);
-  };
+  gpu = makeGpu($('view'));
+  document.addEventListener('visibilitychange', onVisibility);
   try {
     gpuCaps = await gpu.ready;
   } catch (e) {
@@ -989,6 +1152,7 @@ async function start() {
     stroke: (points, mode) => {
       toolState.matteVersion++;
       scheduleAnalysis();
+      snapMatte();
       return gpu.call({ cmd: 'matteStroke', points, size: toolState.brush.size, hardness: toolState.brush.hardness, mode });
     },
     brush: toolState.brush,
@@ -1002,6 +1166,8 @@ async function start() {
     change, openMap, info: () => mapInfo, tools: toolState, setTool, plate: makePlate, importMask, removeMask,
     clearMatte: () => {
       toolState.matteVersion++;
+      clearTimeout(matteTimer);
+      gpuState.matte = null;
       scheduleAnalysis();
       return gpu.call({ cmd: 'matteClear' });
     },
@@ -1026,7 +1192,7 @@ async function start() {
     });
   }
   layout = initLayout({
-    menu: { presets: openPresets, undo, redo },
+    menu: { presets: openPresets, undo, redo, bench: openBench },
     split: (pos) => {
       if (pos === null) return;
       settings.splitPos = pos;
@@ -1056,7 +1222,31 @@ async function start() {
     cancel: () => exporter && exporter.cancel(),
   });
   $('exportBtn').addEventListener('click', () => exportDialog.open());
-  Object.assign(window.neofx, { undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  $('benchClose').addEventListener('click', () => $('benchDialog').close());
+  $('benchCopy').addEventListener('click', () => {
+    const t = $('benchOut');
+    t.select();
+    if (navigator.clipboard) navigator.clipboard.writeText(t.value).catch(() => document.execCommand('copy'));
+    else document.execCommand('copy');
+  });
+  $('benchRun').addEventListener('click', async () => {
+    $('benchRun').disabled = true;
+    $('benchClose').disabled = true;
+    try {
+      const r = await benchmark();
+      $('benchOut').value = r.text;
+      $('benchOut').hidden = false;
+      $('benchCopy').hidden = false;
+      $('benchStep').textContent = 'Done. Copy the result into the README (device results).';
+      window.neofx.lastBench = r;
+    } catch (e) {
+      $('benchStep').textContent = e.message;
+    } finally {
+      $('benchRun').disabled = false;
+      $('benchClose').disabled = false;
+    }
+  });
+  Object.assign(window.neofx, { restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   for (const id of ['fileInput', 'maskFileInput', 'mapFileInput']) watchPicker($(id));
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));

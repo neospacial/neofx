@@ -62,13 +62,20 @@ export class Timeline {
     this.update();
   }
 
+  // A new file: the thumbnails of the old one are closed (an ImageBitmap holds memory, on the GPU
+  // on some browsers, until it is closed).
   reset() {
+    for (const th of this.thumbs) if (th && th.bitmap.close) th.bitmap.close();
     this.thumbs = [];
+    this.thumbVersion = (this.thumbVersion || 0) + 1;
     this.update();
   }
 
   addThumb(i, index, bitmap) {
+    const old = this.thumbs[i];
+    if (old && old.bitmap.close) old.bitmap.close();
     this.thumbs[i] = { index, bitmap };
+    this.thumbVersion = (this.thumbVersion || 0) + 1;
     this.draw();
   }
 
@@ -97,22 +104,38 @@ export class Timeline {
       c.height = h;
     }
     const ctx = this.ctx;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, w, h);
     const P = this.player;
     const n = P.frameCount;
-    if (!n) return;
-    const count = this.thumbs.length ? Math.max(this.thumbs.length, 50) : 50;
-    const tw = w / count;
-    for (let i = 0; i < this.thumbs.length; i++) {
-      const th = this.thumbs[i];
-      if (!th) continue;
-      const b = th.bitmap;
-      // Cover the cell, centered.
-      const s = Math.max(tw / b.width, h / b.height);
-      const sw = tw / s, sh = h / s;
-      ctx.drawImage(b, (b.width - sw) / 2, (b.height - sh) / 2, sw, sh, i * tw, 0, Math.ceil(tw), h);
+    if (!n) {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, w, h);
+      return;
     }
+    // The thumbnails are drawn into a cache when they or the size change; each update (each shown
+    // frame in playback) copies it and draws the markers.
+    const key = `${w}x${h}:${this.thumbVersion || 0}`;
+    if (this.cacheKey !== key) {
+      if (!this.cache) this.cache = document.createElement('canvas');
+      const cc = this.cache;
+      cc.width = w;
+      cc.height = h;
+      const g = cc.getContext('2d');
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, w, h);
+      const count = this.thumbs.length ? Math.max(this.thumbs.length, 50) : 50;
+      const tw = w / count;
+      for (let i = 0; i < this.thumbs.length; i++) {
+        const th = this.thumbs[i];
+        if (!th) continue;
+        const b = th.bitmap;
+        // Cover the cell, centered.
+        const s = Math.max(tw / b.width, h / b.height);
+        const sw = tw / s, sh = h / s;
+        g.drawImage(b, (b.width - sw) / 2, (b.height - sh) / 2, sw, sh, i * tw, 0, Math.ceil(tw), h);
+      }
+      this.cacheKey = key;
+    }
+    ctx.drawImage(this.cache, 0, 0);
     const x = (t) => (n > 1 ? (t / (n - 1)) * (w - 2 * dpr) + dpr : w / 2);
     const [a, b] = P.range();
     if (P.inPoint !== null || P.outPoint !== null) {
@@ -123,7 +146,8 @@ export class Timeline {
       ctx.fillRect(x(a) - dpr, 0, 2 * dpr, h);
       ctx.fillRect(x(b) - dpr, 0, 2 * dpr, h);
     }
-    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#eee100';
+    if (!this.accent) this.accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#eee100';
+    ctx.fillStyle = this.accent;
     ctx.fillRect(x(Math.max(0, P.current)) - dpr, 0, 2 * dpr, h);
   }
 }
