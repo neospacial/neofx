@@ -22,7 +22,8 @@ export function groundTruth(file, rotation = 0) {
   return { codes, times, w, h };
 }
 
-const seq = (a, b) => Array.from({ length: b - a }, (_, i) => a + i);
+// The codes of frames a .. b - 1 (code = frame number + 1).
+const seq = (a, b) => Array.from({ length: b - a }, (_, i) => a + i + 1);
 
 export const tests = [
   {
@@ -37,7 +38,7 @@ export const tests = [
       const rot = groundTruth(f['code_rot90.mp4'], 90);
       assert(rot.w === 240 && rot.h === 320 && JSON.stringify(rot.codes) === JSON.stringify(seq(0, 90)), 'rotated codes');
       const e = groundTruth(f['code_elst.mp4']);
-      assert(e.codes[0] === 15 && JSON.stringify(e.codes) === JSON.stringify(seq(15, 90)), `edit list codes ${e.codes.slice(0, 5)}`);
+      assert(e.codes[0] === 16 && JSON.stringify(e.codes) === JSON.stringify(seq(15, 90)), `edit list codes ${e.codes.slice(0, 5)}`);
       const v = groundTruth(f['code_vfr.mp4']);
       assert(JSON.stringify(v.codes) === JSON.stringify(seq(0, 90)), 'VFR codes');
       assert(new Set(v.times.slice(1).map((t, i) => t - v.times[i])).size > 2, 'VFR has different frame durations');

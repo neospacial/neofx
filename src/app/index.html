@@ -31,6 +31,11 @@
           <div><b>Slit Scan</b> — a 1 px line repeats in one direction, and gets older with distance.</div>
         </div>
       </div>
+      <div id="viewBar" role="tablist" aria-label="View">
+        <button type="button" data-view="result" class="on">Result</button>
+        <button type="button" data-view="original">Original</button>
+        <button type="button" data-view="map">Map</button>
+      </div>
       <canvas id="view" hidden></canvas>
       <div id="progress" hidden></div>
       <div id="message" hidden></div>
@@ -59,6 +64,6 @@
   </footer>
   <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
 </div>
-<!--@modules:gpu/store.js,gpu/gl.js,gpu/engine.js,app/platform.js,app/player.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/main.js-->
+<!--@modules:gpu/store.js,gpu/gl.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/inspector.js,app/main.js-->
 </body>
 </html>

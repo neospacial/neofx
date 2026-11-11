@@ -7,13 +7,16 @@ import { GpuClient } from './gpu-client.js';
 import { Preview } from './preview.js';
 import { workingSize, defaultBudget, bufferText } from '../gpu/store.js';
 import { Timeline } from './ui/timeline.js';
+import { Inspector } from './ui/inspector.js';
+import { DEFAULTS, clone, setPath } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
 const DECODE_WORKER = "@WORKER:io/demux.js,io/timeline.js,io/decode-worker.js";
 const GPU_WORKER = "@WORKER:gpu/store.js,gpu/gl.js,gpu/engine.js,gpu/gpu-worker.js";
 
-let player, preview, timeline, gpu;
+let player, preview, timeline, gpu, inspector;
+const settings = clone(DEFAULTS);
 // The store state: { short (the preview setting), width, height, n, bytes, budget }.
 const store = { short: 540, budget: 0, failAlloc: 0 };
 
@@ -44,7 +47,34 @@ async function configureStore() {
   Object.assign(store, { width, height, n: r.n, bytes: r.bytes, usedBudget: r.budget });
   player.setStore(r.n);
   preview.setSize(width, height);
+  // The Max delay cannot be more than N - 1 (plan §6.4).
+  if (settings.timemap.maxDelay > r.n - 1) settings.timemap.maxDelay = r.n - 1;
+  inspector.build(settings, limits());
+  await applySettings();
   return r;
+}
+
+const limits = () => ({ maxDelay: Math.max(0, store.n - 1) });
+
+// The history that the effect needs: Mode 1, the Max delay.
+const effectDepth = () => (settings.mode === 'timemap' && settings.view !== 'original' ? settings.timemap.maxDelay : 0);
+
+// Send the settings to the engine. When the effect needs more history, a seek decodes it.
+async function applySettings() {
+  const r = gpu.call({ cmd: 'settings', settings: clone(settings) });
+  const depth = effectDepth();
+  const more = depth > player.depth;
+  player.depth = depth;
+  if (more && player.info && !player.playing && player.current >= 0) await player.seek(player.current);
+  await r;
+}
+
+// A setting changed in the UI.
+function change(path, value) {
+  setPath(settings, path, value);
+  inspector.refresh(settings);
+  if (path === 'view') for (const b of document.querySelectorAll('#viewBar button')) b.classList.toggle('on', b.dataset.view === value);
+  applySettings();
 }
 
 function setProgress(f) {
@@ -118,7 +148,7 @@ async function start() {
   }
   player = new Player(DECODE_WORKER, {
     consume: (index, frame, show) => gpu.call({ cmd: 'upload', index, frame, show }, [frame]),
-    render: (index) => gpu.call({ cmd: 'render', index, delay: 0 }),
+    render: (index) => gpu.call({ cmd: 'render', index }),
     onState: () => {
       timeline.update();
       status();
@@ -128,7 +158,11 @@ async function start() {
     onProgress: setProgress,
   });
   timeline = new Timeline($('transport'), player);
-  Object.assign(window.neofx, { player, preview, timeline, gpu, store, openFile, configureStore });
+  inspector = new Inspector($('inspector'), change);
+  inspector.build(settings, { maxDelay: 999 });
+  gpu.call({ cmd: 'settings', settings: clone(settings) });
+  for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
+  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings });
   $('resSelect').addEventListener('change', async (e) => {
     store.short = Number(e.target.value);
     if (!player.info) return;

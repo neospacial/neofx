@@ -1,7 +1,8 @@
 // Test videos (plan §13.1), made with FFmpeg.
-// The frame-number video: each frame shows its frame number as a binary code in a grid of blocks
+// The frame-number video: each frame shows its frame number + 1 as a binary code in a grid of blocks
 // (8x8 px, black = 0, white = 1). The block at column cx, row cy has bit (cx + 3 * cy) mod 16, so the
 // code repeats over the full frame and a test can read, at each pixel, which source frame it shows.
+// Code 0 (all black) is never a frame: it is a black ("not online") pixel.
 // Usage: node tools/make-fixtures.mjs [folder]   (default: samples/)
 
 import fs from 'node:fs';
@@ -13,7 +14,7 @@ export const CODE_BLOCK = 8;
 export const CODE_BITS = 16;
 
 const W = 320, H = 240, FPS = 30, N = 90;
-const codeFilter = `geq=lum='255*mod(floor(N/pow(2,mod(floor(X/${CODE_BLOCK})+3*floor(Y/${CODE_BLOCK}),${CODE_BITS}))),2)':cb=128:cr=128`;
+const codeFilter = `geq=lum='255*mod(floor((N+1)/pow(2,mod(floor(X/${CODE_BLOCK})+3*floor(Y/${CODE_BLOCK}),${CODE_BITS}))),2)':cb=128:cr=128`;
 const codeIn = () => ['-f', 'lavfi', '-i', `color=c=black:s=${W}x${H}:r=${FPS}`];
 const x264 = (extra = []) => ['-frames:v', String(N), '-c:v', 'libx264', '-crf', '12', '-pix_fmt', 'yuv420p', ...extra];
 
@@ -52,7 +53,7 @@ export function makeFixtures(dir, names = Object.keys(FIXTURES)) {
   return out;
 }
 
-// Read the frame number from a picture. get(x, y): the luma (0-255) at a display pixel. w, h: the
+// Read the frame code (frame number + 1; 0 = black) from a picture. get(x, y): the luma (0-255) at a display pixel. w, h: the
 // display size. rotation: the clockwise turn of the display picture from the coded picture. Each bit
 // is a majority vote over up to 8 blocks. Self-contained (the browser tests use its source).
 export function readCode(get, w, h, rotation = 0) {
@@ -69,6 +70,23 @@ export function readCode(get, w, h, rotation = 0) {
         if (get(x, y) > 128) ones++;
         n++;
       }
+    }
+    if (ones * 2 > n) code |= 1 << b;
+  }
+  return code;
+}
+
+// Read the code of one block row (cy) only, at its centre pixel row (no rotation). For effects where
+// each row shows a different frame (Mode 1 with a vertical map). Self-contained.
+export function readCodeRow(get, w, cy) {
+  const B = 8, BITS = 16;
+  const cols = Math.floor(w / B), y = cy * B + B / 2;
+  let code = 0;
+  for (let b = 0; b < BITS; b++) {
+    let ones = 0, n = 0;
+    for (let cx = (((b - 3 * cy) % BITS) + BITS) % BITS; cx < cols; cx += BITS) {
+      if (get(cx * B + B / 2, y) > 128) ones++;
+      n++;
     }
     if (ones * 2 > n) code |= 1 << b;
   }

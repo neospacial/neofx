@@ -61,6 +61,26 @@ body:not([data-state="start"]) #startScreen{display:none}
 body[data-state="start"] #transport .controls,body[data-state="start"] #transport .strip{opacity:.4;pointer-events:none}
 #status.warn{color:var(--warn)}
 #progress{position:absolute;left:0;top:0;height:2px;background:var(--accent);width:0}
+#viewBar{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;gap:2px;z-index:2;
+  background:rgba(0,0,0,.55);border-radius:8px;padding:2px}
+#viewBar button{min-height:28px;padding:0 10px;font-size:12px;background:transparent}
+#viewBar button.on{background:var(--line);color:var(--accent)}
+body[data-state="start"] #viewBar{display:none}
+.section{border-bottom:1px solid var(--line)}
+.section summary{padding:10px 12px;font-weight:600;cursor:pointer;user-select:none;text-transform:uppercase;font-size:11px;letter-spacing:.06em;color:var(--dim)}
+.setting{display:grid;grid-template-columns:96px 1fr 64px 14px;align-items:center;gap:8px;padding:4px 12px}
+.setting label{font-size:12px;color:var(--dim);cursor:default;user-select:none}
+.setting.default label{color:var(--text)}
+.setting input[type=range]{width:100%;accent-color:var(--accent);
+  background:linear-gradient(to right,transparent calc(var(--def,-10%) - 1px),var(--dim) 0,var(--dim) calc(var(--def,-10%) + 1px),transparent 0) no-repeat 0 100%/100% 3px}
+.setting input[type=number]{width:100%;font:inherit;font-size:12px;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:3px 4px}
+.setting .unit{font-size:11px;color:var(--dim)}
+.setting.seg{grid-template-columns:96px 1fr}
+.setting.seg:not(:has(label)){grid-template-columns:1fr}
+.segs{display:flex;gap:2px;background:var(--bg);border-radius:6px;padding:2px}
+.segs button{flex:1;min-height:28px;font-size:12px;background:transparent;padding:0 6px}
+.segs button.on{background:var(--line);color:var(--accent)}
+@media (max-width:999px){.setting input[type=range]{min-height:32px}.segs button{min-height:40px}}
 </style>
 </head>
 <body data-state="start">
@@ -84,6 +104,11 @@ body[data-state="start"] #transport .controls,body[data-state="start"] #transpor
           <div><b>Time Map</b> — a greyscale map gives each pixel a delay in frames.</div>
           <div><b>Slit Scan</b> — a 1 px line repeats in one direction, and gets older with distance.</div>
         </div>
+      </div>
+      <div id="viewBar" role="tablist" aria-label="View">
+        <button type="button" data-view="result" class="on">Result</button>
+        <button type="button" data-view="original">Original</button>
+        <button type="button" data-view="map">Map</button>
       </div>
       <canvas id="view" hidden></canvas>
       <div id="progress" hidden></div>
@@ -207,7 +232,9 @@ const { Engine } = (() => {
 // handle(msg) -> a reply object (or null). Messages:
 //   { cmd: 'configure', width, height, rotation, budget, failAlloc } -> { cmd: 'configured', n, budget, bytes }
 //   { cmd: 'upload', index, frame, show }  put the frame into the store; show: render it  -> { cmd: 'uploaded', index }
-//   { cmd: 'render', index, delay }        render frame index - delay from the store      -> { cmd: 'rendered', index }
+//   { cmd: 'render', index }               render frame index (the view of the settings)    -> { cmd: 'rendered', index }
+//   { cmd: 'render', index, delay }        tests: the stored frame index - delay            -> { cmd: 'rendered', index }
+//   { cmd: 'settings', settings }          the effect settings; renders the last frame again -> { cmd: 'rendered' }
 //   { cmd: 'read' }                        render again and read the canvas (tests)         -> { cmd: 'pixels', width, height, pixels }
 //   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }
 
@@ -218,6 +245,9 @@ const QUAD_VERT = "#version 300 es\n// One triangle that covers the target. v_uv
 const UPLOAD_FRAG = "#version 300 es\n// Store upload (plan §6.3): the source frame (RGB, as the browser gives it), turned to the display\n// orientation and scaled to the working size, to BT.709 full-range Y (u_mode 0) or CbCr (u_mode 1).\nprecision highp float;\nuniform sampler2D u_src;\nuniform int u_rot;   // 0, 90, 180, 270: clockwise turn of the display picture\nuniform int u_mode;\nin vec2 v_uv;\nout vec4 o;\n\nvec2 srcUv(vec2 d) {\n  if (u_rot == 90) return vec2(d.y, 1.0 - d.x);\n  if (u_rot == 180) return vec2(1.0 - d.x, 1.0 - d.y);\n  if (u_rot == 270) return vec2(1.0 - d.y, d.x);\n  return d;\n}\n\nvoid main() {\n  vec3 c = texture(u_src, srcUv(v_uv)).rgb;\n  float y = dot(c, vec3(0.2126, 0.7152, 0.0722));\n  if (u_mode == 0) o = vec4(y, 0.0, 0.0, 1.0);\n  else o = vec4((c.b - y) / 1.8556 + 0.5, (c.r - y) / 1.5748 + 0.5, 0.0, 1.0);\n}\n";
 const STORE_GLSL = "// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\nuniform highp sampler2DArray u_storeY;\nuniform highp sampler2DArray u_storeC;\n\nvec3 storeRgb(vec2 uv, float layer) {\n  float y = texture(u_storeY, vec3(uv, layer)).r;\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\n}\n";
 const SHOW_FRAG = "// Preview of one stored frame (Original view; the debug delay view of phase 3). u_layer < 0: black\n// (the frame is not in the store, or it is before frame 0: \"not online\", D8).\nuniform float u_layer;\nin vec2 v_uv;\nout vec4 o;\n\nvoid main() {\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\n  o = u_layer < 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(storeRgb(uv, u_layer), 1.0);\n}\n";
+const MAP_FRAG = "#version 300 es\n// Built-in map (plan §7.3): Linear. The map value v (0..1) for each pixel of the working size.\n// Linear: v grows along the direction of 'angle' (0° = to the right, 90° = down). The point (x, y)\n// (0..1 of the frame) has v = 0.5. 'width' = the length of the ramp, as a part of the frame extent\n// along that direction (1 = the full frame).\nprecision highp float;\nuniform vec2 u_res;\nuniform float u_angle; // degrees\nuniform vec2 u_center; // 0..1\nuniform float u_width;\nin vec2 v_uv;\nout vec4 o;\n\nvoid main() {\n  vec2 p = v_uv * u_res; // pixel centre, first row at the top\n  float a = radians(u_angle);\n  vec2 d = vec2(cos(a), sin(a));\n  float span = abs(u_res.x * d.x) + abs(u_res.y * d.y);\n  float v = clamp(dot(p - u_center * u_res, d) / max(u_width * span, 1e-3) + 0.5, 0.0, 1.0);\n  o = vec4(v, v, v, 1.0);\n}\n";
+const TIMEMAP_FRAG = "// Mode 1, Time Map (plan §7.1). For each pixel: d = map value × Max delay (frames, after the delay\n// steps), src = t − d. src < 0: black (not online, D8). Frame blend: mix the two frames around src;\n// else the frame t − round(d). Each frame comes from the store at the same pixel. A frame that is not\n// in the store is black. u_view: 0 = result, 1 = original (frame t), 2 = the map.\nuniform sampler2D u_map;\nuniform highp isampler2D u_layers; // N x 1: the frame index in each store layer\nuniform int u_n;\nuniform int u_t;\nuniform float u_max;\nuniform int u_steps;\nuniform bool u_blend;\nuniform int u_view;\nin vec2 v_uv;\nout vec4 o;\n\n// The color of frame k at uv, and in.a = 1 when frame k is in the store.\nvec4 frameAt(int k, vec2 uv) {\n  if (k < 0) return vec4(0.0);\n  int l = k % u_n;\n  if (texelFetch(u_layers, ivec2(l, 0), 0).r != k) return vec4(0.0);\n  return vec4(storeRgb(uv, float(l)), 1.0);\n}\n\nvoid main() {\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\n  if (u_view == 1) { o = vec4(frameAt(u_t, uv).rgb, 1.0); return; }\n  float v = texture(u_map, uv).r;\n  if (u_view == 2) { o = vec4(v, v, v, 1.0); return; }\n  if (u_steps > 1) v = min(floor(v * float(u_steps)), float(u_steps - 1)) / float(u_steps - 1);\n  float d = v * u_max;\n  float src = float(u_t) - d;\n  if (src < -1e-3) { o = vec4(0.0, 0.0, 0.0, 1.0); return; } // the epsilon: float error of v × Max\n  src = max(src, 0.0);\n  vec3 c;\n  if (u_blend) {\n    float k0 = floor(src);\n    float f = src - k0;\n    c = frameAt(int(k0), uv).rgb;\n    if (f > 0.0) c = mix(c, frameAt(int(k0) + 1, uv).rgb, f);\n  } else {\n    c = frameAt(u_t - int(floor(d + 0.5)), uv).rgb;\n  }\n  o = vec4(c, 1.0);\n}\n";
+const VIEWS = { result: 0, original: 1, map: 2 };
 
 class Engine {
   constructor(canvas) {
@@ -230,6 +260,12 @@ class Engine {
     };
     this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);
     this.show = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${SHOW_FRAG}`);
+    this.timemap = program(gl, QUAD_VERT, `#version 300 es\nprecision highp float;\n${STORE_GLSL}\n${TIMEMAP_FRAG}`);
+    this.mapProg = program(gl, QUAD_VERT, MAP_FRAG);
+    this.mapTex = null;
+    this.mapDirty = true;
+    this.layersTex = null;
+    this.settings = null;
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
     this.src = gl.createTexture();
@@ -237,7 +273,7 @@ class Engine {
     this.storeY = this.storeC = null;
     this.n = 0;
     this.layerFrame = null; // the frame index in each layer, -1 = empty
-    this.last = { index: -1, delay: 0 };
+    this.last = { index: -1, delay: undefined };
     this.lost = false;
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
@@ -250,12 +286,19 @@ class Engine {
     if (m.cmd === 'configure') return this.configure(m);
     if (m.cmd === 'upload') {
       this.put(m.index, m.frame);
-      if (m.show) this.render(m.index, 0);
+      if (m.show) this.render(m.index);
       return { cmd: 'uploaded', index: m.index };
     }
     if (m.cmd === 'render') {
-      this.render(m.index, m.delay || 0);
+      this.render(m.index, m.delay);
       return { cmd: 'rendered', index: m.index };
+    }
+    if (m.cmd === 'settings') {
+      const old = this.settings;
+      this.settings = m.settings;
+      if (!old || JSON.stringify(old.map) !== JSON.stringify(m.settings.map)) this.mapDirty = true;
+      if (this.n && this.last.index >= 0) this.render(this.last.index, this.last.delay);
+      return { cmd: 'rendered', index: this.last.index };
     }
     if (m.cmd === 'read') return this.read();
     return null;
@@ -298,7 +341,21 @@ class Engine {
       budget = Math.floor(budget / 2);
     }
     this.layerFrame = new Int32Array(this.n).fill(-1);
-    this.last = { index: -1, delay: 0 };
+    this.last = { index: -1, delay: undefined };
+    // The frame index of each layer, for the shaders (R32I, N x 1).
+    if (this.layersTex) gl.deleteTexture(this.layersTex);
+    this.layersTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32I, this.n, 1, 0, gl.RED_INTEGER, gl.INT, this.layerFrame);
+    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
+    // The map (R32F when float targets exist, so long delays keep their precision; else RGBA8).
+    if (this.mapTex) gl.deleteTexture(this.mapTex);
+    this.mapTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);
+    if (this.caps.floatTargets) gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);
+    else gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
+    this.mapDirty = true;
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -359,6 +416,25 @@ class Engine {
     drawQuad(gl);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.layerFrame[layer] = index;
+    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));
+  }
+
+  // Render the map into its texture (once for each change of the map settings).
+  renderMap() {
+    const gl = this.gl;
+    const m = (this.settings && this.settings.map.linear) || { angle: 90, x: 0.5, y: 0.5, width: 1 };
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.mapTex, 0);
+    gl.viewport(0, 0, this.w, this.h);
+    gl.useProgram(this.mapProg.prog);
+    gl.uniform2f(this.mapProg.u.u_res, this.w, this.h);
+    gl.uniform1f(this.mapProg.u.u_angle, m.angle);
+    gl.uniform2f(this.mapProg.u.u_center, m.x, m.y);
+    gl.uniform1f(this.mapProg.u.u_width, m.width);
+    drawQuad(gl);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.mapDirty = false;
   }
 
   // The layer of frame t, or -1 when it is not in the store (or t < 0).
@@ -368,19 +444,46 @@ class Engine {
     return this.layerFrame[l] === t ? l : -1;
   }
 
-  render(index, delay) {
+  bindStore(prog) {
     const gl = this.gl;
-    this.last = { index, delay };
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, this.w, this.h);
-    gl.useProgram(this.show.prog);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);
-    gl.uniform1i(this.show.u.u_storeY, 1);
-    gl.uniform1i(this.show.u.u_storeC, 2);
-    gl.uniform1f(this.show.u.u_layer, this.layerOf(index - delay));
+    gl.uniform1i(prog.u.u_storeY, 1);
+    gl.uniform1i(prog.u.u_storeC, 2);
+  }
+
+  // Render frame index to the canvas. delay (tests): show the stored frame index - delay.
+  render(index, delay) {
+    const gl = this.gl;
+    this.last = { index, delay };
+    if (this.mapDirty) this.renderMap();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.w, this.h);
+    if (delay !== undefined || !this.settings) {
+      gl.useProgram(this.show.prog);
+      this.bindStore(this.show);
+      gl.uniform1f(this.show.u.u_layer, this.layerOf(index - (delay || 0)));
+      drawQuad(gl);
+      return;
+    }
+    const s = this.settings;
+    const p = this.timemap;
+    gl.useProgram(p.prog);
+    this.bindStore(p);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
+    gl.uniform1i(p.u.u_map, 3);
+    gl.uniform1i(p.u.u_layers, 4);
+    gl.uniform1i(p.u.u_n, this.n);
+    gl.uniform1i(p.u.u_t, index);
+    gl.uniform1f(p.u.u_max, Math.min(s.timemap.maxDelay, this.n - 1));
+    gl.uniform1i(p.u.u_steps, s.timemap.steps);
+    gl.uniform1i(p.u.u_blend, s.timemap.blend ? 1 : 0);
+    gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);
     drawQuad(gl);
   }
 
@@ -394,6 +497,43 @@ class Engine {
 }
 
 return { Engine };
+})();
+
+// ---- app/settings.js
+const { DEFAULTS, clone, getPath, setPath, fixSteps } = (() => {
+// The settings (plan §7.2, §7.3). One plain object, so presets and undo (phase 11) can copy it.
+
+const DEFAULTS = {
+  mode: 'timemap', // 'timemap' | 'slitscan' (phase 7)
+  view: 'result', // 'result' | 'original' | 'map'
+  timemap: {
+    maxDelay: 30, // frames (white); the store limits it to N - 1
+    steps: 0, // 0 = smooth, else 2..64
+    blend: true, // frame blend
+  },
+  map: {
+    type: 'linear',
+    linear: { angle: 90, x: 0.5, y: 0.5, width: 1 },
+  },
+};
+
+const clone = (o) => JSON.parse(JSON.stringify(o));
+
+// Read and write a value by a path such as 'timemap.maxDelay'.
+function getPath(o, path) {
+  return path.split('.').reduce((x, k) => x[k], o);
+}
+
+function setPath(o, path, v) {
+  const keys = path.split('.');
+  const last = keys.pop();
+  keys.reduce((x, k) => x[k], o)[last] = v;
+}
+
+// The delay steps setting: 0 or 2..64 (1 is not a valid value).
+const fixSteps = (v, prev = 0) => (v === 1 ? (prev > 1 ? 0 : 2) : Math.max(0, Math.min(64, Math.round(v))));
+
+return { DEFAULTS, clone, getPath, setPath, fixSteps };
 })();
 
 // ---- app/platform.js
@@ -976,6 +1116,163 @@ class Timeline {
 return { formatTime, Timeline };
 })();
 
+// ---- app/ui/widgets.js
+const { slider, segmented, toggle, section } = (() => {
+// Setting widgets (plan §12.1): a label, a slider, a number field, and a reset (double-click or
+// double-tap on the label). The default value is marked on the track.
+
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+};
+
+// opts: { label, min, max, step, value, def, unit, onChange(v), key }
+function slider(opts) {
+  const row = el('div', 'setting slider');
+  row.dataset.key = opts.key || '';
+  const label = el('label', null, opts.label);
+  label.title = 'Double-click to reset';
+  const range = el('input');
+  range.type = 'range';
+  const num = el('input');
+  num.type = 'number';
+  for (const i of [range, num]) {
+    i.min = opts.min;
+    i.max = opts.max;
+    i.step = opts.step ?? 1;
+    i.value = opts.value;
+  }
+  num.setAttribute('aria-label', opts.label);
+  range.setAttribute('aria-label', opts.label);
+  const unit = el('span', 'unit', opts.unit || '');
+  const set = (v, fire) => {
+    v = Math.max(Number(opts.min), Math.min(Number(opts.max), Number(v)));
+    if (!Number.isFinite(v)) return;
+    range.value = v;
+    num.value = v;
+    row.classList.toggle('default', v === opts.def);
+    if (fire) opts.onChange(v);
+  };
+  range.addEventListener('input', () => set(range.value, true));
+  num.addEventListener('change', () => set(num.value, true));
+  label.addEventListener('dblclick', () => set(opts.def, true));
+  // Mark the default on the track.
+  if (opts.def !== undefined && opts.max > opts.min) row.style.setProperty('--def', `${((opts.def - opts.min) / (opts.max - opts.min)) * 100}%`);
+  row.append(label, range, num, unit);
+  set(opts.value, false);
+  row.setValue = (v) => set(v, false);
+  return row;
+}
+
+// opts: { label, options: [[value, text, disabled?]], value, onChange(v), key }
+function segmented(opts) {
+  const row = el('div', 'setting seg');
+  row.dataset.key = opts.key || '';
+  if (opts.label) row.append(el('label', null, opts.label));
+  const box = el('div', 'segs');
+  box.setAttribute('role', 'radiogroup');
+  const buttons = opts.options.map(([v, text, disabled]) => {
+    const b = el('button', null, text);
+    b.type = 'button';
+    b.dataset.value = v;
+    b.disabled = !!disabled;
+    if (disabled) b.title = 'Coming in a later version';
+    b.addEventListener('click', () => {
+      row.setValue(v);
+      opts.onChange(v);
+    });
+    box.append(b);
+    return b;
+  });
+  row.setValue = (v) => buttons.forEach((b) => b.classList.toggle('on', b.dataset.value === String(v)));
+  row.setValue(opts.value);
+  row.append(box);
+  return row;
+}
+
+// opts: { label, value, onChange(v), key }
+function toggle(opts) {
+  return segmented({ ...opts, options: [['true', 'On'], ['false', 'Off']], value: String(opts.value), onChange: (v) => opts.onChange(v === 'true') });
+}
+
+// A collapsible section.
+function section(title, open = true) {
+  const d = el('details', 'section');
+  d.open = open;
+  d.append(el('summary', null, title));
+  return d;
+}
+
+return { slider, segmented, toggle, section };
+})();
+
+// ---- app/ui/inspector.js
+const { Inspector } = (() => {
+// The inspector (plan §12.4): the settings of the open sections. Phase 4: Mode, Map (Linear), Time.
+
+
+
+
+class Inspector {
+  // change(path, value): the app applies a setting change.
+  constructor(root, change) {
+    this.root = root;
+    this.change = change;
+    this.rows = {};
+  }
+
+  // limits: { maxDelay } (the store limit, N - 1).
+  build(settings, limits) {
+    const S = settings;
+    const r = this.root;
+    r.textContent = '';
+    this.rows = {};
+    const add = (parent, row) => {
+      this.rows[row.dataset.key] = row;
+      parent.append(row);
+      return row;
+    };
+    const on = (key) => (v) => this.change(key, v);
+
+    const mode = section('Mode');
+    add(mode, segmented({ key: 'mode', options: [['timemap', 'Time Map'], ['slitscan', 'Slit Scan', true]], value: S.mode, onChange: on('mode') }));
+    r.append(mode);
+
+    const map = section('Map');
+    add(map, segmented({ key: 'map.type', label: 'Map', options: [['linear', 'Linear']], value: S.map.type, onChange: on('map.type') }));
+    const L = S.map.linear;
+    add(map, slider({ key: 'map.linear.angle', label: 'Angle', min: 0, max: 360, step: 1, value: L.angle, def: 90, unit: '°', onChange: on('map.linear.angle') }));
+    add(map, slider({ key: 'map.linear.x', label: 'Position x', min: 0, max: 1, step: 0.01, value: L.x, def: 0.5, onChange: on('map.linear.x') }));
+    add(map, slider({ key: 'map.linear.y', label: 'Position y', min: 0, max: 1, step: 0.01, value: L.y, def: 0.5, onChange: on('map.linear.y') }));
+    add(map, slider({ key: 'map.linear.width', label: 'Width', min: 0.05, max: 4, step: 0.01, value: L.width, def: 1, onChange: on('map.linear.width') }));
+    r.append(map);
+
+    const time = section('Time');
+    const T = S.timemap;
+    add(time, slider({ key: 'timemap.maxDelay', label: 'Max delay', min: 0, max: limits.maxDelay, step: 1, value: Math.min(T.maxDelay, limits.maxDelay), def: Math.min(30, limits.maxDelay), unit: 'f', onChange: on('timemap.maxDelay') }));
+    add(time, slider({ key: 'timemap.steps', label: 'Delay steps', min: 0, max: 64, step: 1, value: T.steps, def: 0, onChange: (v) => {
+      const f = fixSteps(v, T.steps);
+      this.rows['timemap.steps'].setValue(f);
+      this.change('timemap.steps', f);
+    } }));
+    add(time, toggle({ key: 'timemap.blend', label: 'Frame blend', value: T.blend, onChange: on('timemap.blend') }));
+    r.append(time);
+  }
+
+  // Show the values of the settings (after a change from outside).
+  refresh(settings) {
+    for (const [key, row] of Object.entries(this.rows)) {
+      const v = getPath(settings, key);
+      row.setValue(typeof v === 'boolean' ? String(v) : v);
+    }
+  }
+}
+
+return { Inspector };
+})();
+
 // ---- app/main.js
 const {  } = (() => {
 // neofx app (plan Phase 2): open a file, the Original preview, seek, play, timeline. The later phases
@@ -988,12 +1285,15 @@ const {  } = (() => {
 
 
 
+
+
 const $ = (id) => document.getElementById(id);
 const VERSION = '0.1.0';
 const DECODE_WORKER = "// ---- io/demux.js\nconst { demuxMp4, turnedCrop } = (() => {\n// MP4 / MOV reader (plan §3, §6.1). From neomosh src/mux/demux.js, with the audio track added.\n// It gives the video decoder configuration and each sample (offset, size, display time, sync flag),\n// so a VideoDecoder can decode every frame of the file, and the audio track for the pass-through\n// copy into the export (D16). Not fragmented. It returns null for other files.\n\nconst MAX_MOOV = 64 * 1048576;\n\nconst str4 = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);\nconst hex2 = (v) => v.toString(16).padStart(2, '0');\n\n// The boxes in b[from..to): [{ type, head (box start), start (content), end }].\nfunction boxes(b, from, to) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const out = [];\n  let o = from;\n  while (o + 8 <= to) {\n    let size = dv.getUint32(o);\n    const type = str4(b, o + 4);\n    let head = 8;\n    if (size === 1) {\n      size = Number(dv.getBigUint64(o + 8));\n      head = 16;\n    } else if (size === 0) size = to - o;\n    if (size < head || o + size > to) break;\n    out.push({ type, head: o, start: o + head, end: o + size });\n    o += size;\n  }\n  return out;\n}\n\nconst child = (b, box, type) => boxes(b, box.start, box.end).find((x) => x.type === type);\nconst path = (b, box, ...types) => types.reduce((x, t) => (x ? child(b, x, t) : null), box);\n\n// The top-level boxes of the file, read from their headers only.\nasync function topBoxes(blob) {\n  const out = [];\n  let o = 0;\n  while (o + 8 <= blob.size) {\n    const h = new Uint8Array(await blob.slice(o, Math.min(blob.size, o + 16)).arrayBuffer());\n    const dv = new DataView(h.buffer);\n    let size = dv.getUint32(0);\n    let head = 8;\n    if (size === 1 && h.length >= 16) {\n      size = Number(dv.getBigUint64(8));\n      head = 16;\n    } else if (size === 0) size = blob.size - o;\n    if (size < head) break;\n    out.push({ type: str4(h, 4), start: o + head, end: Math.min(blob.size, o + size) });\n    o += size;\n  }\n  return out;\n}\n\n// The codec string and the description for the VideoDecoder, from the sample entry.\nfunction videoCodecOf(b, entry) {\n  const t = entry.type;\n  const kids = boxes(b, entry.start + 78, entry.end); // after the VisualSampleEntry fields\n  const k = (type) => kids.find((x) => x.type === type);\n  if (t === 'avc1' || t === 'avc3') {\n    const c = k('avcC');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    return { codec: `avc1.${hex2(d[1])}${hex2(d[2])}${hex2(d[3])}`, description: d };\n  }\n  if (t === 'hvc1' || t === 'hev1') {\n    const c = k('hvcC');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    const space = ['', 'A', 'B', 'C'][d[1] >> 6];\n    const tier = (d[1] >> 5) & 1 ? 'H' : 'L';\n    let compat = ((d[2] << 24) | (d[3] << 16) | (d[4] << 8) | d[5]) >>> 0;\n    let rev = 0;\n    for (let i = 0; i < 32; i++, compat >>>= 1) rev = ((rev << 1) | (compat & 1)) >>> 0;\n    const cons = Array.from(d.subarray(6, 12));\n    while (cons.length && cons[cons.length - 1] === 0) cons.pop();\n    const parts = [`${t}.${space}${d[1] & 31}`, rev.toString(16), `${tier}${d[12]}`, ...cons.map((x) => x.toString(16).toUpperCase())];\n    return { codec: parts.join('.'), description: d };\n  }\n  if (t === 'vp09') {\n    const c = k('vpcC');\n    if (!c) return null;\n    const d = b.subarray(c.start + 4, c.end); // after version and flags\n    return { codec: `vp09.${String(d[0]).padStart(2, '0')}.${String(d[1]).padStart(2, '0')}.${String(d[2] >> 4).padStart(2, '0')}`, description: null };\n  }\n  if (t === 'av01') {\n    const c = k('av1C');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    const profile = d[1] >> 5, level = d[1] & 31, tier = d[2] >> 7 ? 'H' : 'M';\n    const depth = (d[2] >> 6) & 1 ? ((d[2] >> 5) & 1 ? 12 : 10) : 8;\n    return { codec: `av01.${profile}.${String(level).padStart(2, '0')}${tier}.${String(depth).padStart(2, '0')}`, description: d };\n  }\n  return null;\n}\n\n// MPEG-4 descriptor (ISO/IEC 14496-1): tag, size (1-4 bytes of 7 bits), content start.\nfunction descriptor(b, o, end) {\n  if (o + 2 > end) return null;\n  const tag = b[o++];\n  let size = 0;\n  for (let i = 0; i < 4 && o < end; i++) {\n    const v = b[o++];\n    size = (size << 7) | (v & 127);\n    if (!(v & 128)) break;\n  }\n  return { tag, start: o, end: Math.min(end, o + size) };\n}\n\n// esds -> { oti (objectTypeIndication), asc (AudioSpecificConfig bytes or null) }.\nfunction parseEsds(b, esds) {\n  const es = descriptor(b, esds.start + 4, esds.end); // after version and flags\n  if (!es || es.tag !== 3) return null;\n  const flags = b[es.start + 2];\n  let o = es.start + 3;\n  if (flags & 0x80) o += 2; // dependsOn_ES_ID\n  if (flags & 0x40) o += 1 + b[o]; // URL\n  if (flags & 0x20) o += 2; // OCR_ES_Id\n  const dc = descriptor(b, o, es.end);\n  if (!dc || dc.tag !== 4) return null;\n  const oti = b[dc.start];\n  const dsi = descriptor(b, dc.start + 13, dc.end);\n  return { oti, asc: dsi && dsi.tag === 5 ? b.slice(dsi.start, dsi.end) : null };\n}\n\n// The audio sample entry: { type, codec, channels, sampleSize, sampleRate, config, description }.\n// config: the raw codec box (esds or dOps, with its header), for the muxer to copy (plan §3).\nfunction audioCodecOf(b, entry) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const t = entry.type;\n  const version = dv.getUint16(entry.start + 8); // QuickTime sound description version (MOV)\n  const channels = dv.getUint16(entry.start + 16);\n  const sampleSize = dv.getUint16(entry.start + 18);\n  let sampleRate = dv.getUint32(entry.start + 24) >>> 16;\n  let kidsFrom = entry.start + 28;\n  if (version === 1) kidsFrom += 16;\n  else if (version === 2) {\n    kidsFrom += 36;\n    sampleRate = Math.round(dv.getFloat64(entry.start + 32));\n  }\n  let kids = boxes(b, kidsFrom, entry.end);\n  const wave = kids.find((x) => x.type === 'wave'); // MOV: the codec box can be in a 'wave' box\n  if (wave) kids = kids.concat(boxes(b, wave.start, wave.end));\n  const k = (type) => kids.find((x) => x.type === type);\n  if (t === 'mp4a') {\n    const esds = k('esds');\n    if (!esds) return null;\n    const e = parseEsds(b, esds);\n    if (!e) return null;\n    let codec = `mp4a.${hex2(e.oti)}`;\n    if (e.oti === 0x40 && e.asc && e.asc.length) {\n      let aot = e.asc[0] >> 3;\n      if (aot === 31 && e.asc.length > 1) aot = 32 + (((e.asc[0] & 7) << 3) | (e.asc[1] >> 5));\n      codec += `.${aot}`;\n    }\n    return { type: t, codec, channels, sampleSize, sampleRate, config: b.slice(esds.head, esds.end), description: e.asc };\n  }\n  if (t === 'Opus') {\n    const dops = k('dOps');\n    if (!dops) return null;\n    return { type: t, codec: 'opus', channels, sampleSize, sampleRate: 48000, config: b.slice(dops.head, dops.end), description: null };\n  }\n  return null;\n}\n\n// tkhd matrix -> 0, 90, 180, or 270 (clockwise, the way a player turns the picture).\nfunction rotationOf(b, tkhd) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const m = tkhd.start + (b[tkhd.start] === 1 ? 52 : 40);\n  const a = dv.getInt32(m), bb = dv.getInt32(m + 4);\n  if (a === 0 && bb > 0) return 90;\n  if (a < 0 && bb === 0) return 180;\n  if (a === 0 && bb < 0) return 270;\n  return 0;\n}\n\n// The sample table of a track: { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift }\n// or null. shift: the media time where the presentation starts (edit list).\nfunction sampleTable(b, trak) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const mdhd = path(b, trak, 'mdia', 'mdhd');\n  const stbl = path(b, trak, 'mdia', 'minf', 'stbl');\n  if (!mdhd || !stbl) return null;\n  const timescale = dv.getUint32(mdhd.start + (b[mdhd.start] === 1 ? 20 : 12));\n  const stsd = child(b, stbl, 'stsd');\n  const entry = stsd && boxes(b, stsd.start + 8, stsd.end)[0];\n  if (!entry || !timescale) return null;\n\n  // Sample sizes.\n  const stsz = child(b, stbl, 'stsz');\n  if (!stsz) return null;\n  const fixed = dv.getUint32(stsz.start + 4), count = dv.getUint32(stsz.start + 8);\n  const sizes = new Array(count);\n  for (let i = 0; i < count; i++) sizes[i] = fixed || dv.getUint32(stsz.start + 12 + 4 * i);\n  // Chunk offsets and samples per chunk -> sample offsets.\n  const stco = child(b, stbl, 'stco'), co64 = child(b, stbl, 'co64'), stsc = child(b, stbl, 'stsc');\n  if ((!stco && !co64) || !stsc) return null;\n  const co = stco || co64;\n  const nChunks = dv.getUint32(co.start + 4);\n  const chunkOff = (i) => (stco ? dv.getUint32(co.start + 8 + 4 * i) : Number(dv.getBigUint64(co.start + 8 + 8 * i)));\n  const scN = dv.getUint32(stsc.start + 4);\n  const offsets = new Array(count);\n  let s = 0;\n  for (let e = 0; e < scN && s < count; e++) {\n    const first = dv.getUint32(stsc.start + 8 + 12 * e) - 1;\n    const per = dv.getUint32(stsc.start + 12 + 12 * e);\n    const last = e + 1 < scN ? dv.getUint32(stsc.start + 8 + 12 * (e + 1)) - 1 : nChunks;\n    for (let c = first; c < last && s < count; c++) {\n      let o = chunkOff(c);\n      for (let j = 0; j < per && s < count; j++, s++) {\n        offsets[s] = o;\n        o += sizes[s];\n      }\n    }\n  }\n  if (s < count) return null;\n  // Decode times and durations, composition offsets, the edit list start.\n  const stts = child(b, stbl, 'stts'), ctts = child(b, stbl, 'ctts'), stss = child(b, stbl, 'stss');\n  if (!stts) return null;\n  const dts = new Array(count);\n  const durations = new Array(count);\n  let t = 0, k = 0, d = 0;\n  for (let e = 0, n = dv.getUint32(stts.start + 4); e < n; e++) {\n    const c = dv.getUint32(stts.start + 8 + 8 * e);\n    d = dv.getUint32(stts.start + 12 + 8 * e);\n    for (let j = 0; j < c && k < count; j++, k++, t += d) {\n      dts[k] = t;\n      durations[k] = d;\n    }\n  }\n  for (; k < count; k++, t += d) {\n    dts[k] = t;\n    durations[k] = d;\n  }\n  const cto = new Array(count).fill(0);\n  if (ctts) {\n    k = 0;\n    for (let e = 0, n = dv.getUint32(ctts.start + 4); e < n; e++) {\n      const c = dv.getUint32(ctts.start + 8 + 8 * e), o = dv.getInt32(ctts.start + 12 + 8 * e);\n      for (let j = 0; j < c && k < count; j++, k++) cto[k] = o;\n    }\n  }\n  let shift = 0;\n  const elst = path(b, trak, 'edts', 'elst');\n  if (elst) {\n    const v1 = b[elst.start] === 1;\n    const n = dv.getUint32(elst.start + 4);\n    for (let e = 0; e < n; e++) {\n      const o = elst.start + 8 + e * (v1 ? 20 : 12);\n      const mt = v1 ? Number(dv.getBigInt64(o + 8)) : dv.getInt32(o + 4);\n      if (mt >= 0) {\n        shift = mt;\n        break;\n      }\n    }\n  }\n  const sync = stss ? new Set(Array.from({ length: dv.getUint32(stss.start + 4) }, (_, i) => dv.getUint32(stss.start + 8 + 4 * i) - 1)) : null;\n  return { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift, count };\n}\n\nconst handlerOf = (b, trak) => {\n  const hdlr = path(b, trak, 'mdia', 'hdlr');\n  return hdlr ? str4(b, hdlr.start + 8) : '';\n};\n\n// blob: the file. Returns null, or:\n// { codec, description, codedWidth, codedHeight, rotation, timescale, mediaTime, samples, durationUs, audio }\n// samples (decode order): [{ offset, size, us (display time, microseconds), key, dts, duration, cto }].\n// dts, duration, cto: in timescale units. mediaTime: the edit list start.\n// audio: null, or { type, codec, channels, sampleSize, sampleRate, config, description, timescale,\n//   mediaTime (edit list start, in timescale units), samples: [{ offset, size, dts, duration, us }],\n//   durationUs }. us: the presentation time (dts - mediaTime) in microseconds.\nasync function demuxMp4(blob) {\n  let tops;\n  try {\n    tops = await topBoxes(blob);\n  } catch {\n    return null;\n  }\n  const moovTop = tops.find((x) => x.type === 'moov');\n  if (!moovTop || moovTop.end - moovTop.start > MAX_MOOV) return null;\n  if (tops.some((x) => x.type === 'moof')) return null; // fragmented: not supported\n  const b = new Uint8Array(await blob.slice(moovTop.start, moovTop.end).arrayBuffer());\n  const dv = new DataView(b.buffer);\n  const traks = boxes(b, 0, b.length).filter((x) => x.type === 'trak');\n\n  let video = null;\n  for (const trak of traks) {\n    if (handlerOf(b, trak) !== 'vide') continue;\n    const tkhd = child(b, trak, 'tkhd');\n    const st = tkhd && sampleTable(b, trak);\n    if (!st) continue;\n    const { entry, count, timescale } = st;\n    const codec = videoCodecOf(b, entry);\n    if (!codec) return null;\n    const codedWidth = dv.getUint16(entry.start + 24), codedHeight = dv.getUint16(entry.start + 26);\n    const samples = new Array(count);\n    let maxUs = 0;\n    for (let i = 0; i < count; i++) {\n      const us = Math.round(((st.dts[i] + st.cto[i] - st.shift) * 1e6) / timescale);\n      samples[i] = { offset: st.offsets[i], size: st.sizes[i], us, key: st.sync ? st.sync.has(i) : true, dts: st.dts[i], duration: st.durations[i], cto: st.cto[i] };\n      maxUs = Math.max(maxUs, us);\n    }\n    if (!count || !samples[0].key) return null;\n    video = { ...codec, codedWidth, codedHeight, rotation: rotationOf(b, tkhd), timescale, mediaTime: st.shift, samples, durationUs: maxUs };\n    break;\n  }\n  if (!video) return null;\n\n  let audio = null;\n  for (const trak of traks) {\n    if (handlerOf(b, trak) !== 'soun') continue;\n    const st = sampleTable(b, trak);\n    const a = st && st.count && audioCodecOf(b, st.entry);\n    if (!a) continue;\n    const ts = st.timescale;\n    const samples = new Array(st.count);\n    for (let i = 0; i < st.count; i++) {\n      samples[i] = { offset: st.offsets[i], size: st.sizes[i], dts: st.dts[i], duration: st.durations[i], us: Math.round(((st.dts[i] - st.shift) * 1e6) / ts) };\n    }\n    const end = st.dts[st.count - 1] + st.durations[st.count - 1] - st.shift;\n    audio = { ...a, timescale: ts, mediaTime: st.shift, samples, durationUs: Math.round((end * 1e6) / ts) };\n    break;\n  }\n  video.audio = audio;\n  return video;\n}\n\n// The source rectangle (frame coordinates) and the drawing transform for a crop in display\n// coordinates of a frame that is shown turned by 'rotation' degrees (clockwise). fw, fh: the frame\n// size (not turned). c: { sx, sy, sw, sh } in display coordinates. w, h: the output size.\n// Returns { sx, sy, sw, sh, m: [a, b, c, d, e, f], dw, dh } for setTransform(...m) and drawImage(frame,\n// sx, sy, sw, sh, 0, 0, dw, dh).\nfunction turnedCrop(rotation, fw, fh, c, w, h) {\n  switch (rotation) {\n    case 90:\n      return { sx: c.sy, sy: fh - c.sx - c.sw, sw: c.sh, sh: c.sw, m: [0, 1, -1, 0, w, 0], dw: h, dh: w };\n    case 180:\n      return { sx: fw - c.sx - c.sw, sy: fh - c.sy - c.sh, sw: c.sw, sh: c.sh, m: [-1, 0, 0, -1, w, h], dw: w, dh: h };\n    case 270:\n      return { sx: fw - c.sy - c.sh, sy: c.sx, sw: c.sh, sh: c.sw, m: [0, -1, 1, 0, 0, h], dw: h, dh: w };\n    default:\n      return { sx: c.sx, sy: c.sy, sw: c.sw, sh: c.sh, m: [1, 0, 0, 1, 0, 0], dw: w, dh: h };\n  }\n}\n\nreturn { demuxMp4, turnedCrop };\n})();\n\n// ---- io/timeline.js\nconst { decoderConfig, displaySize, buildTimeline, keyBefore, planSegments, frameAtUs, thumbIndices, isCleanStart } = (() => {\n// The frame timeline of a file (plan §5.2, §6.1, §6.2). No browser APIs, so Node tests can use it.\n// Frame t is the t-th presented frame in display order. Samples before the edit list start (us < 0)\n// are decoded as references, but they are not frames of the timeline.\n\n// The decoder configuration for a demuxMp4 result.\nfunction decoderConfig(d) {\n  return { codec: d.codec, codedWidth: d.codedWidth, codedHeight: d.codedHeight, ...(d.description ? { description: d.description } : {}) };\n}\n\n// The display size (after the tkhd rotation).\nfunction displaySize(d) {\n  return d.rotation % 180 ? { width: d.codedHeight, height: d.codedWidth } : { width: d.codedWidth, height: d.codedHeight };\n}\n\nconst median = (a) => {\n  if (!a.length) return 0;\n  const s = a.slice().sort((x, y) => x - y);\n  return s[s.length >> 1];\n};\n\n// Returns { frames: [{ us, dur, sample }], fps, durationUs, keys, indexOfUs: Map }.\n// sample: the decode index of the frame's sample. dur: microseconds to the next frame.\nfunction buildTimeline(d) {\n  const S = d.samples;\n  const order = [];\n  for (let i = 0; i < S.length; i++) if (S[i].us >= 0) order.push(i);\n  order.sort((a, b) => S[a].us - S[b].us);\n  const frames = order.map((i) => ({ us: S[i].us, dur: 0, sample: i }));\n  for (let t = 0; t + 1 < frames.length; t++) frames[t].dur = frames[t + 1].us - frames[t].us;\n  const med = median(frames.slice(0, -1).map((f) => f.dur).filter((x) => x > 0));\n  if (frames.length) {\n    const last = frames[frames.length - 1];\n    const s = S[last.sample];\n    last.dur = s.duration && d.timescale ? Math.round((s.duration * 1e6) / d.timescale) : med || 33333;\n  }\n  const fps = med ? 1e6 / med : frames.length ? 1e6 / frames[0].dur : 30;\n  const keys = [];\n  for (let i = 0; i < S.length; i++) if (S[i].key) keys.push(i);\n  const indexOfUs = new Map(frames.map((f, t) => [f.us, t]));\n  const end = frames.length ? frames[frames.length - 1].us + frames[frames.length - 1].dur : 0;\n  return { frames, fps, durationUs: end, keys, indexOfUs, samples: S };\n}\n\n// The decode index of the sync sample to start from, to show frame t: the last sync sample at or\n// before the frame's sample (decode order), with a display time at or before the frame.\nfunction keyBefore(tl, t) {\n  const f = tl.frames[t];\n  const K = tl.keys;\n  let lo = 0, hi = K.length - 1, k = 0;\n  while (lo <= hi) {\n    const m = (lo + hi) >> 1;\n    if (K[m] <= f.sample) {\n      k = m;\n      lo = m + 1;\n    } else hi = m - 1;\n  }\n  while (k > 0 && tl.samples[K[k]].us > f.us) k--;\n  return K[k];\n}\n\n// The decode work for a sorted list of frame indices: [{ start, end, frames }]. Each segment decodes\n// the samples start..end (decode order, inclusive) from a sync sample, then flushes. A frame joins the\n// current segment when the decode of that segment gets to its sync sample without a jump.\nfunction planSegments(tl, indices) {\n  const out = [];\n  let cur = null;\n  for (const t of indices) {\n    const k = keyBefore(tl, t);\n    const e = tl.frames[t].sample;\n    if (cur && k >= cur.start && k <= cur.end + 1) {\n      cur.end = Math.max(cur.end, e);\n      cur.frames.push(t);\n    } else {\n      cur = { start: k, end: e, frames: [t] };\n      out.push(cur);\n    }\n  }\n  return out;\n}\n\n// The frame index at a time (microseconds): the last frame that starts at or before it.\nfunction frameAtUs(tl, us) {\n  const F = tl.frames;\n  let lo = 0, hi = F.length - 1, r = 0;\n  while (lo <= hi) {\n    const m = (lo + hi) >> 1;\n    if (F[m].us <= us) {\n      r = m;\n      lo = m + 1;\n    } else hi = m - 1;\n  }\n  return r;\n}\n\n// Evenly spaced frame indices for the timeline thumbnails (one for each 2 %: count 50).\nfunction thumbIndices(n, count = 50) {\n  const out = [];\n  for (let i = 0; i < count && n; i++) {\n    const t = Math.min(n - 1, Math.floor(((i + 0.5) * n) / count));\n    if (!out.length || out[out.length - 1] !== t) out.push(t);\n  }\n  return out;\n}\n\n// Is this sync sample a clean start for a decoder (H.264 IDR; HEVC IDR or BLA)? An open-GOP I-frame\n// (H.264 recovery point, HEVC CRA) is a sync sample in the file, but Chrome's decoder does not start\n// there. data: the first bytes of the sample (length-prefixed NAL units). Other codecs: true.\nfunction isCleanStart(d, data) {\n  const avc = /^avc[13]\\./.test(d.codec), hevc = /^(hvc1|hev1)\\./.test(d.codec);\n  if (!(avc || hevc) || !d.description) return true;\n  const len = avc ? (d.description[4] & 3) + 1 : (d.description[21] & 3) + 1;\n  for (let o = 0; o + len < data.length;) {\n    let n = 0;\n    for (let i = 0; i < len; i++) n = n * 256 + data[o + i];\n    const h = data[o + len];\n    if (avc) {\n      const t = h & 31;\n      if (t === 5) return true;\n      if (t === 1) return false;\n    } else {\n      const t = (h >> 1) & 63;\n      if (t >= 16 && t <= 20) return true;\n      if (t < 16 || t === 21) return false;\n    }\n    o += len + n;\n  }\n  return false;\n}\n\nreturn { decoderConfig, displaySize, buildTimeline, keyBefore, planSegments, frameAtUs, thumbIndices, isCleanStart };\n})();\n\n// ---- io/decode-worker.js\nconst {  } = (() => {\n// Decode worker (plan §5.1, §6.2). Frame-exact decode of an MP4/MOV file with a VideoDecoder, not in\n// real time. Patterns from neomosh src/app/worker.js (file source): read runs of samples, feed the\n// decoder a few samples ahead, back-pressure on the frames that the page has not given back.\n//\n// Messages in:\n//   { cmd: 'open', file }                       -> 'info' or 'error'\n//   { cmd: 'seek', job, t, from }               -> 'frame' for each frame from .. t, then 'done'\n//   { cmd: 'play', job, from, to }              -> 'frame' for each frame from .. to, then 'done'\n//   { cmd: 'thumbs', job, count, width }        -> 'thumb' { i, index, bitmap } for each, then 'done'\n//   { cmd: 'stop' }                             cancel the job in progress\n//   { cmd: 'ack' }                              the page closed one frame\n// 'frame': { job, index, frame (VideoFrame, transferred), warm (true: before t) }.\n\n\n\n\nconst MAX_IN_FLIGHT = 4; // frames at the page, not given back yet\nconst MAX_QUEUE = 6; // samples in the decoder queue\n\nconst W = {\n  file: null,\n  d: null,\n  tl: null,\n  job: 0, // the job that runs; a new job or 'stop' changes it\n  inFlight: 0,\n  wake: null,\n};\n\nconst poke = () => {\n  if (W.wake) {\n    const f = W.wake;\n    W.wake = null;\n    f();\n  }\n};\nconst wait = () => new Promise((r) => (W.wake = r));\nconst post = (m, tr) => self.postMessage(m, tr || []);\n\n// Read the samples in runs of up to 4 MB that are next to each other in the file.\nclass SampleReader {\n  constructor(file, samples) {\n    this.file = file;\n    this.S = samples;\n    this.buf = null;\n    this.from = 0;\n    this.to = 0;\n  }\n\n  async read(i) {\n    const s = this.S[i];\n    if (!this.buf || s.offset < this.from || s.offset + s.size > this.to) {\n      let to = s.offset + s.size;\n      for (let j = i + 1; j < this.S.length && this.S[j].offset === to && to - s.offset < 4194304; j++) to += this.S[j].size;\n      this.buf = new Uint8Array(await this.file.slice(s.offset, to).arrayBuffer());\n      this.from = s.offset;\n      this.to = to;\n    }\n    return this.buf.subarray(s.offset - this.from, s.offset - this.from + s.size);\n  }\n}\n\n// Decode the segments of a job. want(index) -> true for a frame to give to deliver(index, frame).\n// deliver can wait (back-pressure). Returns false when the job was cancelled.\nasync function decodeSegments(job, segments, want, deliver) {\n  const S = W.tl.samples;\n  const reader = new SampleReader(W.file, S);\n  const out = [];\n  let failure = null;\n  const dec = new VideoDecoder({\n    output: (f) => {\n      out.push(f);\n      poke();\n    },\n    error: (e) => {\n      failure = e;\n      poke();\n    },\n  });\n  dec.addEventListener('dequeue', poke);\n  const live = () => job === W.job;\n  // Give or close the decoded frames.\n  const drain = async () => {\n    while (out.length) {\n      const f = out.shift();\n      const t = W.tl.indexOfUs.get(f.timestamp);\n      if (t === undefined || !want(t) || !live()) {\n        f.close();\n        continue;\n      }\n      await deliver(t, f);\n    }\n  };\n  try {\n    for (const seg of segments) {\n      if (!live()) return false;\n      if (dec.state !== 'configured') dec.configure(decoderConfig(W.d));\n      for (let i = seg.start; i <= seg.end; i++) {\n        while (live() && !failure && (dec.decodeQueueSize >= MAX_QUEUE || out.length)) {\n          if (out.length) await drain();\n          else await wait();\n        }\n        if (failure) throw failure;\n        if (!live()) return false;\n        const s = S[i];\n        dec.decode(new EncodedVideoChunk({ type: i === seg.start ? 'key' : 'delta', timestamp: s.us, data: await reader.read(i) }));\n      }\n      // The flush gives the last frames (in display order); then the next segment starts at a sync sample.\n      const flushed = dec.flush().then(() => 'ok', (e) => e);\n      let done = false;\n      flushed.then(() => {\n        done = true;\n        poke();\n      });\n      while (!done && live() && !failure) {\n        if (out.length) await drain();\n        else await wait();\n      }\n      if (!live()) return false;\n      const r = await flushed;\n      if (r !== 'ok') throw r;\n      await drain();\n      if (failure) throw failure;\n    }\n    return live();\n  } finally {\n    for (const f of out) f.close();\n    try {\n      dec.close();\n    } catch { /* closed */ }\n  }\n}\n\n// Wait until the page has fewer than MAX_IN_FLIGHT frames, then send the frame.\nasync function sendFrame(job, t, frame, warm) {\n  while (W.inFlight >= MAX_IN_FLIGHT && job === W.job) await wait();\n  if (job !== W.job) {\n    frame.close();\n    return;\n  }\n  W.inFlight++;\n  post({ cmd: 'frame', job, index: t, warm, frame }, [frame]);\n}\n\nasync function open(file) {\n  const d = await demuxMp4(file);\n  if (!d) return post({ cmd: 'error', message: 'Only MP4 and MOV files are supported.' });\n  let ok = false;\n  try {\n    ok = typeof VideoDecoder === 'function' && (await VideoDecoder.isConfigSupported(decoderConfig(d))).supported;\n  } catch {\n    ok = false;\n  }\n  if (!ok) return post({ cmd: 'error', message: `This browser cannot decode this file (codec: ${d.codec}).` });\n  const tl = buildTimeline(d);\n  if (!tl.frames.length) return post({ cmd: 'error', message: 'This file has no video frames.' });\n  // Seeks start only at clean sync samples (IDR). The first sample is always one.\n  const clean = [];\n  for (const k of tl.keys) {\n    const s = d.samples[k];\n    const head = new Uint8Array(await file.slice(s.offset, s.offset + Math.min(s.size, 4096)).arrayBuffer());\n    if (!clean.length || isCleanStart(d, head)) clean.push(k);\n  }\n  tl.keys = clean;\n  Object.assign(W, { file, d, tl });\n  const a = d.audio;\n  post({\n    cmd: 'info',\n    name: file.name,\n    codec: d.codec,\n    rotation: d.rotation,\n    codedWidth: d.codedWidth,\n    codedHeight: d.codedHeight,\n    ...displaySize(d),\n    fps: tl.fps,\n    durationUs: tl.durationUs,\n    times: tl.frames.map((f) => f.us),\n    keyFrames: tl.frames.map((f, t) => (clean.includes(f.sample) ? t : -1)).filter((t) => t >= 0),\n    audio: a ? { codec: a.codec, channels: a.channels, sampleRate: a.sampleRate, durationUs: a.durationUs } : null,\n  });\n}\n\nasync function seek(m) {\n  const n = W.tl.frames.length;\n  const t = Math.max(0, Math.min(n - 1, m.t));\n  const from = Math.max(0, Math.min(t, m.from ?? t - (m.depth || 0)));\n  const list = [];\n  for (let i = from; i <= t; i++) list.push(i);\n  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (i) => i >= from && i <= t, (i, f) => sendFrame(m.job, i, f, i < t));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\nasync function play(m) {\n  const n = W.tl.frames.length;\n  const from = Math.max(0, Math.min(n - 1, m.from));\n  const to = Math.max(from, Math.min(n - 1, m.to ?? n - 1));\n  // One segment: from the sync sample of 'from' to the last sample that 'to' needs.\n  const seg = planSegments(W.tl, [from])[0];\n  let end = seg.end;\n  for (let i = from; i <= to; i++) end = Math.max(end, W.tl.frames[i].sample);\n  seg.end = end;\n  const ok = await decodeSegments(m.job, [seg], (i) => i >= from && i <= to, (i, f) => sendFrame(m.job, i, f, false));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\nasync function thumbs(m) {\n  if (typeof OffscreenCanvas === 'undefined') return post({ cmd: 'done', job: m.job });\n  const list = thumbIndices(W.tl.frames.length, m.count || 50);\n  const { width: dw, height: dh } = displaySize(W.d);\n  const w = m.width || 160;\n  const h = Math.max(1, Math.round((w * dh) / dw));\n  const canvas = new OffscreenCanvas(w, h);\n  const ctx = canvas.getContext('2d');\n  const pos = new Map(list.map((t, i) => [t, i]));\n  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (t) => pos.has(t), async (t, f) => {\n    const c = turnedCrop(W.d.rotation, f.displayWidth, f.displayHeight, { sx: 0, sy: 0, sw: W.d.rotation % 180 ? f.displayHeight : f.displayWidth, sh: W.d.rotation % 180 ? f.displayWidth : f.displayHeight }, w, h);\n    ctx.setTransform(...c.m);\n    ctx.drawImage(f, c.sx, c.sy, c.sw, c.sh, 0, 0, c.dw, c.dh);\n    f.close();\n    const bitmap = canvas.transferToImageBitmap();\n    post({ cmd: 'thumb', job: m.job, i: pos.get(t), index: t, bitmap }, [bitmap]);\n  });\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\n// The jobs run one at a time. A new job cancels the one in progress (plan §6.2).\nlet chain = Promise.resolve();\nconst runJob = (fn, m) => {\n  W.job = m.job;\n  poke();\n  chain = chain.then(() => (m.job === W.job ? fn(m) : null)).catch((e) => {\n    if (m.job === W.job) post({ cmd: 'error', job: m.job, message: String(e && e.message ? e.message : e) });\n  });\n};\n\nself.onmessage = (e) => {\n  const m = e.data;\n  if (m.cmd === 'ack') {\n    W.inFlight = Math.max(0, W.inFlight - 1);\n    poke();\n  } else if (m.cmd === 'stop') {\n    W.job = -1;\n    poke();\n  } else if (m.cmd === 'open') {\n    W.job = -1;\n    poke();\n    chain = chain.then(() => open(m.file)).catch((err) => post({ cmd: 'error', message: String(err && err.message ? err.message : err) }));\n  } else if (m.cmd === 'seek') runJob(seek, m);\n  else if (m.cmd === 'play') runJob(play, m);\n  else if (m.cmd === 'thumbs') runJob(thumbs, m);\n};\n\nreturn {  };\n})();\n";
-const GPU_WORKER = "// ---- gpu/store.js\nconst { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText } = (() => {\n// Frame store sizes (plan §6.3, §6.4). No browser APIs, so Node tests can use it.\n\nconst MAX_STORE_LAYERS = 1000;\nconst BUDGET_DESKTOP = 1024 * 1048576;\nconst BUDGET_ANDROID = 384 * 1048576;\n\n// The working size for a display size and a short side (0 = source). Never above the source. Even.\nfunction workingSize(w, h, short) {\n  const s = short ? Math.min(1, short / Math.min(w, h)) : 1;\n  return { width: Math.max(2, Math.round((w * s) / 2) * 2), height: Math.max(2, Math.round((h * s) / 2) * 2) };\n}\n\n// YUV 4:2:0 in the store: Y (R8, full size) + CbCr (RG8, half size) = 1.5 bytes for each pixel.\nconst frameBytes = (w, h) => w * h + 2 * (w / 2) * (h / 2);\n\nconst defaultBudget = (userAgent = '') => (/Android/i.test(userAgent) ? BUDGET_ANDROID : BUDGET_DESKTOP);\n\n// N = min(MAX_ARRAY_TEXTURE_LAYERS, floor(budget / bytesPerFrame), 1000), at least 1.\nfunction layerCount(budget, maxLayers, w, h) {\n  return Math.max(1, Math.min(maxLayers, Math.floor(budget / frameBytes(w, h)), MAX_STORE_LAYERS));\n}\n\n// \"Buffer: 240 frames at 540p (≈ 330 MB)\".\nfunction bufferText(n, w, h) {\n  return `Buffer: ${n} frames at ${Math.min(w, h)}p (≈ ${Math.round((n * frameBytes(w, h)) / 1048576)} MB)`;\n}\n\nreturn { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText };\n})();\n\n// ---- gpu/gl.js\nconst { createContext, program, texParams, drawQuad } = (() => {\n// WebGL2 helpers (plan §5.3): context, programs, textures.\n\nfunction createContext(canvas) {\n  const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });\n  if (!gl) throw new Error('This browser has no WebGL2.');\n  return gl;\n}\n\nfunction shader(gl, type, src) {\n  const s = gl.createShader(type);\n  gl.shaderSource(s, src);\n  gl.compileShader(s);\n  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost()) {\n    const log = gl.getShaderInfoLog(s);\n    throw new Error(`Shader: ${log}`);\n  }\n  return s;\n}\n\n// A program with its uniform locations: { prog, u: { name: location } }.\nfunction program(gl, vert, frag) {\n  const p = gl.createProgram();\n  gl.attachShader(p, shader(gl, gl.VERTEX_SHADER, vert));\n  gl.attachShader(p, shader(gl, gl.FRAGMENT_SHADER, frag));\n  gl.linkProgram(p);\n  if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost()) throw new Error(`Program: ${gl.getProgramInfoLog(p)}`);\n  const u = {};\n  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS) || 0;\n  for (let i = 0; i < n; i++) {\n    const name = gl.getActiveUniform(p, i).name;\n    u[name] = gl.getUniformLocation(p, name);\n  }\n  return { prog: p, u };\n}\n\nfunction texParams(gl, target, filter = gl.LINEAR, minFilter = filter) {\n  gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, minFilter);\n  gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);\n  gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);\n  gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);\n}\n\n// Draw the one-triangle quad (quad.vert) into the bound target.\nfunction drawQuad(gl) {\n  gl.drawArrays(gl.TRIANGLES, 0, 3);\n}\n\nreturn { createContext, program, texParams, drawQuad };\n})();\n\n// ---- gpu/engine.js\nconst { Engine } = (() => {\n// The GPU engine (plan §5.1, §6.3, §6.4). It owns the WebGL2 context of the preview canvas and the\n// frame store. It runs in the GPU worker (OffscreenCanvas), or on the main thread as the fallback.\n//\n// handle(msg) -> a reply object (or null). Messages:\n//   { cmd: 'configure', width, height, rotation, budget, failAlloc } -> { cmd: 'configured', n, budget, bytes }\n//   { cmd: 'upload', index, frame, show }  put the frame into the store; show: render it  -> { cmd: 'uploaded', index }\n//   { cmd: 'render', index, delay }        render frame index - delay from the store      -> { cmd: 'rendered', index }\n//   { cmd: 'read' }                        render again and read the canvas (tests)         -> { cmd: 'pixels', width, height, pixels }\n//   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }\n\n\n\n\nconst QUAD_VERT = \"#version 300 es\\n// One triangle that covers the target. v_uv: 0..1, v = 0 at the first row (image top, in texture space).\\nout vec2 v_uv;\\nvoid main() {\\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\\n  v_uv = p;\\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\\n}\\n\";\nconst UPLOAD_FRAG = \"#version 300 es\\n// Store upload (plan §6.3): the source frame (RGB, as the browser gives it), turned to the display\\n// orientation and scaled to the working size, to BT.709 full-range Y (u_mode 0) or CbCr (u_mode 1).\\nprecision highp float;\\nuniform sampler2D u_src;\\nuniform int u_rot;   // 0, 90, 180, 270: clockwise turn of the display picture\\nuniform int u_mode;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvec2 srcUv(vec2 d) {\\n  if (u_rot == 90) return vec2(d.y, 1.0 - d.x);\\n  if (u_rot == 180) return vec2(1.0 - d.x, 1.0 - d.y);\\n  if (u_rot == 270) return vec2(1.0 - d.y, d.x);\\n  return d;\\n}\\n\\nvoid main() {\\n  vec3 c = texture(u_src, srcUv(v_uv)).rgb;\\n  float y = dot(c, vec3(0.2126, 0.7152, 0.0722));\\n  if (u_mode == 0) o = vec4(y, 0.0, 0.0, 1.0);\\n  else o = vec4((c.b - y) / 1.8556 + 0.5, (c.r - y) / 1.5748 + 0.5, 0.0, 1.0);\\n}\\n\";\nconst STORE_GLSL = \"// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\\nuniform highp sampler2DArray u_storeY;\\nuniform highp sampler2DArray u_storeC;\\n\\nvec3 storeRgb(vec2 uv, float layer) {\\n  float y = texture(u_storeY, vec3(uv, layer)).r;\\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\\n}\\n\";\nconst SHOW_FRAG = \"// Preview of one stored frame (Original view; the debug delay view of phase 3). u_layer < 0: black\\n// (the frame is not in the store, or it is before frame 0: \\\"not online\\\", D8).\\nuniform float u_layer;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\\n  o = u_layer < 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(storeRgb(uv, u_layer), 1.0);\\n}\\n\";\n\nclass Engine {\n  constructor(canvas) {\n    this.canvas = canvas;\n    const gl = (this.gl = createContext(canvas));\n    this.caps = {\n      maxLayers: gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS),\n      maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE),\n      floatTargets: !!gl.getExtension('EXT_color_buffer_float'),\n    };\n    this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);\n    this.show = program(gl, QUAD_VERT, `#version 300 es\\nprecision highp float;\\n${STORE_GLSL}\\n${SHOW_FRAG}`);\n    this.vao = gl.createVertexArray();\n    gl.bindVertexArray(this.vao);\n    this.src = gl.createTexture();\n    this.fb = gl.createFramebuffer();\n    this.storeY = this.storeC = null;\n    this.n = 0;\n    this.layerFrame = null; // the frame index in each layer, -1 = empty\n    this.last = { index: -1, delay: 0 };\n    this.lost = false;\n    canvas.addEventListener('webglcontextlost', (e) => {\n      e.preventDefault();\n      this.lost = true;\n    });\n  }\n\n  handle(m) {\n    if (m.cmd === 'caps') return { cmd: 'caps', ...this.caps };\n    if (m.cmd === 'configure') return this.configure(m);\n    if (m.cmd === 'upload') {\n      this.put(m.index, m.frame);\n      if (m.show) this.render(m.index, 0);\n      return { cmd: 'uploaded', index: m.index };\n    }\n    if (m.cmd === 'render') {\n      this.render(m.index, m.delay || 0);\n      return { cmd: 'rendered', index: m.index };\n    }\n    if (m.cmd === 'read') return this.read();\n    return null;\n  }\n\n  // Make the store for the working size. The budget halves until the allocation works (plan §6.4).\n  configure(m) {\n    const gl = this.gl;\n    const { width: w, height: h } = m;\n    this.w = w;\n    this.h = h;\n    this.rot = m.rotation || 0;\n    this.canvas.width = w;\n    this.canvas.height = h;\n    let budget = m.budget;\n    let fails = m.failAlloc || 0; // tests: act as if the first allocations ran out of memory\n    for (;;) {\n      this.free();\n      const n = layerCount(budget, this.caps.maxLayers, w, h);\n      while (gl.getError() !== gl.NO_ERROR) { /* clear old errors */ }\n      this.storeY = gl.createTexture();\n      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);\n      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, w, h, n);\n      texParams(gl, gl.TEXTURE_2D_ARRAY);\n      this.storeC = gl.createTexture();\n      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);\n      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG8, w / 2, h / 2, n);\n      texParams(gl, gl.TEXTURE_2D_ARRAY);\n      // Touch the last layer, so that the driver must commit the memory now.\n      this.n = n;\n      this.clearLayer(n - 1);\n      const err = gl.getError();\n      const failed = fails > 0 || err === gl.OUT_OF_MEMORY || gl.isContextLost();\n      if (!failed) break;\n      fails--;\n      if (n === 1 || gl.isContextLost()) {\n        if (gl.isContextLost()) throw new Error('The GPU context was lost.');\n        break;\n      }\n      budget = Math.floor(budget / 2);\n    }\n    this.layerFrame = new Int32Array(this.n).fill(-1);\n    this.last = { index: -1, delay: 0 };\n    gl.viewport(0, 0, w, h);\n    gl.clearColor(0, 0, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h) };\n  }\n\n  free() {\n    const gl = this.gl;\n    if (this.storeY) gl.deleteTexture(this.storeY);\n    if (this.storeC) gl.deleteTexture(this.storeC);\n    this.storeY = this.storeC = null;\n  }\n\n  target(tex, layer, w, h) {\n    const gl = this.gl;\n    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);\n    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, tex, 0, layer);\n    gl.viewport(0, 0, w, h);\n  }\n\n  clearLayer(layer) {\n    const gl = this.gl;\n    this.target(this.storeY, layer, this.w, this.h);\n    gl.clearColor(0, 0, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    this.target(this.storeC, layer, this.w / 2, this.h / 2);\n    gl.clearColor(0.5, 0.5, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n  }\n\n  // Upload a VideoFrame into layer index mod N (plan §6.3), then close it.\n  put(index, frame) {\n    const gl = this.gl;\n    try {\n      gl.activeTexture(gl.TEXTURE0);\n      gl.bindTexture(gl.TEXTURE_2D, this.src);\n      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);\n      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, frame);\n      // A large source: mipmaps, so the scale down does not alias.\n      const turned = this.rot % 180 !== 0;\n      const sw = turned ? frame.displayHeight : frame.displayWidth;\n      const mip = sw > 2 * this.w;\n      if (mip) gl.generateMipmap(gl.TEXTURE_2D);\n      texParams(gl, gl.TEXTURE_2D, gl.LINEAR, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);\n    } finally {\n      frame.close();\n    }\n    const layer = index % this.n;\n    gl.useProgram(this.upload.prog);\n    gl.uniform1i(this.upload.u.u_src, 0);\n    gl.uniform1i(this.upload.u.u_rot, this.rot);\n    gl.uniform1i(this.upload.u.u_mode, 0);\n    this.target(this.storeY, layer, this.w, this.h);\n    drawQuad(gl);\n    gl.uniform1i(this.upload.u.u_mode, 1);\n    this.target(this.storeC, layer, this.w / 2, this.h / 2);\n    drawQuad(gl);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    this.layerFrame[layer] = index;\n  }\n\n  // The layer of frame t, or -1 when it is not in the store (or t < 0).\n  layerOf(t) {\n    if (t < 0 || !this.n) return -1;\n    const l = t % this.n;\n    return this.layerFrame[l] === t ? l : -1;\n  }\n\n  render(index, delay) {\n    const gl = this.gl;\n    this.last = { index, delay };\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    gl.viewport(0, 0, this.w, this.h);\n    gl.useProgram(this.show.prog);\n    gl.activeTexture(gl.TEXTURE1);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);\n    gl.activeTexture(gl.TEXTURE2);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);\n    gl.uniform1i(this.show.u.u_storeY, 1);\n    gl.uniform1i(this.show.u.u_storeC, 2);\n    gl.uniform1f(this.show.u.u_layer, this.layerOf(index - delay));\n    drawQuad(gl);\n  }\n\n  read() {\n    const gl = this.gl;\n    this.render(this.last.index, this.last.delay);\n    const pixels = new Uint8Array(this.w * this.h * 4);\n    gl.readPixels(0, 0, this.w, this.h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);\n    return { cmd: 'pixels', width: this.w, height: this.h, pixels };\n  }\n}\n\nreturn { Engine };\n})();\n\n// ---- gpu/gpu-worker.js\nconst {  } = (() => {\n// GPU worker (plan §5.1): the engine on the OffscreenCanvas of the preview.\n// In: { id, msg } with msg.cmd 'init' (msg.canvas) or an engine message. Out: { id, reply } or { id, error }.\n\n\n\nlet engine = null;\n\nself.onmessage = (e) => {\n  const { id, msg } = e.data;\n  try {\n    let reply;\n    if (msg.cmd === 'init') {\n      engine = new Engine(msg.canvas);\n      reply = { cmd: 'caps', ...engine.caps };\n    } else reply = engine.handle(msg);\n    if (engine && engine.lost) self.postMessage({ id, error: 'The GPU context was lost.' });\n    else self.postMessage({ id, reply }, reply && reply.pixels ? [reply.pixels.buffer] : []);\n  } catch (err) {\n    if (msg.frame) try { msg.frame.close(); } catch { /* closed */ }\n    self.postMessage({ id, error: String(err && err.message ? err.message : err) });\n  }\n};\n\nreturn {  };\n})();\n";
+const GPU_WORKER = "// ---- gpu/store.js\nconst { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText } = (() => {\n// Frame store sizes (plan §6.3, §6.4). No browser APIs, so Node tests can use it.\n\nconst MAX_STORE_LAYERS = 1000;\nconst BUDGET_DESKTOP = 1024 * 1048576;\nconst BUDGET_ANDROID = 384 * 1048576;\n\n// The working size for a display size and a short side (0 = source). Never above the source. Even.\nfunction workingSize(w, h, short) {\n  const s = short ? Math.min(1, short / Math.min(w, h)) : 1;\n  return { width: Math.max(2, Math.round((w * s) / 2) * 2), height: Math.max(2, Math.round((h * s) / 2) * 2) };\n}\n\n// YUV 4:2:0 in the store: Y (R8, full size) + CbCr (RG8, half size) = 1.5 bytes for each pixel.\nconst frameBytes = (w, h) => w * h + 2 * (w / 2) * (h / 2);\n\nconst defaultBudget = (userAgent = '') => (/Android/i.test(userAgent) ? BUDGET_ANDROID : BUDGET_DESKTOP);\n\n// N = min(MAX_ARRAY_TEXTURE_LAYERS, floor(budget / bytesPerFrame), 1000), at least 1.\nfunction layerCount(budget, maxLayers, w, h) {\n  return Math.max(1, Math.min(maxLayers, Math.floor(budget / frameBytes(w, h)), MAX_STORE_LAYERS));\n}\n\n// \"Buffer: 240 frames at 540p (≈ 330 MB)\".\nfunction bufferText(n, w, h) {\n  return `Buffer: ${n} frames at ${Math.min(w, h)}p (≈ ${Math.round((n * frameBytes(w, h)) / 1048576)} MB)`;\n}\n\nreturn { MAX_STORE_LAYERS, BUDGET_DESKTOP, BUDGET_ANDROID, workingSize, frameBytes, defaultBudget, layerCount, bufferText };\n})();\n\n// ---- gpu/gl.js\nconst { createContext, program, texParams, drawQuad } = (() => {\n// WebGL2 helpers (plan §5.3): context, programs, textures.\n\nfunction createContext(canvas) {\n  const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });\n  if (!gl) throw new Error('This browser has no WebGL2.');\n  return gl;\n}\n\nfunction shader(gl, type, src) {\n  const s = gl.createShader(type);\n  gl.shaderSource(s, src);\n  gl.compileShader(s);\n  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost()) {\n    const log = gl.getShaderInfoLog(s);\n    throw new Error(`Shader: ${log}`);\n  }\n  return s;\n}\n\n// A program with its uniform locations: { prog, u: { name: location } }.\nfunction program(gl, vert, frag) {\n  const p = gl.createProgram();\n  gl.attachShader(p, shader(gl, gl.VERTEX_SHADER, vert));\n  gl.attachShader(p, shader(gl, gl.FRAGMENT_SHADER, frag));\n  gl.linkProgram(p);\n  if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost()) throw new Error(`Program: ${gl.getProgramInfoLog(p)}`);\n  const u = {};\n  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS) || 0;\n  for (let i = 0; i < n; i++) {\n    const name = gl.getActiveUniform(p, i).name;\n    u[name] = gl.getUniformLocation(p, name);\n  }\n  return { prog: p, u };\n}\n\nfunction texParams(gl, target, filter = gl.LINEAR, minFilter = filter) {\n  gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, minFilter);\n  gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);\n  gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);\n  gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);\n}\n\n// Draw the one-triangle quad (quad.vert) into the bound target.\nfunction drawQuad(gl) {\n  gl.drawArrays(gl.TRIANGLES, 0, 3);\n}\n\nreturn { createContext, program, texParams, drawQuad };\n})();\n\n// ---- gpu/engine.js\nconst { Engine } = (() => {\n// The GPU engine (plan §5.1, §6.3, §6.4). It owns the WebGL2 context of the preview canvas and the\n// frame store. It runs in the GPU worker (OffscreenCanvas), or on the main thread as the fallback.\n//\n// handle(msg) -> a reply object (or null). Messages:\n//   { cmd: 'configure', width, height, rotation, budget, failAlloc } -> { cmd: 'configured', n, budget, bytes }\n//   { cmd: 'upload', index, frame, show }  put the frame into the store; show: render it  -> { cmd: 'uploaded', index }\n//   { cmd: 'render', index }               render frame index (the view of the settings)    -> { cmd: 'rendered', index }\n//   { cmd: 'render', index, delay }        tests: the stored frame index - delay            -> { cmd: 'rendered', index }\n//   { cmd: 'settings', settings }          the effect settings; renders the last frame again -> { cmd: 'rendered' }\n//   { cmd: 'read' }                        render again and read the canvas (tests)         -> { cmd: 'pixels', width, height, pixels }\n//   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }\n\n\n\n\nconst QUAD_VERT = \"#version 300 es\\n// One triangle that covers the target. v_uv: 0..1, v = 0 at the first row (image top, in texture space).\\nout vec2 v_uv;\\nvoid main() {\\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\\n  v_uv = p;\\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\\n}\\n\";\nconst UPLOAD_FRAG = \"#version 300 es\\n// Store upload (plan §6.3): the source frame (RGB, as the browser gives it), turned to the display\\n// orientation and scaled to the working size, to BT.709 full-range Y (u_mode 0) or CbCr (u_mode 1).\\nprecision highp float;\\nuniform sampler2D u_src;\\nuniform int u_rot;   // 0, 90, 180, 270: clockwise turn of the display picture\\nuniform int u_mode;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvec2 srcUv(vec2 d) {\\n  if (u_rot == 90) return vec2(d.y, 1.0 - d.x);\\n  if (u_rot == 180) return vec2(1.0 - d.x, 1.0 - d.y);\\n  if (u_rot == 270) return vec2(1.0 - d.y, d.x);\\n  return d;\\n}\\n\\nvoid main() {\\n  vec3 c = texture(u_src, srcUv(v_uv)).rgb;\\n  float y = dot(c, vec3(0.2126, 0.7152, 0.0722));\\n  if (u_mode == 0) o = vec4(y, 0.0, 0.0, 1.0);\\n  else o = vec4((c.b - y) / 1.8556 + 0.5, (c.r - y) / 1.5748 + 0.5, 0.0, 1.0);\\n}\\n\";\nconst STORE_GLSL = \"// Read the frame store (plan §6.3): Y and CbCr layers -> RGB (BT.709 full range).\\nuniform highp sampler2DArray u_storeY;\\nuniform highp sampler2DArray u_storeC;\\n\\nvec3 storeRgb(vec2 uv, float layer) {\\n  float y = texture(u_storeY, vec3(uv, layer)).r;\\n  vec2 c = texture(u_storeC, vec3(uv, layer)).rg - 0.5;\\n  return clamp(vec3(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x), 0.0, 1.0);\\n}\\n\";\nconst SHOW_FRAG = \"// Preview of one stored frame (Original view; the debug delay view of phase 3). u_layer < 0: black\\n// (the frame is not in the store, or it is before frame 0: \\\"not online\\\", D8).\\nuniform float u_layer;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\\n  o = u_layer < 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(storeRgb(uv, u_layer), 1.0);\\n}\\n\";\nconst MAP_FRAG = \"#version 300 es\\n// Built-in map (plan §7.3): Linear. The map value v (0..1) for each pixel of the working size.\\n// Linear: v grows along the direction of 'angle' (0° = to the right, 90° = down). The point (x, y)\\n// (0..1 of the frame) has v = 0.5. 'width' = the length of the ramp, as a part of the frame extent\\n// along that direction (1 = the full frame).\\nprecision highp float;\\nuniform vec2 u_res;\\nuniform float u_angle; // degrees\\nuniform vec2 u_center; // 0..1\\nuniform float u_width;\\nin vec2 v_uv;\\nout vec4 o;\\n\\nvoid main() {\\n  vec2 p = v_uv * u_res; // pixel centre, first row at the top\\n  float a = radians(u_angle);\\n  vec2 d = vec2(cos(a), sin(a));\\n  float span = abs(u_res.x * d.x) + abs(u_res.y * d.y);\\n  float v = clamp(dot(p - u_center * u_res, d) / max(u_width * span, 1e-3) + 0.5, 0.0, 1.0);\\n  o = vec4(v, v, v, 1.0);\\n}\\n\";\nconst TIMEMAP_FRAG = \"// Mode 1, Time Map (plan §7.1). For each pixel: d = map value × Max delay (frames, after the delay\\n// steps), src = t − d. src < 0: black (not online, D8). Frame blend: mix the two frames around src;\\n// else the frame t − round(d). Each frame comes from the store at the same pixel. A frame that is not\\n// in the store is black. u_view: 0 = result, 1 = original (frame t), 2 = the map.\\nuniform sampler2D u_map;\\nuniform highp isampler2D u_layers; // N x 1: the frame index in each store layer\\nuniform int u_n;\\nuniform int u_t;\\nuniform float u_max;\\nuniform int u_steps;\\nuniform bool u_blend;\\nuniform int u_view;\\nin vec2 v_uv;\\nout vec4 o;\\n\\n// The color of frame k at uv, and in.a = 1 when frame k is in the store.\\nvec4 frameAt(int k, vec2 uv) {\\n  if (k < 0) return vec4(0.0);\\n  int l = k % u_n;\\n  if (texelFetch(u_layers, ivec2(l, 0), 0).r != k) return vec4(0.0);\\n  return vec4(storeRgb(uv, float(l)), 1.0);\\n}\\n\\nvoid main() {\\n  vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // the canvas has its first row at the bottom\\n  if (u_view == 1) { o = vec4(frameAt(u_t, uv).rgb, 1.0); return; }\\n  float v = texture(u_map, uv).r;\\n  if (u_view == 2) { o = vec4(v, v, v, 1.0); return; }\\n  if (u_steps > 1) v = min(floor(v * float(u_steps)), float(u_steps - 1)) / float(u_steps - 1);\\n  float d = v * u_max;\\n  float src = float(u_t) - d;\\n  if (src < -1e-3) { o = vec4(0.0, 0.0, 0.0, 1.0); return; } // the epsilon: float error of v × Max\\n  src = max(src, 0.0);\\n  vec3 c;\\n  if (u_blend) {\\n    float k0 = floor(src);\\n    float f = src - k0;\\n    c = frameAt(int(k0), uv).rgb;\\n    if (f > 0.0) c = mix(c, frameAt(int(k0) + 1, uv).rgb, f);\\n  } else {\\n    c = frameAt(u_t - int(floor(d + 0.5)), uv).rgb;\\n  }\\n  o = vec4(c, 1.0);\\n}\\n\";\nconst VIEWS = { result: 0, original: 1, map: 2 };\n\nclass Engine {\n  constructor(canvas) {\n    this.canvas = canvas;\n    const gl = (this.gl = createContext(canvas));\n    this.caps = {\n      maxLayers: gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS),\n      maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE),\n      floatTargets: !!gl.getExtension('EXT_color_buffer_float'),\n    };\n    this.upload = program(gl, QUAD_VERT, UPLOAD_FRAG);\n    this.show = program(gl, QUAD_VERT, `#version 300 es\\nprecision highp float;\\n${STORE_GLSL}\\n${SHOW_FRAG}`);\n    this.timemap = program(gl, QUAD_VERT, `#version 300 es\\nprecision highp float;\\n${STORE_GLSL}\\n${TIMEMAP_FRAG}`);\n    this.mapProg = program(gl, QUAD_VERT, MAP_FRAG);\n    this.mapTex = null;\n    this.mapDirty = true;\n    this.layersTex = null;\n    this.settings = null;\n    this.vao = gl.createVertexArray();\n    gl.bindVertexArray(this.vao);\n    this.src = gl.createTexture();\n    this.fb = gl.createFramebuffer();\n    this.storeY = this.storeC = null;\n    this.n = 0;\n    this.layerFrame = null; // the frame index in each layer, -1 = empty\n    this.last = { index: -1, delay: undefined };\n    this.lost = false;\n    canvas.addEventListener('webglcontextlost', (e) => {\n      e.preventDefault();\n      this.lost = true;\n    });\n  }\n\n  handle(m) {\n    if (m.cmd === 'caps') return { cmd: 'caps', ...this.caps };\n    if (m.cmd === 'configure') return this.configure(m);\n    if (m.cmd === 'upload') {\n      this.put(m.index, m.frame);\n      if (m.show) this.render(m.index);\n      return { cmd: 'uploaded', index: m.index };\n    }\n    if (m.cmd === 'render') {\n      this.render(m.index, m.delay);\n      return { cmd: 'rendered', index: m.index };\n    }\n    if (m.cmd === 'settings') {\n      const old = this.settings;\n      this.settings = m.settings;\n      if (!old || JSON.stringify(old.map) !== JSON.stringify(m.settings.map)) this.mapDirty = true;\n      if (this.n && this.last.index >= 0) this.render(this.last.index, this.last.delay);\n      return { cmd: 'rendered', index: this.last.index };\n    }\n    if (m.cmd === 'read') return this.read();\n    return null;\n  }\n\n  // Make the store for the working size. The budget halves until the allocation works (plan §6.4).\n  configure(m) {\n    const gl = this.gl;\n    const { width: w, height: h } = m;\n    this.w = w;\n    this.h = h;\n    this.rot = m.rotation || 0;\n    this.canvas.width = w;\n    this.canvas.height = h;\n    let budget = m.budget;\n    let fails = m.failAlloc || 0; // tests: act as if the first allocations ran out of memory\n    for (;;) {\n      this.free();\n      const n = layerCount(budget, this.caps.maxLayers, w, h);\n      while (gl.getError() !== gl.NO_ERROR) { /* clear old errors */ }\n      this.storeY = gl.createTexture();\n      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);\n      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, w, h, n);\n      texParams(gl, gl.TEXTURE_2D_ARRAY);\n      this.storeC = gl.createTexture();\n      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);\n      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG8, w / 2, h / 2, n);\n      texParams(gl, gl.TEXTURE_2D_ARRAY);\n      // Touch the last layer, so that the driver must commit the memory now.\n      this.n = n;\n      this.clearLayer(n - 1);\n      const err = gl.getError();\n      const failed = fails > 0 || err === gl.OUT_OF_MEMORY || gl.isContextLost();\n      if (!failed) break;\n      fails--;\n      if (n === 1 || gl.isContextLost()) {\n        if (gl.isContextLost()) throw new Error('The GPU context was lost.');\n        break;\n      }\n      budget = Math.floor(budget / 2);\n    }\n    this.layerFrame = new Int32Array(this.n).fill(-1);\n    this.last = { index: -1, delay: undefined };\n    // The frame index of each layer, for the shaders (R32I, N x 1).\n    if (this.layersTex) gl.deleteTexture(this.layersTex);\n    this.layersTex = gl.createTexture();\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32I, this.n, 1, 0, gl.RED_INTEGER, gl.INT, this.layerFrame);\n    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);\n    // The map (R32F when float targets exist, so long delays keep their precision; else RGBA8).\n    if (this.mapTex) gl.deleteTexture(this.mapTex);\n    this.mapTex = gl.createTexture();\n    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);\n    if (this.caps.floatTargets) gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);\n    else gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);\n    texParams(gl, gl.TEXTURE_2D, gl.NEAREST);\n    this.mapDirty = true;\n    gl.viewport(0, 0, w, h);\n    gl.clearColor(0, 0, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h) };\n  }\n\n  free() {\n    const gl = this.gl;\n    if (this.storeY) gl.deleteTexture(this.storeY);\n    if (this.storeC) gl.deleteTexture(this.storeC);\n    this.storeY = this.storeC = null;\n  }\n\n  target(tex, layer, w, h) {\n    const gl = this.gl;\n    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);\n    gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, tex, 0, layer);\n    gl.viewport(0, 0, w, h);\n  }\n\n  clearLayer(layer) {\n    const gl = this.gl;\n    this.target(this.storeY, layer, this.w, this.h);\n    gl.clearColor(0, 0, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    this.target(this.storeC, layer, this.w / 2, this.h / 2);\n    gl.clearColor(0.5, 0.5, 0, 1);\n    gl.clear(gl.COLOR_BUFFER_BIT);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n  }\n\n  // Upload a VideoFrame into layer index mod N (plan §6.3), then close it.\n  put(index, frame) {\n    const gl = this.gl;\n    try {\n      gl.activeTexture(gl.TEXTURE0);\n      gl.bindTexture(gl.TEXTURE_2D, this.src);\n      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);\n      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, frame);\n      // A large source: mipmaps, so the scale down does not alias.\n      const turned = this.rot % 180 !== 0;\n      const sw = turned ? frame.displayHeight : frame.displayWidth;\n      const mip = sw > 2 * this.w;\n      if (mip) gl.generateMipmap(gl.TEXTURE_2D);\n      texParams(gl, gl.TEXTURE_2D, gl.LINEAR, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);\n    } finally {\n      frame.close();\n    }\n    const layer = index % this.n;\n    gl.useProgram(this.upload.prog);\n    gl.uniform1i(this.upload.u.u_src, 0);\n    gl.uniform1i(this.upload.u.u_rot, this.rot);\n    gl.uniform1i(this.upload.u.u_mode, 0);\n    this.target(this.storeY, layer, this.w, this.h);\n    drawQuad(gl);\n    gl.uniform1i(this.upload.u.u_mode, 1);\n    this.target(this.storeC, layer, this.w / 2, this.h / 2);\n    drawQuad(gl);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    this.layerFrame[layer] = index;\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));\n  }\n\n  // Render the map into its texture (once for each change of the map settings).\n  renderMap() {\n    const gl = this.gl;\n    const m = (this.settings && this.settings.map.linear) || { angle: 90, x: 0.5, y: 0.5, width: 1 };\n    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);\n    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.mapTex, 0);\n    gl.viewport(0, 0, this.w, this.h);\n    gl.useProgram(this.mapProg.prog);\n    gl.uniform2f(this.mapProg.u.u_res, this.w, this.h);\n    gl.uniform1f(this.mapProg.u.u_angle, m.angle);\n    gl.uniform2f(this.mapProg.u.u_center, m.x, m.y);\n    gl.uniform1f(this.mapProg.u.u_width, m.width);\n    drawQuad(gl);\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    this.mapDirty = false;\n  }\n\n  // The layer of frame t, or -1 when it is not in the store (or t < 0).\n  layerOf(t) {\n    if (t < 0 || !this.n) return -1;\n    const l = t % this.n;\n    return this.layerFrame[l] === t ? l : -1;\n  }\n\n  bindStore(prog) {\n    const gl = this.gl;\n    gl.activeTexture(gl.TEXTURE1);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeY);\n    gl.activeTexture(gl.TEXTURE2);\n    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.storeC);\n    gl.uniform1i(prog.u.u_storeY, 1);\n    gl.uniform1i(prog.u.u_storeC, 2);\n  }\n\n  // Render frame index to the canvas. delay (tests): show the stored frame index - delay.\n  render(index, delay) {\n    const gl = this.gl;\n    this.last = { index, delay };\n    if (this.mapDirty) this.renderMap();\n    gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n    gl.viewport(0, 0, this.w, this.h);\n    if (delay !== undefined || !this.settings) {\n      gl.useProgram(this.show.prog);\n      this.bindStore(this.show);\n      gl.uniform1f(this.show.u.u_layer, this.layerOf(index - (delay || 0)));\n      drawQuad(gl);\n      return;\n    }\n    const s = this.settings;\n    const p = this.timemap;\n    gl.useProgram(p.prog);\n    this.bindStore(p);\n    gl.activeTexture(gl.TEXTURE3);\n    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);\n    gl.activeTexture(gl.TEXTURE4);\n    gl.bindTexture(gl.TEXTURE_2D, this.layersTex);\n    gl.uniform1i(p.u.u_map, 3);\n    gl.uniform1i(p.u.u_layers, 4);\n    gl.uniform1i(p.u.u_n, this.n);\n    gl.uniform1i(p.u.u_t, index);\n    gl.uniform1f(p.u.u_max, Math.min(s.timemap.maxDelay, this.n - 1));\n    gl.uniform1i(p.u.u_steps, s.timemap.steps);\n    gl.uniform1i(p.u.u_blend, s.timemap.blend ? 1 : 0);\n    gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);\n    drawQuad(gl);\n  }\n\n  read() {\n    const gl = this.gl;\n    this.render(this.last.index, this.last.delay);\n    const pixels = new Uint8Array(this.w * this.h * 4);\n    gl.readPixels(0, 0, this.w, this.h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);\n    return { cmd: 'pixels', width: this.w, height: this.h, pixels };\n  }\n}\n\nreturn { Engine };\n})();\n\n// ---- gpu/gpu-worker.js\nconst {  } = (() => {\n// GPU worker (plan §5.1): the engine on the OffscreenCanvas of the preview.\n// In: { id, msg } with msg.cmd 'init' (msg.canvas) or an engine message. Out: { id, reply } or { id, error }.\n\n\n\nlet engine = null;\n\nself.onmessage = (e) => {\n  const { id, msg } = e.data;\n  try {\n    let reply;\n    if (msg.cmd === 'init') {\n      engine = new Engine(msg.canvas);\n      reply = { cmd: 'caps', ...engine.caps };\n    } else reply = engine.handle(msg);\n    if (engine && engine.lost) self.postMessage({ id, error: 'The GPU context was lost.' });\n    else self.postMessage({ id, reply }, reply && reply.pixels ? [reply.pixels.buffer] : []);\n  } catch (err) {\n    if (msg.frame) try { msg.frame.close(); } catch { /* closed */ }\n    self.postMessage({ id, error: String(err && err.message ? err.message : err) });\n  }\n};\n\nreturn {  };\n})();\n";
 
-let player, preview, timeline, gpu;
+let player, preview, timeline, gpu, inspector;
+const settings = clone(DEFAULTS);
 // The store state: { short (the preview setting), width, height, n, bytes, budget }.
 const store = { short: 540, budget: 0, failAlloc: 0 };
 
@@ -1024,7 +1324,34 @@ async function configureStore() {
   Object.assign(store, { width, height, n: r.n, bytes: r.bytes, usedBudget: r.budget });
   player.setStore(r.n);
   preview.setSize(width, height);
+  // The Max delay cannot be more than N - 1 (plan §6.4).
+  if (settings.timemap.maxDelay > r.n - 1) settings.timemap.maxDelay = r.n - 1;
+  inspector.build(settings, limits());
+  await applySettings();
   return r;
+}
+
+const limits = () => ({ maxDelay: Math.max(0, store.n - 1) });
+
+// The history that the effect needs: Mode 1, the Max delay.
+const effectDepth = () => (settings.mode === 'timemap' && settings.view !== 'original' ? settings.timemap.maxDelay : 0);
+
+// Send the settings to the engine. When the effect needs more history, a seek decodes it.
+async function applySettings() {
+  const r = gpu.call({ cmd: 'settings', settings: clone(settings) });
+  const depth = effectDepth();
+  const more = depth > player.depth;
+  player.depth = depth;
+  if (more && player.info && !player.playing && player.current >= 0) await player.seek(player.current);
+  await r;
+}
+
+// A setting changed in the UI.
+function change(path, value) {
+  setPath(settings, path, value);
+  inspector.refresh(settings);
+  if (path === 'view') for (const b of document.querySelectorAll('#viewBar button')) b.classList.toggle('on', b.dataset.view === value);
+  applySettings();
 }
 
 function setProgress(f) {
@@ -1098,7 +1425,7 @@ async function start() {
   }
   player = new Player(DECODE_WORKER, {
     consume: (index, frame, show) => gpu.call({ cmd: 'upload', index, frame, show }, [frame]),
-    render: (index) => gpu.call({ cmd: 'render', index, delay: 0 }),
+    render: (index) => gpu.call({ cmd: 'render', index }),
     onState: () => {
       timeline.update();
       status();
@@ -1108,7 +1435,11 @@ async function start() {
     onProgress: setProgress,
   });
   timeline = new Timeline($('transport'), player);
-  Object.assign(window.neofx, { player, preview, timeline, gpu, store, openFile, configureStore });
+  inspector = new Inspector($('inspector'), change);
+  inspector.build(settings, { maxDelay: 999 });
+  gpu.call({ cmd: 'settings', settings: clone(settings) });
+  for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
+  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings });
   $('resSelect').addEventListener('change', async (e) => {
     store.short = Number(e.target.value);
     if (!player.info) return;
