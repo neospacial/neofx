@@ -1,0 +1,44 @@
+<!-- neofx v@VERSION@ -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111214">
+<meta name="color-scheme" content="dark">
+<title>neofx</title>
+<!--@css:style.css-->
+</head>
+<body data-state="start">
+<div id="app">
+  <header id="topBar">
+    <span id="logo">neofx</span>
+    <button id="openBtn" type="button">Open</button>
+    <span class="spacer"></span>
+    <span id="status" aria-live="polite"></span>
+    <button id="exportBtn" type="button" disabled>Export</button>
+  </header>
+
+  <main id="stage">
+    <section id="preview" aria-label="Preview">
+      <div id="startScreen">
+        <label id="dropArea" for="fileInput">
+          <strong>Open a video (MP4 or MOV)</strong>
+          <span>Drop a file here, or touch to select one.</span>
+        </label>
+        <div id="modeInfo">
+          <div><b>Time Map</b> — a greyscale map gives each pixel a delay in frames.</div>
+          <div><b>Slit Scan</b> — a 1 px line repeats in one direction, and gets older with distance.</div>
+        </div>
+      </div>
+      <div id="message" hidden></div>
+    </section>
+    <aside id="inspector" aria-label="Inspector"></aside>
+  </main>
+
+  <footer id="transport"></footer>
+  <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
+</div>
+<!--@modules:app/platform.js,app/main.js-->
+</body>
+</html>
