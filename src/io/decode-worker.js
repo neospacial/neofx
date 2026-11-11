@@ -4,7 +4,7 @@
 //
 // Messages in:
 //   { cmd: 'open', file }                       -> 'info' or 'error'
-//   { cmd: 'seek', job, t, depth }              -> 'frame' for each frame max(0, t - depth) .. t, then 'done'
+//   { cmd: 'seek', job, t, from }               -> 'frame' for each frame from .. t, then 'done'
 //   { cmd: 'play', job, from, to }              -> 'frame' for each frame from .. to, then 'done'
 //   { cmd: 'thumbs', job, count, width }        -> 'thumb' { i, index, bitmap } for each, then 'done'
 //   { cmd: 'stop' }                             cancel the job in progress
@@ -182,7 +182,7 @@ async function open(file) {
 async function seek(m) {
   const n = W.tl.frames.length;
   const t = Math.max(0, Math.min(n - 1, m.t));
-  const from = Math.max(0, t - (m.depth || 0));
+  const from = Math.max(0, Math.min(t, m.from ?? t - (m.depth || 0)));
   const list = [];
   for (let i = from; i <= t; i++) list.push(i);
   const ok = await decodeSegments(m.job, planSegments(W.tl, list), (i) => i >= from && i <= t, (i, f) => sendFrame(m.job, i, f, i < t));

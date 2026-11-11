@@ -19,40 +19,45 @@ try {
 const root = path.join(path.dirname(new URL(import.meta.url).pathname), '..');
 const ROT = { 'code_rot90.mp4': 90 };
 
-async function launch(viewport = { width: 1280, height: 800 }) {
+// The code reader on the page: __read() reads the GPU canvas (the last render). A hook reads each
+// frame that is shown, when __hook is on.
+export async function installReader(page) {
+  await page.evaluate((src) => {
+    const readCode = (0, eval)(`(${src})`);
+    const N = window.neofx;
+    window.__decode = (r) => {
+      const info = N.player.info;
+      const { width: w, height: h, pixels: d } = r;
+      // readPixels gives the bottom row first. Canvas pixel for a display pixel.
+      const sx = w / info.width, sy = h / info.height;
+      return readCode((x, y) => d[((h - 1 - Math.floor((y + 0.5) * sy)) * w + Math.floor((x + 0.5) * sx)) * 4], info.width, info.height, info.rotation);
+    };
+    window.__readPixels = () => N.gpu.call({ cmd: 'read' });
+    window.__read = async () => window.__decode(await window.__readPixels());
+    window.__seen = [];
+    window.__tl = () => N.timeline.thumbs;
+    const consume = N.player.opts.consume;
+    N.player.opts.consume = (i, f, show) => {
+      const p = consume(i, f, show);
+      if (show && window.__hook) window.__seen.push(N.gpu.call({ cmd: 'read' }).then((r) => [i, window.__decode(r)]));
+      return p;
+    };
+  }, readCode.toString());
+}
+
+export async function launch(viewport = { width: 1280, height: 800 }, query = '') {
   const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const page = await browser.newPage({ viewport });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-  await page.goto(pathToFileURL(path.join(root, 'dist', PAGES[0][1])).href);
+  await page.goto(pathToFileURL(path.join(root, 'dist', PAGES[0][1])).href + query);
   await page.waitForFunction(() => window.neofx && window.neofx.player);
-  // The code reader, and a hook that reads the canvas each time a frame is drawn.
-  await page.evaluate((src) => {
-    const readCode = (0, eval)(`(${src})`);
-    const P = window.neofx.player;
-    const canvas = document.getElementById('view');
-    const ctx = canvas.getContext('2d');
-    window.__read = () => {
-      const { width: w, height: h } = canvas;
-      const d = ctx.getImageData(0, 0, w, h).data;
-      const info = P.info;
-      // Canvas pixel for a display pixel (the canvas can be smaller than the video).
-      const sx = w / info.width, sy = h / info.height;
-      return readCode((x, y) => d[(Math.floor((y + 0.5) * sy) * w + Math.floor((x + 0.5) * sx)) * 4], info.width, info.height, info.rotation);
-    };
-    window.__seen = [];
-    window.__tl = () => window.neofx.timeline.thumbs;
-    const present = P.opts.present;
-    P.opts.present = (i, f) => {
-      present(i, f);
-      if (window.__hook) window.__seen.push([i, window.__read()]);
-    };
-  }, readCode.toString());
+  await installReader(page);
   return { browser, page, errors };
 }
 
-async function open(page, file) {
+export async function open(page, file) {
   await page.setInputFiles('#fileInput', file);
   await page.waitForFunction(() => {
     const P = window.neofx.player;
@@ -63,7 +68,7 @@ async function open(page, file) {
 
 const seekRead = (page, t) => page.evaluate(async (t) => {
   await window.neofx.player.seek(t);
-  return [window.neofx.player.current, window.__read()];
+  return [window.neofx.player.current, await window.__read()];
 }, t);
 
 export const tests = [
@@ -111,7 +116,7 @@ export const tests = [
             const out = [];
             for (let i = 1; i < n; i++) {
               await window.neofx.player.step(1);
-              out.push(window.__read());
+              out.push(await window.__read());
             }
             return out;
           }, n);
@@ -120,7 +125,7 @@ export const tests = [
             const out = [];
             for (let i = 0; i < 30; i++) {
               await window.neofx.player.step(-1);
-              out.push(window.__read());
+              out.push(await window.__read());
             }
             return out;
           });
@@ -157,7 +162,7 @@ export const tests = [
           all.push(P.seek(61));
           await Promise.all(all);
           window.__hook = false;
-          return { cur: P.current, code: window.__read(), seen: window.__seen };
+          return { cur: P.current, code: await window.__read(), seen: await Promise.all(window.__seen) };
         });
         assert(r.cur === 61 && r.code === gt.codes[61], `last seek: frame ${r.cur}, code ${r.code}`);
         assert(r.seen.length < 20, `${r.seen.length} frames drawn for 41 seeks (the seeks must be joined)`);
@@ -169,7 +174,7 @@ export const tests = [
         for (let k = 1; k <= 10; k++) await page.mouse.move(box.x + (box.width * k) / 20, box.y + box.height / 2);
         await page.mouse.up();
         await page.waitForFunction(() => !window.neofx.player.busy && !window.neofx.player.pendingSeek);
-        const [cur, code] = await page.evaluate(() => [window.neofx.player.current, window.__read()]);
+        const [cur, code] = await page.evaluate(async () => [window.neofx.player.current, await window.__read()]);
         assert(Math.abs(cur - 45) <= 2 && code === gt.codes[cur], `scrub to the middle: frame ${cur}, code ${code}`);
         assert(!errors.length, errors.join('; '));
       } finally {
@@ -198,7 +203,8 @@ export const tests = [
               k();
             });
             window.__hook = false;
-            return { ms: performance.now() - t0, seen: window.__seen, log: P.log, stats: P.stats, cur: P.current };
+            const ms = performance.now() - t0;
+            return { ms, seen: await Promise.all(window.__seen), log: P.log, stats: P.stats, cur: P.current };
           });
           assert(r.cur === n - 1, `${name}: stopped at ${r.cur}`);
           assert(r.log.every((t, i) => !i || t > r.log[i - 1]), `${name}: frames out of order`);
