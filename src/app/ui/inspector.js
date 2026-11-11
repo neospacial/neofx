@@ -45,7 +45,7 @@ export class Inspector {
     };
     const on = (key) => (v) => this.app.change(key, v);
     // The tab of each section in the narrow layout (plan §12.3).
-    const TABS = { mode: 'mode', map: 'map', adjust: 'map', anim: 'map', source: 'map', time: 'time', time2: 'time', cutout: 'cutout', subject: 'cutout', composite: 'mix', look: 'look' };
+    const TABS = { presets: 'presets', mode: 'mode', map: 'map', adjust: 'map', anim: 'map', source: 'map', time: 'time', time2: 'time', cutout: 'cutout', subject: 'cutout', composite: 'mix', look: 'look' };
     const sec = (name, title, def = true) => {
       const d = section(title, open[name] ?? def);
       d.dataset.name = name;
@@ -78,6 +78,9 @@ export class Inspector {
     };
     const num = (parent, key, label, min, max, step, def, unit) => add(parent, slider({ key, label, min, max, step, value: getPath(S, key), def, unit, onChange: on(key) }));
     const bool = (parent, key, label) => add(parent, toggle({ key, label, value: getPath(S, key), onChange: on(key) }));
+
+    // Presets (plan §12.5): Randomize all, Reset to defaults, the looks, Save and Load.
+    if (this.app.presetPanel) this.app.presetPanel(sec('presets', 'Presets', false));
 
     const mode = sec('mode', 'Mode');
     add(mode, segmented({ key: 'mode', options: [['timemap', 'Time Map'], ['slitscan', 'Slit Scan']], value: S.mode, onChange: on('mode') }));
@@ -338,7 +341,7 @@ export class Inspector {
     const tabs = document.createElement('div');
     tabs.className = 'tabBar';
     tabs.setAttribute('role', 'tablist');
-    for (const [id, text] of [['mode', 'Mode'], ['map', S.mode === 'timemap' ? 'Map' : 'Source'], ['time', 'Time'], ['cutout', 'Cutout'], ['mix', 'Mix'], ['look', 'Look']]) {
+    for (const [id, text] of [['presets', 'Presets'], ['mode', 'Mode'], ['map', S.mode === 'timemap' ? 'Map' : 'Source'], ['time', 'Time'], ['cutout', 'Cutout'], ['mix', 'Mix'], ['look', 'Look']]) {
       const b = Object.assign(document.createElement('button'), { type: 'button', textContent: text });
       b.dataset.tab = id;
       b.setAttribute('role', 'tab');
@@ -347,15 +350,17 @@ export class Inspector {
     }
     r.prepend(tabs);
     this.setTab(this.tab || 'mode');
+  }
 
-    // Randomize (plan §12.5): the sections that are not locked; the seed is shown (and makes the same look).
-    const rb = document.createElement('div');
-    rb.className = 'randomBar';
-    const randBtn = Object.assign(document.createElement('button'), { type: 'button', id: 'randomizeBtn', textContent: '🎲 Randomize' });
-    randBtn.addEventListener('click', () => this.app.randomize());
-    const seed = Object.assign(document.createElement('span'), { className: 'seed', textContent: this.app.lastSeed && this.app.lastSeed() ? `Look #${this.app.lastSeed()}` : '' });
-    rb.append(randBtn, seed);
-    r.append(rb);
+  // Show the Presets section (the Presets button): its tab, open, in view.
+  showPresets() {
+    this.setTab('presets');
+    const d = this.root.querySelector('details[data-name="presets"]');
+    if (!d) return;
+    d.open = true;
+    // The phone tab: from the top (the tab bar is sticky); else the section in view.
+    if (window.matchMedia && window.matchMedia('(max-width: 999px)').matches) this.root.scrollTop = 0;
+    else d.scrollIntoView({ block: 'start' });
   }
 
   // The narrow layout shows the sections of one tab.

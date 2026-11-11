@@ -70,6 +70,9 @@ export const tests = [
       assert(c.timemap.maxDelay >= 1 && c.timemap.maxDelay <= 120 && JSON.stringify(c.map) === JSON.stringify(DEFAULTS.map), 'one section only, safe range');
       assert(PRESETS.length >= 12 && PRESETS.some((p) => p.s.mode === 'timemap') && PRESETS.some((p) => p.s.mode === 'slitscan')
         && PRESETS.some((p) => p.s.cutout && p.s.cutout.mode === 'overlay') && PRESETS.some((p) => p.s.cutout && p.s.cutout.mode === 'scan'), 'presets cover the modes');
+      // Every Time Map preset names its map (a preset with map options too keeps its map type).
+      const badMaps = PRESETS.filter((p) => p.s.mode === 'timemap' && !(p.s.map && p.s.map.type && applyPreset(clone(DEFAULTS), p).map.type === p.s.map.type)).map((p) => p.id);
+      assert(!badMaps.length && new Set(PRESETS.map((p) => p.id)).size === PRESETS.length, `preset maps / ids: ${badMaps}`);
       const cur = merge(DEFAULTS, { view: 'mask', cutout: { luma: { on: true } } });
       const s = applyPreset(cur, PRESETS.find((p) => p.id === 'trail'));
       assert(s.view === 'mask' && s.cutout.luma.on && s.cutout.mode === 'scan' && s.mode === 'slitscan', 'a preset keeps the view and the cutout method');
@@ -273,7 +276,7 @@ export const tests = [
     },
   },
   {
-    name: 'presets: the gallery (13, thumbnails), Save (a .neofx.json file with the matte and the image map), Load (and a video map asks for its file)',
+    name: 'presets: the Presets section (all the looks, thumbnails; Randomize all, Reset to defaults), Save (a .neofx.json file with the matte and the image map), Load (and a video map asks for its file)',
     timeout: 240000,
     async fn() {
       await withApp(DESKTOP, async (page) => {
@@ -281,8 +284,26 @@ export const tests = [
         // The GPU thumbnails come one after the other.
         await page.waitForFunction(() => [...document.querySelectorAll('.presetCard canvas')].every((c) => c.getContext('2d').getImageData(0, 0, 160, 90).data.some((v, i) => i % 4 !== 3 && v > 0)), null, { timeout: 30000 }).catch(() => {});
         const g = await page.evaluate(() => [...document.querySelectorAll('.presetCard')].map((c) => ({ id: c.dataset.preset, drawn: c.querySelector('canvas').getContext('2d').getImageData(0, 0, 160, 90).data.some((v, i) => i % 4 !== 3 && v > 0) })));
-        assert(g.length === 13 && g.every((x) => x.drawn), `gallery ${JSON.stringify(g)}`);
-        await page.click('#presetClose');
+        assert(g.length === PRESETS.length && g.length >= 25 && g.every((x) => x.drawn), `gallery ${JSON.stringify(g)}`);
+        assert(await page.isVisible('#randomizeBtn') && await page.isVisible('#resetBtn'), 'Randomize all and Reset in the Presets section');
+        // Reset to defaults: one undo step; the view stays.
+        await page.evaluate(() => {
+          window.neofx.change('timemap.maxDelay', 9);
+          window.neofx.change('look.ageBrightness', 0.5);
+        });
+        const changed = await page.evaluate(() => JSON.stringify(window.neofx.settings));
+        await page.click('#resetBtn');
+        const rs = await page.evaluate(() => window.neofx.settings);
+        assert(rs.timemap.maxDelay === 30 && rs.look.ageBrightness === 1 && rs.mode === 'timemap', 'the defaults');
+        await page.keyboard.press('Control+z');
+        assert((await page.evaluate(() => JSON.stringify(window.neofx.settings))) === changed, 'undo the reset');
+        // Randomize all (the button).
+        await page.click('#randomizeBtn');
+        assert(/^Look #\d+$/.test(await page.textContent('.randomBar .seed')), 'Randomize all');
+        // A new look: the card.
+        await page.click('.presetCard[data-preset="kaleido"]');
+        const k = await page.evaluate(() => window.neofx.settings);
+        assert(k.map.type === 'mirrored' && k.map.adjust.tileX === 3, `the Kaleidoscope preset ${JSON.stringify([k.map.type, k.map.adjust, k.mode])}`);
         // An image map and a matte stroke, then Save.
         const png = path.join(OUT_DIR, 'ui_map.png');
         fs.writeFileSync(png, grayPng(32, 32, (x) => x * 8));
@@ -299,7 +320,6 @@ export const tests = [
         const j = JSON.parse(fs.readFileSync(file, 'utf8'));
         assert(j.app === 'neofx' && j.version === '0.1.0' && j.settings.timemap.maxDelay === 17, 'the file');
         assert(/^data:image\/png;base64,/.test(j.assets.mapImage) && /^data:image\/png;base64,/.test(j.assets.matte), 'the image map and the matte as PNG data URLs');
-        await page.click('#presetClose');
         // Change things, then Load: the settings, the image map, and the matte come back.
         await page.evaluate(async () => {
           const N = window.neofx;
@@ -408,6 +428,9 @@ export const tests = [
         await page.click('.tabBar button[data-tab="map"]');
         const vis2 = await page.evaluate(() => [...document.querySelectorAll('#inspector details')].filter((d) => d.offsetParent !== null).map((d) => d.dataset.name));
         assert(vis2.includes('map') && !vis2.includes('composite'), `the Map tab: ${vis2}`);
+        // The transport: SVG icons (the media symbols are emoji on iOS).
+        const icons = await page.evaluate(() => [...document.querySelectorAll('#transport .controls button')].slice(0, 5).map((b) => !!b.querySelector('svg') && !b.textContent.trim()));
+        assert(icons.every(Boolean), `transport icons ${icons}`);
         // Touch targets.
         const small = await page.evaluate(() => [...document.querySelectorAll('#topBar button, #transport button, .tabBar button')].filter((b) => b.offsetParent !== null && b.getBoundingClientRect().height < 44).map((b) => b.textContent));
         assert(!small.length, `buttons under 44 px: ${small}`);
@@ -423,8 +446,9 @@ export const tests = [
         // The ⋯ menu: Presets.
         await page.click('#menuBtn');
         await page.click('#menu button[data-act="presets"]');
-        await page.waitForSelector('#presetDialog[open]');
-        await page.click('#presetClose');
+        const pv = await page.evaluate(() => [document.getElementById('inspector').dataset.tab, [...document.querySelectorAll('#inspector details')].filter((d) => d.offsetParent !== null).map((d) => d.dataset.name).join()]);
+        assert(pv[0] === 'presets' && pv[1] === 'presets', `the Presets tab: ${pv}`);
+        assert(await page.isVisible('#randomizeBtn') && await page.isVisible('#resetBtn') && await page.isVisible('.presetCard[data-preset="neon"]'), 'Randomize all, Reset, the looks in the tab');
         // Pinch zoom with two touch pointers.
         const z = await page.evaluate(() => {
           const area = document.getElementById('preview');

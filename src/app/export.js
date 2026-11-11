@@ -6,7 +6,7 @@
 
 import { makeWorker } from './player.js';
 import { demuxMp4 } from '../io/demux.js';
-import { muxMp4, DataPacker } from '../io/mp4.js';
+import { muxMp4, DataPacker, readPackets } from '../io/mp4.js';
 import { codecCandidates, bitrateFor, exportSizes, chunkSamples, FrameMatcher, checkSamples } from '../io/encoder-config.js';
 
 const MAX_ENCODE_QUEUE = 8;
@@ -75,6 +75,7 @@ export class Exporter {
     const file = A.file();
     const [a, b] = opts.range;
     const total = b - a + 1;
+    onProgress({ done: 0, total, fps: 0, eta: 0, phase: 'prepare' });
     // 1. The encoder (a lower size when the size is not supported).
     let { width, height } = opts;
     let config = await probeEncoder(width, height, info.fps, opts);
@@ -184,7 +185,7 @@ export class Exporter {
                 const sec = (performance.now() - t0) / 1000;
                 const fps = done / Math.max(sec, 1e-3);
                 onProgress({ done, total, fps, eta: (total - done) / Math.max(fps, 1e-3), phase: 'encode' });
-              }
+              } else if (t % 4 === 0) onProgress({ done: 0, total, fps: 0, eta: 0, phase: 'warmup', warm: (t - from + 1) / Math.max(1, a - from) });
               dec.postMessage({ cmd: 'ack' });
             }
           } catch (err) {
@@ -213,10 +214,17 @@ export class Exporter {
         // source edit list).
         const list = au.samples.filter((s) => (a === 0 || s.us >= usA - 1) && s.us < usB - 1);
         if (list.length) {
+          // Read the packets into memory now (a few large reads). Slices of the source file in the
+          // result would be read again, one small read for each packet, when the browser saves it
+          // (on Android, through the content provider of the picked file: very slow).
+          onProgress({ done, total, fps: 0, eta: 0, phase: 'audio' });
+          const data = await readPackets(file, list);
+          this.check();
           audio = {
             ...au,
             mediaTime: a === 0 ? au.mediaTime : 0,
-            samples: list.map((s) => ({ data: file.slice(s.offset, s.offset + s.size), size: s.size, duration: s.duration })),
+            samples: list.map((s) => ({ size: s.size, duration: s.duration })),
+            dataParts: [data],
           };
         }
       }

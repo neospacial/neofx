@@ -15,6 +15,7 @@ import { launch, open } from './playback.test.mjs';
 import { expectRows } from './mode1.test.mjs';
 import { h264Level, codecCandidates, bitrateFor, exportSizes, chunkSamples, exportName, FrameMatcher, checkSamples } from '../src/io/encoder-config.js';
 import { frameBytes } from '../src/gpu/store.js';
+import { readPackets } from '../src/io/mp4.js';
 
 let chromium = null;
 try {
@@ -129,6 +130,23 @@ export const tests = [
       // Decode order I P B B (pts 0 3 1 2): dts are the sorted pts minus the delay; cto >= 0.
       const r = chunkSamples([{ pts: 0, key: true, size: 1 }, { pts: 3, size: 1 }, { pts: 1, size: 1 }, { pts: 2, size: 1 }], 1);
       assert(r.mediaTime === 1 && r.samples.map((x) => x.cto).join() === '1,3,0,0' && r.samples.map((x) => x.duration).join() === '1,1,1,1', JSON.stringify(r));
+    },
+  },
+  {
+    name: 'audio packets (Node): read into memory with a few large reads, the bytes in order',
+    async fn() {
+      const src = new Uint8Array(4 << 20).map((_, i) => (i * 7) & 255);
+      let reads = 0;
+      const blob = new Blob([src]);
+      const file = { slice: (a, b) => (reads++, blob.slice(a, b)) };
+      // Runs of packets (an interleaved file: audio chunks between video chunks).
+      const list = [];
+      for (let c = 0; c < 8; c++) for (let k = 0; k < 20; k++) list.push({ offset: c * 400000 + k * 300, size: 300 - (k % 3) });
+      const out = await readPackets(file, list);
+      const want = [];
+      for (const s of list) want.push(...src.subarray(s.offset, s.offset + s.size));
+      assert(out.length === want.length && out.every((v, i) => v === want[i]), 'the bytes');
+      assert(reads === 8, `one read for each run: ${reads}`);
     },
   },
   {

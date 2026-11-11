@@ -17,8 +17,9 @@ export function merge(base, over) {
   return out;
 }
 
-const m1 = (type, params = {}, time = {}, more = {}) => ({ mode: 'timemap', map: { source: 'builtin', type, params: { [type]: params } }, timemap: { blend: true, ...time }, ...more });
-const m2 = (slit = {}, more = {}) => ({ mode: 'slitscan', slitscan: slit, ...more });
+// (more is merged deeply: { map: { anim } } keeps the map type.)
+const m1 = (type, params = {}, time = {}, more = {}) => merge({ mode: 'timemap', map: { source: 'builtin', type, params: { [type]: params } }, timemap: { blend: true, ...time } }, more);
+const m2 = (slit = {}, more = {}) => merge({ mode: 'slitscan', slitscan: slit }, more);
 
 export const PRESETS = [
   { id: 'wave', name: 'Time wave', s: m1('linear', { angle: 90 }, { maxDelay: 30 }) },
@@ -34,6 +35,19 @@ export const PRESETS = [
   { id: 'accel', name: 'Accelerated scan', s: m2({ source: 'line', time: true, rateType: 'accelerate', rate: 0.5, rateEnd: 6, angle: 0, y: 0.6 }, { look: { tint: true, tintColors: ['#ffffff', '#3060ff'] } }) },
   { id: 'trail', name: 'Subject trail', s: m2({ source: 'edge', edgeAngle: 180, rate: 2, maxAgeEdge: 90 }, { cutout: { mode: 'scan' }, composite: { decay: 'linear' } }) },
   { id: 'afterimage', name: 'Afterimage', s: m2({ source: 'edge', edgeAngle: 90, rate: 1, maxAgeEdge: 60 }, { cutout: { mode: 'overlay' }, look: { tint: true, tintColors: ['#ff60c0', '#4020ff'] } }) },
+  // More looks.
+  { id: 'kaleido', name: 'Kaleidoscope', s: m1('mirrored', { angle: 45 }, { maxDelay: 36 }, { map: { adjust: { tileX: 3, tileY: 3, mirrorTile: true } } }) },
+  { id: 'pulse', name: 'Pulse rings', s: m1('rings', { count: 3, softness: 1 }, { maxDelay: 40 }, { map: { anim: { phaseSpeed: 0.02 } }, look: { tint: true, tintColors: ['#ffffff', '#eee100', '#ff3d7f'], tintAmount: 0.6 } }) },
+  { id: 'twister', name: 'Twister', s: m1('angular', { turns: 2 }, { maxDelay: 48 }, { map: { anim: { rotSpeed: 2 } } }) },
+  { id: 'liquid', name: 'Liquid time', s: m1('sine', { fx: 3, fy: 2 }, { maxDelay: 40 }, { map: { anim: { phaseSpeed: 0.015 } } }) },
+  { id: 'tunnel', name: 'Time tunnel', s: m1('radial', { radius: 0.9 }, { maxDelay: 60 }, { look: { ageBrightness: 0.35 } }) },
+  { id: 'mosaic', name: 'Time mosaic', s: m1('blocks', { bw: 48, bh: 48 }, { maxDelay: 60, steps: 8, blend: false }, { map: { anim: { seedEvery: 30 } } }) },
+  { id: 'glitch', name: 'Scanline glitch', s: m1('rows', { size: 6 }, { maxDelay: 24, blend: false }, { map: { anim: { seedEvery: 4 } }, look: { offset: 6, offsetAngle: 0 } }) },
+  { id: 'dither', name: 'Dither time', s: m1('bayer', { matrix: 3 }, { maxDelay: 16, blend: false }) },
+  { id: 'thermal', name: 'Thermal echo', s: m1('self', {}, { maxDelay: 45 }, { look: { tint: true, tintColors: ['#2b00ff', '#ff2d55', '#eee100'] } }) },
+  { id: 'finish', name: 'Photo finish', s: m2({ source: 'line', time: true, rate: 2, angle: 90, x: 0.5 }, { look: { tint: true, tintColors: ['#ffffff', '#eee100'], tintAmount: 0.5 } }) },
+  { id: 'melt', name: 'Melt', s: m2({ source: 'line', time: true, rateType: 'decelerate', rate: 4, rateEnd: 0.5, angle: 0, y: 0.4 }) },
+  { id: 'neon', name: 'Neon trail', s: m2({ source: 'edge', edgeAngle: 270, rate: 3, maxAgeEdge: 120 }, { cutout: { mode: 'scan' }, composite: { mode: 'blend', blend: 'screen', decay: 'exp' }, look: { tint: true, tintColors: ['#eee100', '#ff2d55', '#2b00ff'] } }) },
 ];
 
 // The settings of a preset: on the defaults, keeping the cutout method settings, the custom maps,

@@ -41,7 +41,7 @@ export function curveEditor(opts) {
       ctx.beginPath(); ctx.moveTo(PAD, b); ctx.lineTo(W - PAD, b); ctx.stroke();
     }
     const f = monotoneCurve(pts);
-    ctx.strokeStyle = getComputedStyle(row).getPropertyValue('--accent').trim() || '#4fd1c5';
+    ctx.strokeStyle = getComputedStyle(row).getPropertyValue('--accent').trim() || '#eee100';
     ctx.lineWidth = 2;
     ctx.beginPath();
     for (let i = 0; i <= 100; i++) {
