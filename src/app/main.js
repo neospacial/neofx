@@ -18,14 +18,19 @@ import { PreviewTools } from './ui/tools.js';
 import { plateIndices } from '../analysis/cleanplate.js';
 import { makeWorker } from './player.js';
 import { usesMask } from '../maps/builtin.js';
+import { Exporter } from './export.js';
+import { ExportDialog } from './ui/exportdialog.js';
+import { layerCount } from '../gpu/store.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
 const DECODE_WORKER = "@WORKER:io/demux.js,io/timeline.js,io/decode-worker.js";
 const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,gpu/gpu-worker.js";
 const ANALYSIS_WORKER = "@WORKER:analysis/cleanplate.js,analysis/analysis-worker.js";
+const ENCODE_WORKER = "@WORKER:io/encode-worker.js";
 
-let player, preview, timeline, gpu, inspector, analysis, handles, tools;
+let player, preview, timeline, gpu, inspector, analysis, handles, tools, exportDialog, gpuCaps, platform;
+let exporter = null; // the export that runs
 // The state of the preview tools and the clean plate (not part of the settings).
 const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false, matteVersion: 0 };
 let edgeStats = null; // the Subject edge source: the measured GPU time and the Max age limit
@@ -65,7 +70,7 @@ async function configureStore() {
   if (r.edgeRows && settings.slitscan.maxAgeEdge > r.edgeRows) settings.slitscan.maxAgeEdge = r.edgeRows;
   edgeStats = null;
   if (analysis) analysis.doneKey = ''; // the history is new and empty
-  toolState.plateOk = false; // the clean plate and the mask textures are new
+  toolState.plateOk = !!r.plate; // the engine keeps the clean plate (scaled) when the size changes
   player.setStore(r.n);
   preview.setSize(width, height);
   // The Max delay cannot be more than N - 1 (plan §6.4).
@@ -377,6 +382,8 @@ async function openFile(file) {
   }
   document.body.dataset.state = 'open';
   $('view').hidden = false;
+  $('exportBtn').disabled = !platform.encoder;
+  $('exportBtn').title = platform.encoder ? '' : 'This browser has no video encoder.';
   handles.update();
   try {
     await configureStore();
@@ -386,6 +393,59 @@ async function openFile(file) {
   }
   await player.seek(0);
   status();
+}
+
+// Export (plan §11): the engine is made again at the export size, then at the preview size after.
+async function exportVideo(opts, onProgress = () => {}) {
+  if (!player.info || exporter) throw new Error('Nothing to export.');
+  player.pause();
+  analysis.stop();
+  clearTimeout(analysisTimer);
+  const view = settings.view;
+  settings.view = 'result'; // the export is the result, whatever the preview shows
+  let an = null, rejectAnalysis = null;
+  exporter = new Exporter({
+    gpu, decodeSrc: DECODE_WORKER, encodeSrc: ENCODE_WORKER, settings,
+    file: () => currentFile,
+    info: () => player.info,
+    configure: async (w, h) => {
+      await gpu.call({ cmd: 'settings', settings: clone(settings) });
+      const r = await gpu.call({ cmd: 'configure', width: w, height: h, rotation: player.info.rotation, budget: store.usedBudget || store.budget || defaultBudget(navigator.userAgent), frames: player.frameCount });
+      await gpu.call({ cmd: 'settings', settings: clone(settings) });
+      return r;
+    },
+    analyse: (onP) => new Promise((resolve, reject) => {
+      rejectAnalysis = reject;
+      an = new Analysis(DECODE_WORKER, gpu, { onProgress: (f) => f !== null && onP(f), onRows() {}, onDone: resolve });
+      an.start(currentFile, player.frameCount, 'export');
+    }),
+    depth: () => effectDepth(),
+  });
+  const ex = exporter;
+  const cancel = ex.cancel.bind(ex);
+  ex.cancel = () => {
+    cancel();
+    if (an) an.stop();
+    if (rejectAnalysis) rejectAnalysis(new Error('Export cancelled'));
+  };
+  try {
+    return await ex.run(opts, onProgress);
+  } finally {
+    settings.view = view;
+    exporter = null;
+    // The preview again.
+    await configureStore();
+    await player.seek(Math.max(0, player.current));
+    status();
+  }
+}
+
+// The export dialog: a warning when the Max delay does not fit the buffer at that size (plan §6.4).
+function exportCheck(w, h) {
+  if (settings.mode !== 'timemap') return '';
+  const n = layerCount(store.usedBudget || defaultBudget(navigator.userAgent), gpuCaps.maxLayers, w, h);
+  const depth = settings.timemap.maxDelay;
+  return depth > n - 1 ? `The Max delay (${depth} frames) is more than the buffer at ${Math.min(w, h)}p (${n} frames). Choose a lower resolution, or a smaller Max delay.` : '';
 }
 
 function keys(e) {
@@ -400,13 +460,14 @@ function keys(e) {
   else if (k === 'i' || k === 'I') timeline.setIn();
   else if (k === 'o' || k === 'O') timeline.setOut();
   else if (k === 'm' || k === 'M') change('view', settings.view === 'mask' ? 'result' : 'mask');
+  else if ((k === 'e' || k === 'E') && (e.ctrlKey || e.metaKey)) exportDialog.open();
   else return;
   e.preventDefault();
 }
 
 async function start() {
   document.title = `neofx ${VERSION}`;
-  const p = await checkPlatform();
+  const p = (platform = await checkPlatform());
   window.neofx = { version: VERSION, platform: p };
   if (!p.ok) {
     document.body.dataset.state = 'unsupported';
@@ -418,7 +479,7 @@ async function start() {
   const forceMain = /[?&]gpu=main\b/.test(location.search);
   gpu = new GpuClient($('view'), GPU_WORKER, p.offscreen && !forceMain);
   try {
-    await gpu.ready;
+    gpuCaps = await gpu.ready;
   } catch (e) {
     showMessage(e.message);
     return;
@@ -476,7 +537,17 @@ async function start() {
   inspector.build(settings, { maxDelay: 999 });
   gpu.call({ cmd: 'settings', settings: clone(settings) });
   for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
-  Object.assign(window.neofx, { refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+    exportDialog = new ExportDialog($('exportDialog'), {
+    info: () => player.info,
+    file: () => currentFile,
+    range: () => (player.inPoint !== null || player.outPoint !== null ? player.range() : null),
+    hasAudio: () => !!(player.info && player.info.audio),
+    check: exportCheck,
+    run: exportVideo,
+    cancel: () => exporter && exporter.cancel(),
+  });
+  $('exportBtn').addEventListener('click', () => exportDialog.open());
+  Object.assign(window.neofx, { exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));
   $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));

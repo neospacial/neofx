@@ -175,6 +175,7 @@ async function open(file) {
     fps: tl.fps,
     durationUs: tl.durationUs,
     times: tl.frames.map((f) => f.us),
+    frameSamples: tl.frames.map((f) => f.sample),
     keyFrames: tl.frames.map((f, t) => (clean.includes(f.sample) ? t : -1)).filter((t) => t >= 0),
     audio: a ? { codec: a.codec, channels: a.channels, sampleRate: a.sampleRate, durationUs: a.durationUs } : null,
   });

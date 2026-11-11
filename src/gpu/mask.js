@@ -15,6 +15,7 @@ const BLUR_FRAG = "@GLSL:gpu/glsl/mapblur.frag";
 const BRUSH_FRAG = "@GLSL:gpu/glsl/brush.frag";
 const JFA_FRAG = "@GLSL:gpu/glsl/jfa.frag";
 const SHOW_FRAG = "@GLSL:gpu/glsl/maskshow.frag";
+const YUVCOPY_FRAG = "@GLSL:gpu/glsl/yuvcopy.frag";
 const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\n';
 const FIX_SIZE = 256; // the long side of the small copy for Fill holes / Keep largest
 const MATTE_SIZE = 1024; // the long side of the garbage matte
@@ -35,6 +36,7 @@ export class Mask {
     this.brush = program(gl, QUAD_VERT, `#version 300 es\n${BRUSH_FRAG}`);
     this.jfa = program(gl, QUAD_VERT, `#version 300 es\n${JFA_FRAG}`);
     this.show = program(gl, QUAD_VERT, `#version 300 es\n${SHOW_FRAG}`);
+    this.yuvcopy = program(gl, QUAD_VERT, `#version 300 es\n${YUVCOPY_FRAG}`);
     this.tex = null;
     this.key = '';
     this.version = 0; // clean plate, matte, import changes
@@ -70,7 +72,9 @@ export class Mask {
       this.tex.j1 = this.tex2(w, h, gl.RG32F, gl.NEAREST);
       this.tex.j2 = this.tex2(w, h, gl.RG32F, gl.NEAREST);
     }
-    for (const t of [this.plateY, this.plateC]) if (t) gl.deleteTexture(t);
+    // The clean plate is kept: scaled into the new size (the export reconfigures the engine).
+    const old = this.hasPlate ? [this.plateY, this.plateC] : null;
+    if (!old) for (const t of [this.plateY, this.plateC]) if (t) gl.deleteTexture(t);
     this.plateY = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.plateY);
     gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, w, h, 1);
@@ -80,6 +84,20 @@ export class Mask {
     gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG8, w / 2, h / 2, 1);
     texParams(gl, gl.TEXTURE_2D_ARRAY);
     this.hasPlate = false;
+    if (old) {
+      const p = this.yuvcopy;
+      gl.useProgram(p.prog);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.uniform1i(p.u.u_in, 0);
+      [[old[0], this.plateY, w, h], [old[1], this.plateC, w / 2, h / 2]].forEach(([src, dst, ww, hh]) => {
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, src);
+        this.e.target(dst, 0, ww, hh);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      });
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      for (const t of old) gl.deleteTexture(t);
+      this.hasPlate = true;
+    }
     const s = MATTE_SIZE / Math.max(w, h);
     const mw = Math.round(w * s), mh = Math.round(h * s);
     if (!this.matte || this.matteSize[0] !== mw || this.matteSize[1] !== mh) {

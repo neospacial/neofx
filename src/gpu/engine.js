@@ -3,7 +3,10 @@
 //
 // handle(msg) -> a reply object (or null). Messages:
 //   { cmd: 'configure', width, height, rotation, budget, failAlloc } -> { cmd: 'configured', n, budget, bytes }
-//   { cmd: 'upload', index, frame, show }  put the frame into the store; show: render it  -> { cmd: 'uploaded', index }
+//   { cmd: 'upload', index, frame, show, grab } put the frame into the store; show: render it; grab
+//                                          { timestamp, duration }: also a VideoFrame of the canvas (export)
+//                                                                                          -> { cmd: 'uploaded', index, frame? }
+//   { cmd: 'exporting', on }               the export runs (no preview GPU-time limit)
 //   { cmd: 'render', index }               render frame index (the view of the settings)    -> { cmd: 'rendered', index }
 //   { cmd: 'render', index, delay }        tests: the stored frame index - delay            -> { cmd: 'rendered', index }
 //   { cmd: 'settings', settings }          the effect settings; renders the last frame again -> { cmd: 'rendered' }
@@ -91,6 +94,11 @@ export class Engine {
     if (m.cmd === 'upload') {
       this.put(m.index, m.frame);
       if (m.show) this.render(m.index);
+      if (m.show && m.grab) {
+        // The canvas as a VideoFrame for the encoder, at once (the drawing buffer is not kept).
+        const frame = new VideoFrame(this.canvas, { timestamp: m.grab.timestamp, duration: m.grab.duration, alpha: 'discard' });
+        return { cmd: 'uploaded', index: m.index, frame };
+      }
       return { cmd: 'uploaded', index: m.index };
     }
     if (m.cmd === 'render') {
@@ -132,6 +140,10 @@ export class Engine {
     }
     if (m.cmd === 'maskImportClear') return this.rerender((this.mask.clearImport(), { cmd: 'import' }));
     if (m.cmd === 'pick') return this.pick(m);
+    if (m.cmd === 'exporting') {
+      this.exporting = !!m.on;
+      return { cmd: 'exporting', on: this.exporting };
+    }
     if (m.cmd === 'readMask') return this.readMask(m.index);
     if (m.cmd === 'mapImage') {
       const b = m.bitmap;
@@ -216,7 +228,7 @@ export class Engine {
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h), rows: slit.rows, edgeRows: this.edge.H || 0 };
+    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h), rows: slit.rows, edgeRows: this.edge.H || 0, plate: this.mask.hasPlate };
   }
 
   free() {

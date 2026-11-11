@@ -102,3 +102,17 @@ body[data-state="start"] #viewBar{display:none}
 .subhead{padding:8px 12px 2px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
 .setting.color{grid-template-columns:96px auto 1fr}
 .setting.color input[type=color]{width:40px;height:28px;padding:0;border:1px solid var(--line);border-radius:4px;background:none}
+#exportDialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:0;width:min(440px,calc(100vw - 32px))}
+#exportDialog::backdrop{background:rgba(0,0,0,.6)}
+.exportForm{display:grid;gap:8px;padding:16px}
+.exportForm h2{margin:0 0 4px;font-size:16px}
+.exportRow{display:grid;grid-template-columns:140px 1fr;align-items:center;gap:8px;font-size:13px;color:var(--dim)}
+.exportRow select,.exportRow input{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:6px;min-height:32px;padding:0 6px;min-width:0}
+.exportWarn{color:var(--warn);font-size:12px;margin:0;min-height:0}
+.exportWarn:empty{display:none}
+.exportProgress .track{height:6px;background:var(--bg);border-radius:3px;overflow:hidden}
+.exportProgress .bar{height:100%;width:0;background:var(--accent)}
+.exportText{font-size:12px;color:var(--dim);margin:6px 0 0}
+.exportButtons{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
+.exportButtons .primary,.exportButtons a.button{background:var(--accent);color:#000}
+a.button{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;border-radius:6px;text-decoration:none;font-size:14px}

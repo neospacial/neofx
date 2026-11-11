@@ -118,7 +118,8 @@ export class Edge {
   // The Max age in use: the setting, the history length, and the GPU time limit.
   maxAge() {
     const sl = this.e.settings.slitscan;
-    return Math.max(1, Math.min(sl.maxAgeEdge, this.H, this.stats.limit));
+    // The GPU-time limit is for the preview; the export uses the setting (plan §8.4).
+    return Math.max(1, Math.min(sl.maxAgeEdge, this.H, this.e.exporting ? Infinity : this.stats.limit));
   }
 
   uploadFrames() {
@@ -211,6 +212,12 @@ export class Edge {
       gl.depthFunc(gl.LESS);
       const t0 = performance.now();
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.D * EDGE_K * M);
+      if (this.e.exporting) {
+        gl.disable(gl.DEPTH_TEST);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return; // no time measure (no gl.finish) in the export
+      }
       gl.finish();
       const ms = performance.now() - t0;
       gl.disable(gl.DEPTH_TEST);

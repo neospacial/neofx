@@ -7,7 +7,7 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **phase 9 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, the **compositor**, **Mode 2 — Slit Scan** with the line and the **subject-edge** sources, and the **cutout** (Overlay and **Scan object**). The export comes in the next phase.
+> Status: v0.1.0, **phase 10 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer, frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, the **compositor**, **Mode 2 — Slit Scan** (line and subject-edge sources), the **cutout** (Overlay, Scan object), and the **export** (MP4, H.264, the original audio copied). The UI finish (presets, undo, curve editor, keyboard) and the device tests come in the next phases.
 
 ## How to use
 
@@ -20,7 +20,7 @@ The status bar shows the frame store: for example "Buffer: 240 frames at 540p (�
 
 Each seek is frame-exact: the app decodes from the last clean keyframe (IDR) to the frame. Playback uses the file's own frame times, so variable frame rate files play at their true speed. When the device is too slow, the preview drops frames and the status bar shows "Preview N fps" in amber.
 
-Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out; M the Mask view.
+Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out; M the Mask view; Ctrl/Cmd+E export.
 
 ## Mode 1 — Time Map
 
@@ -101,15 +101,33 @@ The age of a pixel is its delay in frames (Mode 1) or A(s) (Mode 2). Blend mode,
 
 The view switch above the preview shows **Result**, **Original** (the source frame), or **Map** (the map in grey). Double-click a setting label to reset it.
 
+## Export
+
+Touch **Export** (or Ctrl/Cmd+E). The export renders each frame at full quality (not the preview resolution) and encodes it with the H.264 encoder of the browser (WebCodecs). The frame times are the times of the source, so a variable frame rate and the audio sync stay. The audio is copied without a new encode.
+
+| Setting | Values | Default |
+|---|---|---|
+| Resolution | Source, 2160, 1440, 1080, 720, 540 (short side; never above the source) | Source |
+| Quality | Low, Medium, High (≈ 0.12 bit for each pixel for each frame), Very high, or a bitrate (Mbit/s) | High |
+| Keyframe interval | 1 … 10 s | 2 s |
+| Range | Full, or In – Out (the markers of the timeline) | Full |
+| Audio | Copy original / None | Copy original (when the file has audio) |
+| Encoder | Prefer hardware / Prefer software | Prefer hardware |
+| File name | text | `<source name>-neofx.mp4` |
+
+The app probes the encoder (H.264 High, then Main, then Baseline, at the level for the size and frame rate). When the size is not supported, it uses a lower one. Mode 1: the frame store is made again at the export resolution; when the Max delay does not fit in it, the dialog tells you to choose a lower resolution. Mode 2: the analysis pass runs again at the export resolution. The progress shows frames, fps, and the time left; **Cancel** stops the export and frees the memory. A file larger than 1 GB (or 256 MB on a device with little memory) is written to the browser storage (Origin Private File System) before the download. Where the browser can share files (for example on a phone), a **Share** button shows next to **Download**. After the export, the preview is made again.
+
 ## Browser support
 
 Main targets: desktop Chrome and Chrome on Android. Other browsers with WebCodecs and WebGL2 must also work. At start, the app checks WebGL2, float render targets, `VideoDecoder`, `VideoEncoder`, and `OffscreenCanvas` with WebGL2 (plan §4). Without `OffscreenCanvas` WebGL2 in a worker, the GPU work runs on the main thread (open the page with `?gpu=main` to test this).
 
-Input: MP4 and MOV only (not fragmented). Output: MP4, H.264.
+Input: MP4 and MOV only (not fragmented). Output: MP4, H.264 (WebCodecs `VideoEncoder`; without it, the preview works and Export is off), with the audio of the source (AAC or Opus) copied.
 
 ## Known limits
 
 - Fragmented MP4 files are not supported.
+- An In – Out export starts the audio at the first whole audio packet at or after In (up to one packet, about 20 ms, later than the video).
+- HDR input (for example HLG from a phone) is shown and exported as SDR with the colour conversion of the browser.
 - Audio pass-through supports AAC (`mp4a`) and Opus.
 - Open-GOP files (keyframes that are not IDR) seek more slowly: Chrome's decoder must start at an IDR frame.
 - The slit history holds at most 4096 frames (and the GPU texture size limit). In a longer video, a seek far back shows black trails until the frames play again.
@@ -148,12 +166,12 @@ The last command writes the test videos (plan §13.1) to `samples/`. The tests m
 
 | Folder | Content |
 |---|---|
-| `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `analysis.js` (Mode 2 analysis pass), `preview.js`, `ui/` (timeline, inspector, widgets, line handles, eyedropper and matte brush) |
+| `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `analysis.js` (Mode 2 analysis pass), `export.js` (the export), `preview.js`, `ui/` (timeline, inspector, widgets, line handles, eyedropper and matte brush, export dialog) |
 | `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `slit.js` (slit history, analysis rows, Mode 2 render), `mask.js` (cutout mask pipeline, clean plate, matte, subject layer), `edge.js` (subject-edge emitters and trail), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
 | `src/analysis/` | `cleanplate.js` (median), `regions.js` (fill holes, keep largest), `analysis-worker.js` |
 | `src/modes/` | `slit.js` (Mode 2: rate types, S and A, line geometry) |
 | `src/maps/` | `builtin.js` (the map list and parameters), `curve.js` (monotone curves), `mapsource.js` (image and video maps) |
-| `src/io/` | `demux.js` (MP4/MOV reader), `mp4.js` (MP4 muxer), `timeline.js` (frame order, seek plan), `decode-worker.js` |
+| `src/io/` | `demux.js` (MP4/MOV reader), `mp4.js` (MP4 muxer), `timeline.js` (frame order, seek plan), `decode-worker.js`, `encode-worker.js`, `encoder-config.js` (H.264 level, codecs, export sizes) |
 | `tools/` | `build.mjs`, `make-fixtures.mjs` |
 | `tests/` | Node tests, FFmpeg checks, Playwright tests |
 

@@ -45,13 +45,13 @@ export async function installReader(page) {
   }, readCode.toString());
 }
 
-export async function launch(viewport = { width: 1280, height: 800 }, query = '', original = true) {
+export async function launch(viewport = { width: 1280, height: 800 }, query = '', original = true, base) {
   const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const page = await browser.newPage({ viewport });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-  await page.goto(pathToFileURL(path.join(root, 'dist', PAGES[0][1])).href + query);
+  await page.goto((base ? base + PAGES[0][1] : pathToFileURL(path.join(root, 'dist', PAGES[0][1])).href) + query);
   await page.waitForFunction(() => window.neofx && window.neofx.player);
   await installReader(page);
   // These tests check the decode: the Original view (no effect).
