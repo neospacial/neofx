@@ -48,6 +48,19 @@ body:not([data-state="start"]) #startScreen{display:none}
   #inspector{border-left:0;border-top:1px solid var(--line);max-height:45vh}
   button{min-height:44px}
 }
+#view{display:block;image-rendering:auto}
+#transport{display:grid;gap:6px;padding:6px 12px 10px}
+#transport .controls{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+#transport .controls button{min-width:40px}
+#transport .controls button.on{background:var(--accent);color:#000}
+#transport .time,#transport .frame{font-variant-numeric:tabular-nums;color:var(--dim);font-size:13px}
+#transport .frame{min-width:64px}
+#transport .res{color:var(--dim);font-size:12px}
+#transport select{font:inherit;color:var(--text);background:var(--line);border:0;border-radius:6px;min-height:32px}
+#transport .strip{display:block;width:100%;height:44px;border-radius:4px;touch-action:none;cursor:pointer}
+body[data-state="start"] #transport .controls,body[data-state="start"] #transport .strip{opacity:.4;pointer-events:none}
+#status.warn{color:var(--warn)}
+#progress{position:absolute;left:0;top:0;height:2px;background:var(--accent);width:0}
 </style>
 </head>
 <body data-state="start">
@@ -72,16 +85,385 @@ body:not([data-state="start"]) #startScreen{display:none}
           <div><b>Slit Scan</b> — a 1 px line repeats in one direction, and gets older with distance.</div>
         </div>
       </div>
+      <canvas id="view" hidden></canvas>
       <div id="message" hidden></div>
     </section>
     <aside id="inspector" aria-label="Inspector"></aside>
   </main>
 
-  <footer id="transport"></footer>
+  <footer id="transport">
+    <div class="controls">
+      <button type="button" data-act="first" aria-label="Go to start">⏮</button>
+      <button type="button" data-act="prev" aria-label="Previous frame">◀|</button>
+      <button type="button" data-act="play" aria-label="Play">▶</button>
+      <button type="button" data-act="next" aria-label="Next frame">|▶</button>
+      <button type="button" data-act="last" aria-label="Go to end">⏭</button>
+      <span class="time">00:00.00 / 00:00.00</span>
+      <span class="frame">f –</span>
+      <span class="spacer"></span>
+      <button type="button" data-act="in" aria-label="Set In point">In</button>
+      <button type="button" data-act="out" aria-label="Set Out point">Out</button>
+      <button type="button" data-act="loop" aria-label="Loop">Loop</button>
+      <label class="res">Preview <select id="resSelect">
+        <option value="360">360p</option><option value="540" selected>540p</option><option value="720">720p</option><option value="1080">1080p</option><option value="0">Source</option>
+      </select></label>
+    </div>
+    <canvas class="strip" aria-label="Timeline"></canvas>
+  </footer>
   <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
 </div>
 <script>
 'use strict';
+// ---- io/demux.js
+const { demuxMp4, turnedCrop } = (() => {
+// MP4 / MOV reader (plan §3, §6.1). From neomosh src/mux/demux.js, with the audio track added.
+// It gives the video decoder configuration and each sample (offset, size, display time, sync flag),
+// so a VideoDecoder can decode every frame of the file, and the audio track for the pass-through
+// copy into the export (D16). Not fragmented. It returns null for other files.
+
+const MAX_MOOV = 64 * 1048576;
+
+const str4 = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+const hex2 = (v) => v.toString(16).padStart(2, '0');
+
+// The boxes in b[from..to): [{ type, head (box start), start (content), end }].
+function boxes(b, from, to) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const out = [];
+  let o = from;
+  while (o + 8 <= to) {
+    let size = dv.getUint32(o);
+    const type = str4(b, o + 4);
+    let head = 8;
+    if (size === 1) {
+      size = Number(dv.getBigUint64(o + 8));
+      head = 16;
+    } else if (size === 0) size = to - o;
+    if (size < head || o + size > to) break;
+    out.push({ type, head: o, start: o + head, end: o + size });
+    o += size;
+  }
+  return out;
+}
+
+const child = (b, box, type) => boxes(b, box.start, box.end).find((x) => x.type === type);
+const path = (b, box, ...types) => types.reduce((x, t) => (x ? child(b, x, t) : null), box);
+
+// The top-level boxes of the file, read from their headers only.
+async function topBoxes(blob) {
+  const out = [];
+  let o = 0;
+  while (o + 8 <= blob.size) {
+    const h = new Uint8Array(await blob.slice(o, Math.min(blob.size, o + 16)).arrayBuffer());
+    const dv = new DataView(h.buffer);
+    let size = dv.getUint32(0);
+    let head = 8;
+    if (size === 1 && h.length >= 16) {
+      size = Number(dv.getBigUint64(8));
+      head = 16;
+    } else if (size === 0) size = blob.size - o;
+    if (size < head) break;
+    out.push({ type: str4(h, 4), start: o + head, end: Math.min(blob.size, o + size) });
+    o += size;
+  }
+  return out;
+}
+
+// The codec string and the description for the VideoDecoder, from the sample entry.
+function videoCodecOf(b, entry) {
+  const t = entry.type;
+  const kids = boxes(b, entry.start + 78, entry.end); // after the VisualSampleEntry fields
+  const k = (type) => kids.find((x) => x.type === type);
+  if (t === 'avc1' || t === 'avc3') {
+    const c = k('avcC');
+    if (!c) return null;
+    const d = b.slice(c.start, c.end);
+    return { codec: `avc1.${hex2(d[1])}${hex2(d[2])}${hex2(d[3])}`, description: d };
+  }
+  if (t === 'hvc1' || t === 'hev1') {
+    const c = k('hvcC');
+    if (!c) return null;
+    const d = b.slice(c.start, c.end);
+    const space = ['', 'A', 'B', 'C'][d[1] >> 6];
+    const tier = (d[1] >> 5) & 1 ? 'H' : 'L';
+    let compat = ((d[2] << 24) | (d[3] << 16) | (d[4] << 8) | d[5]) >>> 0;
+    let rev = 0;
+    for (let i = 0; i < 32; i++, compat >>>= 1) rev = ((rev << 1) | (compat & 1)) >>> 0;
+    const cons = Array.from(d.subarray(6, 12));
+    while (cons.length && cons[cons.length - 1] === 0) cons.pop();
+    const parts = [`${t}.${space}${d[1] & 31}`, rev.toString(16), `${tier}${d[12]}`, ...cons.map((x) => x.toString(16).toUpperCase())];
+    return { codec: parts.join('.'), description: d };
+  }
+  if (t === 'vp09') {
+    const c = k('vpcC');
+    if (!c) return null;
+    const d = b.subarray(c.start + 4, c.end); // after version and flags
+    return { codec: `vp09.${String(d[0]).padStart(2, '0')}.${String(d[1]).padStart(2, '0')}.${String(d[2] >> 4).padStart(2, '0')}`, description: null };
+  }
+  if (t === 'av01') {
+    const c = k('av1C');
+    if (!c) return null;
+    const d = b.slice(c.start, c.end);
+    const profile = d[1] >> 5, level = d[1] & 31, tier = d[2] >> 7 ? 'H' : 'M';
+    const depth = (d[2] >> 6) & 1 ? ((d[2] >> 5) & 1 ? 12 : 10) : 8;
+    return { codec: `av01.${profile}.${String(level).padStart(2, '0')}${tier}.${String(depth).padStart(2, '0')}`, description: d };
+  }
+  return null;
+}
+
+// MPEG-4 descriptor (ISO/IEC 14496-1): tag, size (1-4 bytes of 7 bits), content start.
+function descriptor(b, o, end) {
+  if (o + 2 > end) return null;
+  const tag = b[o++];
+  let size = 0;
+  for (let i = 0; i < 4 && o < end; i++) {
+    const v = b[o++];
+    size = (size << 7) | (v & 127);
+    if (!(v & 128)) break;
+  }
+  return { tag, start: o, end: Math.min(end, o + size) };
+}
+
+// esds -> { oti (objectTypeIndication), asc (AudioSpecificConfig bytes or null) }.
+function parseEsds(b, esds) {
+  const es = descriptor(b, esds.start + 4, esds.end); // after version and flags
+  if (!es || es.tag !== 3) return null;
+  const flags = b[es.start + 2];
+  let o = es.start + 3;
+  if (flags & 0x80) o += 2; // dependsOn_ES_ID
+  if (flags & 0x40) o += 1 + b[o]; // URL
+  if (flags & 0x20) o += 2; // OCR_ES_Id
+  const dc = descriptor(b, o, es.end);
+  if (!dc || dc.tag !== 4) return null;
+  const oti = b[dc.start];
+  const dsi = descriptor(b, dc.start + 13, dc.end);
+  return { oti, asc: dsi && dsi.tag === 5 ? b.slice(dsi.start, dsi.end) : null };
+}
+
+// The audio sample entry: { type, codec, channels, sampleSize, sampleRate, config, description }.
+// config: the raw codec box (esds or dOps, with its header), for the muxer to copy (plan §3).
+function audioCodecOf(b, entry) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const t = entry.type;
+  const version = dv.getUint16(entry.start + 8); // QuickTime sound description version (MOV)
+  const channels = dv.getUint16(entry.start + 16);
+  const sampleSize = dv.getUint16(entry.start + 18);
+  let sampleRate = dv.getUint32(entry.start + 24) >>> 16;
+  let kidsFrom = entry.start + 28;
+  if (version === 1) kidsFrom += 16;
+  else if (version === 2) {
+    kidsFrom += 36;
+    sampleRate = Math.round(dv.getFloat64(entry.start + 32));
+  }
+  let kids = boxes(b, kidsFrom, entry.end);
+  const wave = kids.find((x) => x.type === 'wave'); // MOV: the codec box can be in a 'wave' box
+  if (wave) kids = kids.concat(boxes(b, wave.start, wave.end));
+  const k = (type) => kids.find((x) => x.type === type);
+  if (t === 'mp4a') {
+    const esds = k('esds');
+    if (!esds) return null;
+    const e = parseEsds(b, esds);
+    if (!e) return null;
+    let codec = `mp4a.${hex2(e.oti)}`;
+    if (e.oti === 0x40 && e.asc && e.asc.length) {
+      let aot = e.asc[0] >> 3;
+      if (aot === 31 && e.asc.length > 1) aot = 32 + (((e.asc[0] & 7) << 3) | (e.asc[1] >> 5));
+      codec += `.${aot}`;
+    }
+    return { type: t, codec, channels, sampleSize, sampleRate, config: b.slice(esds.head, esds.end), description: e.asc };
+  }
+  if (t === 'Opus') {
+    const dops = k('dOps');
+    if (!dops) return null;
+    return { type: t, codec: 'opus', channels, sampleSize, sampleRate: 48000, config: b.slice(dops.head, dops.end), description: null };
+  }
+  return null;
+}
+
+// tkhd matrix -> 0, 90, 180, or 270 (clockwise, the way a player turns the picture).
+function rotationOf(b, tkhd) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const m = tkhd.start + (b[tkhd.start] === 1 ? 52 : 40);
+  const a = dv.getInt32(m), bb = dv.getInt32(m + 4);
+  if (a === 0 && bb > 0) return 90;
+  if (a < 0 && bb === 0) return 180;
+  if (a === 0 && bb < 0) return 270;
+  return 0;
+}
+
+// The sample table of a track: { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift }
+// or null. shift: the media time where the presentation starts (edit list).
+function sampleTable(b, trak) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const mdhd = path(b, trak, 'mdia', 'mdhd');
+  const stbl = path(b, trak, 'mdia', 'minf', 'stbl');
+  if (!mdhd || !stbl) return null;
+  const timescale = dv.getUint32(mdhd.start + (b[mdhd.start] === 1 ? 20 : 12));
+  const stsd = child(b, stbl, 'stsd');
+  const entry = stsd && boxes(b, stsd.start + 8, stsd.end)[0];
+  if (!entry || !timescale) return null;
+
+  // Sample sizes.
+  const stsz = child(b, stbl, 'stsz');
+  if (!stsz) return null;
+  const fixed = dv.getUint32(stsz.start + 4), count = dv.getUint32(stsz.start + 8);
+  const sizes = new Array(count);
+  for (let i = 0; i < count; i++) sizes[i] = fixed || dv.getUint32(stsz.start + 12 + 4 * i);
+  // Chunk offsets and samples per chunk -> sample offsets.
+  const stco = child(b, stbl, 'stco'), co64 = child(b, stbl, 'co64'), stsc = child(b, stbl, 'stsc');
+  if ((!stco && !co64) || !stsc) return null;
+  const co = stco || co64;
+  const nChunks = dv.getUint32(co.start + 4);
+  const chunkOff = (i) => (stco ? dv.getUint32(co.start + 8 + 4 * i) : Number(dv.getBigUint64(co.start + 8 + 8 * i)));
+  const scN = dv.getUint32(stsc.start + 4);
+  const offsets = new Array(count);
+  let s = 0;
+  for (let e = 0; e < scN && s < count; e++) {
+    const first = dv.getUint32(stsc.start + 8 + 12 * e) - 1;
+    const per = dv.getUint32(stsc.start + 12 + 12 * e);
+    const last = e + 1 < scN ? dv.getUint32(stsc.start + 8 + 12 * (e + 1)) - 1 : nChunks;
+    for (let c = first; c < last && s < count; c++) {
+      let o = chunkOff(c);
+      for (let j = 0; j < per && s < count; j++, s++) {
+        offsets[s] = o;
+        o += sizes[s];
+      }
+    }
+  }
+  if (s < count) return null;
+  // Decode times and durations, composition offsets, the edit list start.
+  const stts = child(b, stbl, 'stts'), ctts = child(b, stbl, 'ctts'), stss = child(b, stbl, 'stss');
+  if (!stts) return null;
+  const dts = new Array(count);
+  const durations = new Array(count);
+  let t = 0, k = 0, d = 0;
+  for (let e = 0, n = dv.getUint32(stts.start + 4); e < n; e++) {
+    const c = dv.getUint32(stts.start + 8 + 8 * e);
+    d = dv.getUint32(stts.start + 12 + 8 * e);
+    for (let j = 0; j < c && k < count; j++, k++, t += d) {
+      dts[k] = t;
+      durations[k] = d;
+    }
+  }
+  for (; k < count; k++, t += d) {
+    dts[k] = t;
+    durations[k] = d;
+  }
+  const cto = new Array(count).fill(0);
+  if (ctts) {
+    k = 0;
+    for (let e = 0, n = dv.getUint32(ctts.start + 4); e < n; e++) {
+      const c = dv.getUint32(ctts.start + 8 + 8 * e), o = dv.getInt32(ctts.start + 12 + 8 * e);
+      for (let j = 0; j < c && k < count; j++, k++) cto[k] = o;
+    }
+  }
+  let shift = 0;
+  const elst = path(b, trak, 'edts', 'elst');
+  if (elst) {
+    const v1 = b[elst.start] === 1;
+    const n = dv.getUint32(elst.start + 4);
+    for (let e = 0; e < n; e++) {
+      const o = elst.start + 8 + e * (v1 ? 20 : 12);
+      const mt = v1 ? Number(dv.getBigInt64(o + 8)) : dv.getInt32(o + 4);
+      if (mt >= 0) {
+        shift = mt;
+        break;
+      }
+    }
+  }
+  const sync = stss ? new Set(Array.from({ length: dv.getUint32(stss.start + 4) }, (_, i) => dv.getUint32(stss.start + 8 + 4 * i) - 1)) : null;
+  return { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift, count };
+}
+
+const handlerOf = (b, trak) => {
+  const hdlr = path(b, trak, 'mdia', 'hdlr');
+  return hdlr ? str4(b, hdlr.start + 8) : '';
+};
+
+// blob: the file. Returns null, or:
+// { codec, description, codedWidth, codedHeight, rotation, timescale, mediaTime, samples, durationUs, audio }
+// samples (decode order): [{ offset, size, us (display time, microseconds), key, dts, duration, cto }].
+// dts, duration, cto: in timescale units. mediaTime: the edit list start.
+// audio: null, or { type, codec, channels, sampleSize, sampleRate, config, description, timescale,
+//   mediaTime (edit list start, in timescale units), samples: [{ offset, size, dts, duration, us }],
+//   durationUs }. us: the presentation time (dts - mediaTime) in microseconds.
+async function demuxMp4(blob) {
+  let tops;
+  try {
+    tops = await topBoxes(blob);
+  } catch {
+    return null;
+  }
+  const moovTop = tops.find((x) => x.type === 'moov');
+  if (!moovTop || moovTop.end - moovTop.start > MAX_MOOV) return null;
+  if (tops.some((x) => x.type === 'moof')) return null; // fragmented: not supported
+  const b = new Uint8Array(await blob.slice(moovTop.start, moovTop.end).arrayBuffer());
+  const dv = new DataView(b.buffer);
+  const traks = boxes(b, 0, b.length).filter((x) => x.type === 'trak');
+
+  let video = null;
+  for (const trak of traks) {
+    if (handlerOf(b, trak) !== 'vide') continue;
+    const tkhd = child(b, trak, 'tkhd');
+    const st = tkhd && sampleTable(b, trak);
+    if (!st) continue;
+    const { entry, count, timescale } = st;
+    const codec = videoCodecOf(b, entry);
+    if (!codec) return null;
+    const codedWidth = dv.getUint16(entry.start + 24), codedHeight = dv.getUint16(entry.start + 26);
+    const samples = new Array(count);
+    let maxUs = 0;
+    for (let i = 0; i < count; i++) {
+      const us = Math.round(((st.dts[i] + st.cto[i] - st.shift) * 1e6) / timescale);
+      samples[i] = { offset: st.offsets[i], size: st.sizes[i], us, key: st.sync ? st.sync.has(i) : true, dts: st.dts[i], duration: st.durations[i], cto: st.cto[i] };
+      maxUs = Math.max(maxUs, us);
+    }
+    if (!count || !samples[0].key) return null;
+    video = { ...codec, codedWidth, codedHeight, rotation: rotationOf(b, tkhd), timescale, mediaTime: st.shift, samples, durationUs: maxUs };
+    break;
+  }
+  if (!video) return null;
+
+  let audio = null;
+  for (const trak of traks) {
+    if (handlerOf(b, trak) !== 'soun') continue;
+    const st = sampleTable(b, trak);
+    const a = st && st.count && audioCodecOf(b, st.entry);
+    if (!a) continue;
+    const ts = st.timescale;
+    const samples = new Array(st.count);
+    for (let i = 0; i < st.count; i++) {
+      samples[i] = { offset: st.offsets[i], size: st.sizes[i], dts: st.dts[i], duration: st.durations[i], us: Math.round(((st.dts[i] - st.shift) * 1e6) / ts) };
+    }
+    const end = st.dts[st.count - 1] + st.durations[st.count - 1] - st.shift;
+    audio = { ...a, timescale: ts, mediaTime: st.shift, samples, durationUs: Math.round((end * 1e6) / ts) };
+    break;
+  }
+  video.audio = audio;
+  return video;
+}
+
+// The source rectangle (frame coordinates) and the drawing transform for a crop in display
+// coordinates of a frame that is shown turned by 'rotation' degrees (clockwise). fw, fh: the frame
+// size (not turned). c: { sx, sy, sw, sh } in display coordinates. w, h: the output size.
+// Returns { sx, sy, sw, sh, m: [a, b, c, d, e, f], dw, dh } for setTransform(...m) and drawImage(frame,
+// sx, sy, sw, sh, 0, 0, dw, dh).
+function turnedCrop(rotation, fw, fh, c, w, h) {
+  switch (rotation) {
+    case 90:
+      return { sx: c.sy, sy: fh - c.sx - c.sw, sw: c.sh, sh: c.sw, m: [0, 1, -1, 0, w, 0], dw: h, dh: w };
+    case 180:
+      return { sx: fw - c.sx - c.sw, sy: fh - c.sy - c.sh, sw: c.sw, sh: c.sh, m: [-1, 0, 0, -1, w, h], dw: w, dh: h };
+    case 270:
+      return { sx: fw - c.sy - c.sh, sy: c.sx, sw: c.sh, sh: c.sw, m: [0, -1, 1, 0, 0, h], dw: h, dh: w };
+    default:
+      return { sx: c.sx, sy: c.sy, sw: c.sw, sh: c.sh, m: [1, 0, 0, 1, 0, 0], dw: w, dh: h };
+  }
+}
+
+return { demuxMp4, turnedCrop };
+})();
+
 // ---- app/platform.js
 const { checkPlatform } = (() => {
 // Platform checks at startup (plan §4). Each check gives { ok, fatal, message }.
@@ -128,28 +510,520 @@ async function checkPlatform() {
 return { checkPlatform };
 })();
 
+// ---- app/player.js
+const { makeWorker, Player } = (() => {
+// The player (plan §6.2, §12.8): one decode worker for the preview, one for the timeline thumbnails.
+// It shows frame-exact pictures for seeks, and plays at the file's own frame times (VFR included).
+// When the preview cannot hold the speed, it drops frames (in playback only).
+
+function makeWorker(src) {
+  const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+  const wk = new Worker(url);
+  URL.revokeObjectURL(url);
+  return wk;
+}
+
+// opts: { present(index, frame) (draw it; the player closes it after), onState(player), onThumb(i, index, bitmap) }.
+class Player {
+  constructor(workerSrc, opts) {
+    this.src = workerSrc;
+    this.opts = opts;
+    this.wk = null;
+    this.thumbWk = null;
+    this.info = null;
+    this.job = 0;
+    this.current = -1; // the frame index on the preview
+    this.playing = false;
+    this.loop = false;
+    this.inPoint = null;
+    this.outPoint = null;
+    this.busy = false; // a seek runs
+    this.pendingSeek = null;
+    this.queue = []; // playback: decoded frames, in display order
+    this.raf = 0;
+    this.clock = null; // { wall, us }
+    this.stats = { shown: 0, dropped: 0, t0: 0, fps: 0 };
+    this.log = []; // the presented frame indices of the last playback (for tests)
+  }
+
+  get frameCount() {
+    return this.info ? this.info.times.length : 0;
+  }
+
+  // Open a file. Resolves with the info, or rejects with the message for the user.
+  open(file) {
+    this.close();
+    this.wk = makeWorker(this.src);
+    return new Promise((resolve, reject) => {
+      this.wk.onmessage = (e) => {
+        const m = e.data;
+        if (m.cmd === 'info') {
+          this.info = m;
+          this.wk.onmessage = (ev) => this.onMessage(ev.data);
+          this.startThumbs(file);
+          resolve(m);
+        } else if (m.cmd === 'error') {
+          this.close();
+          reject(new Error(m.message));
+        }
+      };
+      this.wk.onerror = (e) => reject(new Error(e.message || 'Decode worker failed.'));
+      this.wk.postMessage({ cmd: 'open', file });
+    });
+  }
+
+  close() {
+    this.pause();
+    for (const w of [this.wk, this.thumbWk]) if (w) w.terminate();
+    this.wk = this.thumbWk = null;
+    this.info = null;
+    this.current = -1;
+    this.busy = false;
+    this.pendingSeek = null;
+  }
+
+  startThumbs(file) {
+    this.thumbWk = makeWorker(this.src);
+    this.thumbWk.onmessage = (e) => {
+      const m = e.data;
+      if (m.cmd === 'info') this.thumbWk.postMessage({ cmd: 'thumbs', job: 1, count: 50, width: 160 });
+      else if (m.cmd === 'thumb' && this.opts.onThumb) this.opts.onThumb(m.i, m.index, m.bitmap);
+      else if (m.cmd === 'done' || m.cmd === 'error') {
+        this.thumbWk.terminate();
+        this.thumbWk = null;
+      }
+    };
+    this.thumbWk.postMessage({ cmd: 'open', file });
+  }
+
+  range() {
+    const n = this.frameCount;
+    const a = this.inPoint ?? 0, b = this.outPoint ?? n - 1;
+    return [Math.min(a, b), Math.max(a, b)];
+  }
+
+  state() {
+    if (this.opts.onState) this.opts.onState(this);
+  }
+
+  // Show frame t (frame-exact). Seeks that come while one runs are joined: only the last one runs.
+  seek(t) {
+    if (!this.info) return Promise.resolve();
+    t = Math.max(0, Math.min(this.frameCount - 1, Math.round(t)));
+    if (this.playing) this.pause();
+    return new Promise((resolve) => {
+      if (this.pendingSeek) this.pendingSeek.resolve();
+      this.pendingSeek = { t, resolve };
+      if (!this.busy) this.nextSeek();
+    });
+  }
+
+  nextSeek() {
+    const p = this.pendingSeek;
+    if (!p) return;
+    this.pendingSeek = null;
+    this.busy = true;
+    this.seekDone = p.resolve;
+    this.target = p.t;
+    this.wk.postMessage({ cmd: 'seek', job: ++this.job, t: p.t, depth: 0 });
+  }
+
+  step(n) {
+    const base = this.pendingSeek ? this.pendingSeek.t : this.busy ? this.target : this.current;
+    return this.seek(Math.max(0, base) + n);
+  }
+
+  toggle() {
+    if (this.playing) this.pause();
+    else this.play();
+  }
+
+  play() {
+    if (!this.info || this.playing) return;
+    const [a, b] = this.range();
+    let from = this.current + 1;
+    if (from > b || from < a) from = a;
+    this.playing = true;
+    this.pendingSeek = null;
+    this.busy = false;
+    this.queue = [];
+    this.clock = null;
+    this.log = [];
+    this.stats = { shown: 0, dropped: 0, t0: performance.now(), fps: 0 };
+    this.playTo = b;
+    this.wk.postMessage({ cmd: 'play', job: ++this.job, from, to: b });
+    this.raf = requestAnimationFrame((now) => this.tick(now));
+    this.state();
+  }
+
+  pause() {
+    if (!this.playing) return;
+    this.playing = false;
+    cancelAnimationFrame(this.raf);
+    if (this.wk) this.wk.postMessage({ cmd: 'stop' });
+    this.job++;
+    for (const q of this.queue) this.release(q.frame);
+    this.queue = [];
+    this.state();
+  }
+
+  release(frame) {
+    frame.close();
+    if (this.wk) this.wk.postMessage({ cmd: 'ack' });
+  }
+
+  show(index, frame) {
+    this.opts.present(index, frame);
+    this.release(frame);
+    this.current = index;
+  }
+
+  onMessage(m) {
+    if (m.cmd === 'frame') {
+      if (m.job !== this.job) return this.release(m.frame);
+      if (this.playing) {
+        this.queue.push({ index: m.index, frame: m.frame });
+        return;
+      }
+      if (m.warm) return this.release(m.frame); // the frame store uses these (phase 3)
+      this.show(m.index, m.frame);
+      this.state();
+    } else if (m.cmd === 'done') {
+      if (m.job !== this.job) return;
+      if (this.playing) return;
+      this.busy = false;
+      if (this.seekDone) this.seekDone();
+      this.seekDone = null;
+      this.nextSeek();
+      this.state();
+    } else if (m.cmd === 'error') {
+      if (m.job !== undefined && m.job !== this.job) return;
+      if (this.opts.onError) this.opts.onError(m.message);
+      if (this.playing) return this.pause();
+      this.busy = false;
+      if (this.seekDone) this.seekDone();
+      this.seekDone = null;
+      this.nextSeek();
+      this.state();
+    }
+  }
+
+  // Playback clock: the file time moves with the wall clock from the first shown frame. The newest
+  // frame that is due is shown; older due frames are dropped. The worker keeps at most 4 frames here.
+  tick(now) {
+    if (!this.playing) return;
+    const T = this.info.times;
+    if (this.queue.length) {
+      const head = this.queue[0];
+      if (!this.clock) this.clock = { wall: now, us: T[head.index] };
+      const fileUs = this.clock.us + (now - this.clock.wall) * 1000;
+      let k = -1;
+      for (let i = 0; i < this.queue.length && T[this.queue[i].index] <= fileUs + 4000; i++) k = i;
+      if (k >= 0) {
+        for (let i = 0; i < k; i++) {
+          this.stats.dropped++;
+          this.release(this.queue[i].frame);
+        }
+        const q = this.queue[k];
+        this.queue.splice(0, k + 1);
+        this.show(q.index, q.frame);
+        this.log.push(q.index);
+        this.stats.shown++;
+        const sec = (now - this.stats.t0) / 1000;
+        if (sec > 0.5) this.stats.fps = this.stats.shown / sec;
+        this.state();
+      }
+    }
+    if (this.current >= this.playTo && !this.queue.length) {
+      if (this.loop) {
+        this.playing = false;
+        this.current = -1;
+        this.play();
+        return;
+      }
+      this.pause();
+      return;
+    }
+    this.raf = requestAnimationFrame((n) => this.tick(n));
+  }
+}
+
+return { makeWorker, Player };
+})();
+
+// ---- app/preview.js
+const { WORKING_SIZES, workingSize, Preview } = (() => {
+// The preview canvas (plan §12.1, D19), Original view. The picture is turned as the file says (tkhd
+// rotation), at the working resolution (short side), never above the source size. The GPU worker
+// takes this over in phase 3.
+
+
+
+const WORKING_SIZES = [360, 540, 720, 1080, 0]; // short side; 0 = source
+
+// The working size for a display size and a short side (0 = source). Even numbers.
+function workingSize(w, h, short) {
+  const s = short ? Math.min(1, short / Math.min(w, h)) : 1;
+  return { width: Math.max(2, Math.round((w * s) / 2) * 2), height: Math.max(2, Math.round((h * s) / 2) * 2) };
+}
+
+class Preview {
+  constructor(canvas, area) {
+    this.canvas = canvas;
+    this.area = area;
+    this.ctx = canvas.getContext('2d', { alpha: false });
+    this.info = null;
+    this.short = 540;
+    new ResizeObserver(() => this.fit()).observe(area);
+  }
+
+  setSource(info) {
+    this.info = info;
+    this.resize();
+  }
+
+  setShortSide(short) {
+    this.short = short;
+    this.resize();
+  }
+
+  resize() {
+    if (!this.info) return;
+    const { width, height } = workingSize(this.info.width, this.info.height, this.short);
+    this.canvas.width = width;
+    this.canvas.height = height;
+    this.ctx.fillStyle = '#000';
+    this.ctx.fillRect(0, 0, width, height);
+    this.fit();
+  }
+
+  // The CSS size: as large as the area, with the aspect of the video.
+  fit() {
+    if (!this.info) return;
+    const r = this.area.getBoundingClientRect();
+    const s = Math.min(r.width / this.canvas.width, r.height / this.canvas.height);
+    if (!(s > 0)) return;
+    this.canvas.style.width = `${Math.floor(this.canvas.width * s)}px`;
+    this.canvas.style.height = `${Math.floor(this.canvas.height * s)}px`;
+  }
+
+  draw(frame) {
+    const { width: w, height: h } = this.canvas;
+    const rot = this.info.rotation;
+    const fw = frame.displayWidth, fh = frame.displayHeight;
+    const c = { sx: 0, sy: 0, sw: rot % 180 ? fh : fw, sh: rot % 180 ? fw : fh };
+    const t = turnedCrop(rot, fw, fh, c, w, h);
+    this.ctx.setTransform(...t.m);
+    this.ctx.drawImage(frame, t.sx, t.sy, t.sw, t.sh, 0, 0, t.dw, t.dh);
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+}
+
+return { WORKING_SIZES, workingSize, Preview };
+})();
+
+// ---- app/ui/timeline.js
+const { formatTime, Timeline } = (() => {
+// Transport and timeline (plan §12.2, §12.3, §12.7): buttons, time, frame number, Loop, the
+// thumbnail strip with the playhead and the In / Out markers. Drag on the strip to scrub.
+
+function formatTime(us) {
+  const cs = Math.max(0, Math.floor(us / 10000));
+  const m = Math.floor(cs / 6000), s = Math.floor(cs / 100) % 60, c = cs % 100;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(c).padStart(2, '0')}`;
+}
+
+class Timeline {
+  constructor(root, player) {
+    this.root = root;
+    this.player = player;
+    this.thumbs = [];
+    this.$ = (sel) => root.querySelector(sel);
+    this.strip = this.$('.strip');
+    this.ctx = this.strip.getContext('2d');
+    const P = player;
+    const on = (sel, fn) => this.$(sel).addEventListener('click', fn);
+    on('[data-act=first]', () => P.seek(P.range()[0] === P.current ? 0 : P.range()[0]));
+    on('[data-act=prev]', () => P.step(-1));
+    on('[data-act=play]', () => P.toggle());
+    on('[data-act=next]', () => P.step(1));
+    on('[data-act=last]', () => P.seek(P.range()[1] === P.current ? P.frameCount - 1 : P.range()[1]));
+    on('[data-act=loop]', () => {
+      P.loop = !P.loop;
+      this.update();
+    });
+    on('[data-act=in]', () => this.setIn());
+    on('[data-act=out]', () => this.setOut());
+    // Scrub: pointer down and move on the strip.
+    let drag = false;
+    const scrub = (e) => {
+      const r = this.strip.getBoundingClientRect();
+      const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+      P.seek(Math.round(x * (P.frameCount - 1)));
+    };
+    this.strip.addEventListener('pointerdown', (e) => {
+      if (!P.info) return;
+      drag = true;
+      this.strip.setPointerCapture(e.pointerId);
+      scrub(e);
+    });
+    this.strip.addEventListener('pointermove', (e) => drag && scrub(e));
+    const end = () => (drag = false);
+    this.strip.addEventListener('pointerup', end);
+    this.strip.addEventListener('pointercancel', end);
+    new ResizeObserver(() => this.draw()).observe(this.strip);
+  }
+
+  setIn() {
+    const P = this.player;
+    P.inPoint = P.inPoint === P.current ? null : P.current;
+    this.update();
+  }
+
+  setOut() {
+    const P = this.player;
+    P.outPoint = P.outPoint === P.current ? null : P.current;
+    this.update();
+  }
+
+  reset() {
+    this.thumbs = [];
+    this.update();
+  }
+
+  addThumb(i, index, bitmap) {
+    this.thumbs[i] = { index, bitmap };
+    this.draw();
+  }
+
+  update() {
+    const P = this.player;
+    const info = P.info;
+    const t = Math.max(0, P.current);
+    this.$('[data-act=play]').textContent = P.playing ? '❚❚' : '▶';
+    this.$('[data-act=play]').setAttribute('aria-label', P.playing ? 'Pause' : 'Play');
+    this.$('[data-act=loop]').classList.toggle('on', P.loop);
+    this.$('[data-act=in]').classList.toggle('on', P.inPoint !== null);
+    this.$('[data-act=out]').classList.toggle('on', P.outPoint !== null);
+    this.$('.time').textContent = info ? `${formatTime(info.times[t])} / ${formatTime(info.durationUs)}` : '00:00.00 / 00:00.00';
+    this.$('.frame').textContent = info ? `f ${t}` : 'f –';
+    this.draw();
+  }
+
+  draw() {
+    const c = this.strip;
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(c.clientWidth * dpr)), h = Math.max(1, Math.round(c.clientHeight * dpr));
+    if (c.width !== w || c.height !== h) {
+      c.width = w;
+      c.height = h;
+    }
+    const ctx = this.ctx;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+    const P = this.player;
+    const n = P.frameCount;
+    if (!n) return;
+    const count = this.thumbs.length ? Math.max(this.thumbs.length, 50) : 50;
+    const tw = w / count;
+    for (let i = 0; i < this.thumbs.length; i++) {
+      const th = this.thumbs[i];
+      if (!th) continue;
+      const b = th.bitmap;
+      // Cover the cell, centered.
+      const s = Math.max(tw / b.width, h / b.height);
+      const sw = tw / s, sh = h / s;
+      ctx.drawImage(b, (b.width - sw) / 2, (b.height - sh) / 2, sw, sh, i * tw, 0, Math.ceil(tw), h);
+    }
+    const x = (t) => (n > 1 ? (t / (n - 1)) * (w - 2 * dpr) + dpr : w / 2);
+    const [a, b] = P.range();
+    if (P.inPoint !== null || P.outPoint !== null) {
+      ctx.fillStyle = 'rgba(0,0,0,.6)';
+      ctx.fillRect(0, 0, x(a), h);
+      ctx.fillRect(x(b), 0, w - x(b), h);
+      ctx.fillStyle = '#f5a524';
+      ctx.fillRect(x(a) - dpr, 0, 2 * dpr, h);
+      ctx.fillRect(x(b) - dpr, 0, 2 * dpr, h);
+    }
+    ctx.fillStyle = '#4fd1c5';
+    ctx.fillRect(x(Math.max(0, P.current)) - dpr, 0, 2 * dpr, h);
+  }
+}
+
+return { formatTime, Timeline };
+})();
+
 // ---- app/main.js
 const {  } = (() => {
-// neofx app shell (plan Phase 1). The later phases add the decode, GPU, and UI parts.
+// neofx app (plan Phase 2): open a file, the Original preview, seek, play, timeline. The later phases
+// add the GPU work, the effects, and the inspector.
+
+
+
 
 
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '0.1.0';
+const DECODE_WORKER = "// ---- io/demux.js\nconst { demuxMp4, turnedCrop } = (() => {\n// MP4 / MOV reader (plan §3, §6.1). From neomosh src/mux/demux.js, with the audio track added.\n// It gives the video decoder configuration and each sample (offset, size, display time, sync flag),\n// so a VideoDecoder can decode every frame of the file, and the audio track for the pass-through\n// copy into the export (D16). Not fragmented. It returns null for other files.\n\nconst MAX_MOOV = 64 * 1048576;\n\nconst str4 = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);\nconst hex2 = (v) => v.toString(16).padStart(2, '0');\n\n// The boxes in b[from..to): [{ type, head (box start), start (content), end }].\nfunction boxes(b, from, to) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const out = [];\n  let o = from;\n  while (o + 8 <= to) {\n    let size = dv.getUint32(o);\n    const type = str4(b, o + 4);\n    let head = 8;\n    if (size === 1) {\n      size = Number(dv.getBigUint64(o + 8));\n      head = 16;\n    } else if (size === 0) size = to - o;\n    if (size < head || o + size > to) break;\n    out.push({ type, head: o, start: o + head, end: o + size });\n    o += size;\n  }\n  return out;\n}\n\nconst child = (b, box, type) => boxes(b, box.start, box.end).find((x) => x.type === type);\nconst path = (b, box, ...types) => types.reduce((x, t) => (x ? child(b, x, t) : null), box);\n\n// The top-level boxes of the file, read from their headers only.\nasync function topBoxes(blob) {\n  const out = [];\n  let o = 0;\n  while (o + 8 <= blob.size) {\n    const h = new Uint8Array(await blob.slice(o, Math.min(blob.size, o + 16)).arrayBuffer());\n    const dv = new DataView(h.buffer);\n    let size = dv.getUint32(0);\n    let head = 8;\n    if (size === 1 && h.length >= 16) {\n      size = Number(dv.getBigUint64(8));\n      head = 16;\n    } else if (size === 0) size = blob.size - o;\n    if (size < head) break;\n    out.push({ type: str4(h, 4), start: o + head, end: Math.min(blob.size, o + size) });\n    o += size;\n  }\n  return out;\n}\n\n// The codec string and the description for the VideoDecoder, from the sample entry.\nfunction videoCodecOf(b, entry) {\n  const t = entry.type;\n  const kids = boxes(b, entry.start + 78, entry.end); // after the VisualSampleEntry fields\n  const k = (type) => kids.find((x) => x.type === type);\n  if (t === 'avc1' || t === 'avc3') {\n    const c = k('avcC');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    return { codec: `avc1.${hex2(d[1])}${hex2(d[2])}${hex2(d[3])}`, description: d };\n  }\n  if (t === 'hvc1' || t === 'hev1') {\n    const c = k('hvcC');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    const space = ['', 'A', 'B', 'C'][d[1] >> 6];\n    const tier = (d[1] >> 5) & 1 ? 'H' : 'L';\n    let compat = ((d[2] << 24) | (d[3] << 16) | (d[4] << 8) | d[5]) >>> 0;\n    let rev = 0;\n    for (let i = 0; i < 32; i++, compat >>>= 1) rev = ((rev << 1) | (compat & 1)) >>> 0;\n    const cons = Array.from(d.subarray(6, 12));\n    while (cons.length && cons[cons.length - 1] === 0) cons.pop();\n    const parts = [`${t}.${space}${d[1] & 31}`, rev.toString(16), `${tier}${d[12]}`, ...cons.map((x) => x.toString(16).toUpperCase())];\n    return { codec: parts.join('.'), description: d };\n  }\n  if (t === 'vp09') {\n    const c = k('vpcC');\n    if (!c) return null;\n    const d = b.subarray(c.start + 4, c.end); // after version and flags\n    return { codec: `vp09.${String(d[0]).padStart(2, '0')}.${String(d[1]).padStart(2, '0')}.${String(d[2] >> 4).padStart(2, '0')}`, description: null };\n  }\n  if (t === 'av01') {\n    const c = k('av1C');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    const profile = d[1] >> 5, level = d[1] & 31, tier = d[2] >> 7 ? 'H' : 'M';\n    const depth = (d[2] >> 6) & 1 ? ((d[2] >> 5) & 1 ? 12 : 10) : 8;\n    return { codec: `av01.${profile}.${String(level).padStart(2, '0')}${tier}.${String(depth).padStart(2, '0')}`, description: d };\n  }\n  return null;\n}\n\n// MPEG-4 descriptor (ISO/IEC 14496-1): tag, size (1-4 bytes of 7 bits), content start.\nfunction descriptor(b, o, end) {\n  if (o + 2 > end) return null;\n  const tag = b[o++];\n  let size = 0;\n  for (let i = 0; i < 4 && o < end; i++) {\n    const v = b[o++];\n    size = (size << 7) | (v & 127);\n    if (!(v & 128)) break;\n  }\n  return { tag, start: o, end: Math.min(end, o + size) };\n}\n\n// esds -> { oti (objectTypeIndication), asc (AudioSpecificConfig bytes or null) }.\nfunction parseEsds(b, esds) {\n  const es = descriptor(b, esds.start + 4, esds.end); // after version and flags\n  if (!es || es.tag !== 3) return null;\n  const flags = b[es.start + 2];\n  let o = es.start + 3;\n  if (flags & 0x80) o += 2; // dependsOn_ES_ID\n  if (flags & 0x40) o += 1 + b[o]; // URL\n  if (flags & 0x20) o += 2; // OCR_ES_Id\n  const dc = descriptor(b, o, es.end);\n  if (!dc || dc.tag !== 4) return null;\n  const oti = b[dc.start];\n  const dsi = descriptor(b, dc.start + 13, dc.end);\n  return { oti, asc: dsi && dsi.tag === 5 ? b.slice(dsi.start, dsi.end) : null };\n}\n\n// The audio sample entry: { type, codec, channels, sampleSize, sampleRate, config, description }.\n// config: the raw codec box (esds or dOps, with its header), for the muxer to copy (plan §3).\nfunction audioCodecOf(b, entry) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const t = entry.type;\n  const version = dv.getUint16(entry.start + 8); // QuickTime sound description version (MOV)\n  const channels = dv.getUint16(entry.start + 16);\n  const sampleSize = dv.getUint16(entry.start + 18);\n  let sampleRate = dv.getUint32(entry.start + 24) >>> 16;\n  let kidsFrom = entry.start + 28;\n  if (version === 1) kidsFrom += 16;\n  else if (version === 2) {\n    kidsFrom += 36;\n    sampleRate = Math.round(dv.getFloat64(entry.start + 32));\n  }\n  let kids = boxes(b, kidsFrom, entry.end);\n  const wave = kids.find((x) => x.type === 'wave'); // MOV: the codec box can be in a 'wave' box\n  if (wave) kids = kids.concat(boxes(b, wave.start, wave.end));\n  const k = (type) => kids.find((x) => x.type === type);\n  if (t === 'mp4a') {\n    const esds = k('esds');\n    if (!esds) return null;\n    const e = parseEsds(b, esds);\n    if (!e) return null;\n    let codec = `mp4a.${hex2(e.oti)}`;\n    if (e.oti === 0x40 && e.asc && e.asc.length) {\n      let aot = e.asc[0] >> 3;\n      if (aot === 31 && e.asc.length > 1) aot = 32 + (((e.asc[0] & 7) << 3) | (e.asc[1] >> 5));\n      codec += `.${aot}`;\n    }\n    return { type: t, codec, channels, sampleSize, sampleRate, config: b.slice(esds.head, esds.end), description: e.asc };\n  }\n  if (t === 'Opus') {\n    const dops = k('dOps');\n    if (!dops) return null;\n    return { type: t, codec: 'opus', channels, sampleSize, sampleRate: 48000, config: b.slice(dops.head, dops.end), description: null };\n  }\n  return null;\n}\n\n// tkhd matrix -> 0, 90, 180, or 270 (clockwise, the way a player turns the picture).\nfunction rotationOf(b, tkhd) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const m = tkhd.start + (b[tkhd.start] === 1 ? 52 : 40);\n  const a = dv.getInt32(m), bb = dv.getInt32(m + 4);\n  if (a === 0 && bb > 0) return 90;\n  if (a < 0 && bb === 0) return 180;\n  if (a === 0 && bb < 0) return 270;\n  return 0;\n}\n\n// The sample table of a track: { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift }\n// or null. shift: the media time where the presentation starts (edit list).\nfunction sampleTable(b, trak) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const mdhd = path(b, trak, 'mdia', 'mdhd');\n  const stbl = path(b, trak, 'mdia', 'minf', 'stbl');\n  if (!mdhd || !stbl) return null;\n  const timescale = dv.getUint32(mdhd.start + (b[mdhd.start] === 1 ? 20 : 12));\n  const stsd = child(b, stbl, 'stsd');\n  const entry = stsd && boxes(b, stsd.start + 8, stsd.end)[0];\n  if (!entry || !timescale) return null;\n\n  // Sample sizes.\n  const stsz = child(b, stbl, 'stsz');\n  if (!stsz) return null;\n  const fixed = dv.getUint32(stsz.start + 4), count = dv.getUint32(stsz.start + 8);\n  const sizes = new Array(count);\n  for (let i = 0; i < count; i++) sizes[i] = fixed || dv.getUint32(stsz.start + 12 + 4 * i);\n  // Chunk offsets and samples per chunk -> sample offsets.\n  const stco = child(b, stbl, 'stco'), co64 = child(b, stbl, 'co64'), stsc = child(b, stbl, 'stsc');\n  if ((!stco && !co64) || !stsc) return null;\n  const co = stco || co64;\n  const nChunks = dv.getUint32(co.start + 4);\n  const chunkOff = (i) => (stco ? dv.getUint32(co.start + 8 + 4 * i) : Number(dv.getBigUint64(co.start + 8 + 8 * i)));\n  const scN = dv.getUint32(stsc.start + 4);\n  const offsets = new Array(count);\n  let s = 0;\n  for (let e = 0; e < scN && s < count; e++) {\n    const first = dv.getUint32(stsc.start + 8 + 12 * e) - 1;\n    const per = dv.getUint32(stsc.start + 12 + 12 * e);\n    const last = e + 1 < scN ? dv.getUint32(stsc.start + 8 + 12 * (e + 1)) - 1 : nChunks;\n    for (let c = first; c < last && s < count; c++) {\n      let o = chunkOff(c);\n      for (let j = 0; j < per && s < count; j++, s++) {\n        offsets[s] = o;\n        o += sizes[s];\n      }\n    }\n  }\n  if (s < count) return null;\n  // Decode times and durations, composition offsets, the edit list start.\n  const stts = child(b, stbl, 'stts'), ctts = child(b, stbl, 'ctts'), stss = child(b, stbl, 'stss');\n  if (!stts) return null;\n  const dts = new Array(count);\n  const durations = new Array(count);\n  let t = 0, k = 0, d = 0;\n  for (let e = 0, n = dv.getUint32(stts.start + 4); e < n; e++) {\n    const c = dv.getUint32(stts.start + 8 + 8 * e);\n    d = dv.getUint32(stts.start + 12 + 8 * e);\n    for (let j = 0; j < c && k < count; j++, k++, t += d) {\n      dts[k] = t;\n      durations[k] = d;\n    }\n  }\n  for (; k < count; k++, t += d) {\n    dts[k] = t;\n    durations[k] = d;\n  }\n  const cto = new Array(count).fill(0);\n  if (ctts) {\n    k = 0;\n    for (let e = 0, n = dv.getUint32(ctts.start + 4); e < n; e++) {\n      const c = dv.getUint32(ctts.start + 8 + 8 * e), o = dv.getInt32(ctts.start + 12 + 8 * e);\n      for (let j = 0; j < c && k < count; j++, k++) cto[k] = o;\n    }\n  }\n  let shift = 0;\n  const elst = path(b, trak, 'edts', 'elst');\n  if (elst) {\n    const v1 = b[elst.start] === 1;\n    const n = dv.getUint32(elst.start + 4);\n    for (let e = 0; e < n; e++) {\n      const o = elst.start + 8 + e * (v1 ? 20 : 12);\n      const mt = v1 ? Number(dv.getBigInt64(o + 8)) : dv.getInt32(o + 4);\n      if (mt >= 0) {\n        shift = mt;\n        break;\n      }\n    }\n  }\n  const sync = stss ? new Set(Array.from({ length: dv.getUint32(stss.start + 4) }, (_, i) => dv.getUint32(stss.start + 8 + 4 * i) - 1)) : null;\n  return { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift, count };\n}\n\nconst handlerOf = (b, trak) => {\n  const hdlr = path(b, trak, 'mdia', 'hdlr');\n  return hdlr ? str4(b, hdlr.start + 8) : '';\n};\n\n// blob: the file. Returns null, or:\n// { codec, description, codedWidth, codedHeight, rotation, timescale, mediaTime, samples, durationUs, audio }\n// samples (decode order): [{ offset, size, us (display time, microseconds), key, dts, duration, cto }].\n// dts, duration, cto: in timescale units. mediaTime: the edit list start.\n// audio: null, or { type, codec, channels, sampleSize, sampleRate, config, description, timescale,\n//   mediaTime (edit list start, in timescale units), samples: [{ offset, size, dts, duration, us }],\n//   durationUs }. us: the presentation time (dts - mediaTime) in microseconds.\nasync function demuxMp4(blob) {\n  let tops;\n  try {\n    tops = await topBoxes(blob);\n  } catch {\n    return null;\n  }\n  const moovTop = tops.find((x) => x.type === 'moov');\n  if (!moovTop || moovTop.end - moovTop.start > MAX_MOOV) return null;\n  if (tops.some((x) => x.type === 'moof')) return null; // fragmented: not supported\n  const b = new Uint8Array(await blob.slice(moovTop.start, moovTop.end).arrayBuffer());\n  const dv = new DataView(b.buffer);\n  const traks = boxes(b, 0, b.length).filter((x) => x.type === 'trak');\n\n  let video = null;\n  for (const trak of traks) {\n    if (handlerOf(b, trak) !== 'vide') continue;\n    const tkhd = child(b, trak, 'tkhd');\n    const st = tkhd && sampleTable(b, trak);\n    if (!st) continue;\n    const { entry, count, timescale } = st;\n    const codec = videoCodecOf(b, entry);\n    if (!codec) return null;\n    const codedWidth = dv.getUint16(entry.start + 24), codedHeight = dv.getUint16(entry.start + 26);\n    const samples = new Array(count);\n    let maxUs = 0;\n    for (let i = 0; i < count; i++) {\n      const us = Math.round(((st.dts[i] + st.cto[i] - st.shift) * 1e6) / timescale);\n      samples[i] = { offset: st.offsets[i], size: st.sizes[i], us, key: st.sync ? st.sync.has(i) : true, dts: st.dts[i], duration: st.durations[i], cto: st.cto[i] };\n      maxUs = Math.max(maxUs, us);\n    }\n    if (!count || !samples[0].key) return null;\n    video = { ...codec, codedWidth, codedHeight, rotation: rotationOf(b, tkhd), timescale, mediaTime: st.shift, samples, durationUs: maxUs };\n    break;\n  }\n  if (!video) return null;\n\n  let audio = null;\n  for (const trak of traks) {\n    if (handlerOf(b, trak) !== 'soun') continue;\n    const st = sampleTable(b, trak);\n    const a = st && st.count && audioCodecOf(b, st.entry);\n    if (!a) continue;\n    const ts = st.timescale;\n    const samples = new Array(st.count);\n    for (let i = 0; i < st.count; i++) {\n      samples[i] = { offset: st.offsets[i], size: st.sizes[i], dts: st.dts[i], duration: st.durations[i], us: Math.round(((st.dts[i] - st.shift) * 1e6) / ts) };\n    }\n    const end = st.dts[st.count - 1] + st.durations[st.count - 1] - st.shift;\n    audio = { ...a, timescale: ts, mediaTime: st.shift, samples, durationUs: Math.round((end * 1e6) / ts) };\n    break;\n  }\n  video.audio = audio;\n  return video;\n}\n\n// The source rectangle (frame coordinates) and the drawing transform for a crop in display\n// coordinates of a frame that is shown turned by 'rotation' degrees (clockwise). fw, fh: the frame\n// size (not turned). c: { sx, sy, sw, sh } in display coordinates. w, h: the output size.\n// Returns { sx, sy, sw, sh, m: [a, b, c, d, e, f], dw, dh } for setTransform(...m) and drawImage(frame,\n// sx, sy, sw, sh, 0, 0, dw, dh).\nfunction turnedCrop(rotation, fw, fh, c, w, h) {\n  switch (rotation) {\n    case 90:\n      return { sx: c.sy, sy: fh - c.sx - c.sw, sw: c.sh, sh: c.sw, m: [0, 1, -1, 0, w, 0], dw: h, dh: w };\n    case 180:\n      return { sx: fw - c.sx - c.sw, sy: fh - c.sy - c.sh, sw: c.sw, sh: c.sh, m: [-1, 0, 0, -1, w, h], dw: w, dh: h };\n    case 270:\n      return { sx: fw - c.sy - c.sh, sy: c.sx, sw: c.sh, sh: c.sw, m: [0, -1, 1, 0, 0, h], dw: h, dh: w };\n    default:\n      return { sx: c.sx, sy: c.sy, sw: c.sw, sh: c.sh, m: [1, 0, 0, 1, 0, 0], dw: w, dh: h };\n  }\n}\n\nreturn { demuxMp4, turnedCrop };\n})();\n\n// ---- io/timeline.js\nconst { decoderConfig, displaySize, buildTimeline, keyBefore, planSegments, frameAtUs, thumbIndices, isCleanStart } = (() => {\n// The frame timeline of a file (plan §5.2, §6.1, §6.2). No browser APIs, so Node tests can use it.\n// Frame t is the t-th presented frame in display order. Samples before the edit list start (us < 0)\n// are decoded as references, but they are not frames of the timeline.\n\n// The decoder configuration for a demuxMp4 result.\nfunction decoderConfig(d) {\n  return { codec: d.codec, codedWidth: d.codedWidth, codedHeight: d.codedHeight, ...(d.description ? { description: d.description } : {}) };\n}\n\n// The display size (after the tkhd rotation).\nfunction displaySize(d) {\n  return d.rotation % 180 ? { width: d.codedHeight, height: d.codedWidth } : { width: d.codedWidth, height: d.codedHeight };\n}\n\nconst median = (a) => {\n  if (!a.length) return 0;\n  const s = a.slice().sort((x, y) => x - y);\n  return s[s.length >> 1];\n};\n\n// Returns { frames: [{ us, dur, sample }], fps, durationUs, keys, indexOfUs: Map }.\n// sample: the decode index of the frame's sample. dur: microseconds to the next frame.\nfunction buildTimeline(d) {\n  const S = d.samples;\n  const order = [];\n  for (let i = 0; i < S.length; i++) if (S[i].us >= 0) order.push(i);\n  order.sort((a, b) => S[a].us - S[b].us);\n  const frames = order.map((i) => ({ us: S[i].us, dur: 0, sample: i }));\n  for (let t = 0; t + 1 < frames.length; t++) frames[t].dur = frames[t + 1].us - frames[t].us;\n  const med = median(frames.slice(0, -1).map((f) => f.dur).filter((x) => x > 0));\n  if (frames.length) {\n    const last = frames[frames.length - 1];\n    const s = S[last.sample];\n    last.dur = s.duration && d.timescale ? Math.round((s.duration * 1e6) / d.timescale) : med || 33333;\n  }\n  const fps = med ? 1e6 / med : frames.length ? 1e6 / frames[0].dur : 30;\n  const keys = [];\n  for (let i = 0; i < S.length; i++) if (S[i].key) keys.push(i);\n  const indexOfUs = new Map(frames.map((f, t) => [f.us, t]));\n  const end = frames.length ? frames[frames.length - 1].us + frames[frames.length - 1].dur : 0;\n  return { frames, fps, durationUs: end, keys, indexOfUs, samples: S };\n}\n\n// The decode index of the sync sample to start from, to show frame t: the last sync sample at or\n// before the frame's sample (decode order), with a display time at or before the frame.\nfunction keyBefore(tl, t) {\n  const f = tl.frames[t];\n  const K = tl.keys;\n  let lo = 0, hi = K.length - 1, k = 0;\n  while (lo <= hi) {\n    const m = (lo + hi) >> 1;\n    if (K[m] <= f.sample) {\n      k = m;\n      lo = m + 1;\n    } else hi = m - 1;\n  }\n  while (k > 0 && tl.samples[K[k]].us > f.us) k--;\n  return K[k];\n}\n\n// The decode work for a sorted list of frame indices: [{ start, end, frames }]. Each segment decodes\n// the samples start..end (decode order, inclusive) from a sync sample, then flushes. A frame joins the\n// current segment when the decode of that segment gets to its sync sample without a jump.\nfunction planSegments(tl, indices) {\n  const out = [];\n  let cur = null;\n  for (const t of indices) {\n    const k = keyBefore(tl, t);\n    const e = tl.frames[t].sample;\n    if (cur && k >= cur.start && k <= cur.end + 1) {\n      cur.end = Math.max(cur.end, e);\n      cur.frames.push(t);\n    } else {\n      cur = { start: k, end: e, frames: [t] };\n      out.push(cur);\n    }\n  }\n  return out;\n}\n\n// The frame index at a time (microseconds): the last frame that starts at or before it.\nfunction frameAtUs(tl, us) {\n  const F = tl.frames;\n  let lo = 0, hi = F.length - 1, r = 0;\n  while (lo <= hi) {\n    const m = (lo + hi) >> 1;\n    if (F[m].us <= us) {\n      r = m;\n      lo = m + 1;\n    } else hi = m - 1;\n  }\n  return r;\n}\n\n// Evenly spaced frame indices for the timeline thumbnails (one for each 2 %: count 50).\nfunction thumbIndices(n, count = 50) {\n  const out = [];\n  for (let i = 0; i < count && n; i++) {\n    const t = Math.min(n - 1, Math.floor(((i + 0.5) * n) / count));\n    if (!out.length || out[out.length - 1] !== t) out.push(t);\n  }\n  return out;\n}\n\n// Is this sync sample a clean start for a decoder (H.264 IDR; HEVC IDR or BLA)? An open-GOP I-frame\n// (H.264 recovery point, HEVC CRA) is a sync sample in the file, but Chrome's decoder does not start\n// there. data: the first bytes of the sample (length-prefixed NAL units). Other codecs: true.\nfunction isCleanStart(d, data) {\n  const avc = /^avc[13]\\./.test(d.codec), hevc = /^(hvc1|hev1)\\./.test(d.codec);\n  if (!(avc || hevc) || !d.description) return true;\n  const len = avc ? (d.description[4] & 3) + 1 : (d.description[21] & 3) + 1;\n  for (let o = 0; o + len < data.length;) {\n    let n = 0;\n    for (let i = 0; i < len; i++) n = n * 256 + data[o + i];\n    const h = data[o + len];\n    if (avc) {\n      const t = h & 31;\n      if (t === 5) return true;\n      if (t === 1) return false;\n    } else {\n      const t = (h >> 1) & 63;\n      if (t >= 16 && t <= 20) return true;\n      if (t < 16 || t === 21) return false;\n    }\n    o += len + n;\n  }\n  return false;\n}\n\nreturn { decoderConfig, displaySize, buildTimeline, keyBefore, planSegments, frameAtUs, thumbIndices, isCleanStart };\n})();\n\n// ---- io/decode-worker.js\nconst {  } = (() => {\n// Decode worker (plan §5.1, §6.2). Frame-exact decode of an MP4/MOV file with a VideoDecoder, not in\n// real time. Patterns from neomosh src/app/worker.js (file source): read runs of samples, feed the\n// decoder a few samples ahead, back-pressure on the frames that the page has not given back.\n//\n// Messages in:\n//   { cmd: 'open', file }                       -> 'info' or 'error'\n//   { cmd: 'seek', job, t, depth }              -> 'frame' for each frame max(0, t - depth) .. t, then 'done'\n//   { cmd: 'play', job, from, to }              -> 'frame' for each frame from .. to, then 'done'\n//   { cmd: 'thumbs', job, count, width }        -> 'thumb' { i, index, bitmap } for each, then 'done'\n//   { cmd: 'stop' }                             cancel the job in progress\n//   { cmd: 'ack' }                              the page closed one frame\n// 'frame': { job, index, frame (VideoFrame, transferred), warm (true: before t) }.\n\n\n\n\nconst MAX_IN_FLIGHT = 4; // frames at the page, not given back yet\nconst MAX_QUEUE = 6; // samples in the decoder queue\n\nconst W = {\n  file: null,\n  d: null,\n  tl: null,\n  job: 0, // the job that runs; a new job or 'stop' changes it\n  inFlight: 0,\n  wake: null,\n};\n\nconst poke = () => {\n  if (W.wake) {\n    const f = W.wake;\n    W.wake = null;\n    f();\n  }\n};\nconst wait = () => new Promise((r) => (W.wake = r));\nconst post = (m, tr) => self.postMessage(m, tr || []);\n\n// Read the samples in runs of up to 4 MB that are next to each other in the file.\nclass SampleReader {\n  constructor(file, samples) {\n    this.file = file;\n    this.S = samples;\n    this.buf = null;\n    this.from = 0;\n    this.to = 0;\n  }\n\n  async read(i) {\n    const s = this.S[i];\n    if (!this.buf || s.offset < this.from || s.offset + s.size > this.to) {\n      let to = s.offset + s.size;\n      for (let j = i + 1; j < this.S.length && this.S[j].offset === to && to - s.offset < 4194304; j++) to += this.S[j].size;\n      this.buf = new Uint8Array(await this.file.slice(s.offset, to).arrayBuffer());\n      this.from = s.offset;\n      this.to = to;\n    }\n    return this.buf.subarray(s.offset - this.from, s.offset - this.from + s.size);\n  }\n}\n\n// Decode the segments of a job. want(index) -> true for a frame to give to deliver(index, frame).\n// deliver can wait (back-pressure). Returns false when the job was cancelled.\nasync function decodeSegments(job, segments, want, deliver) {\n  const S = W.tl.samples;\n  const reader = new SampleReader(W.file, S);\n  const out = [];\n  let failure = null;\n  const dec = new VideoDecoder({\n    output: (f) => {\n      out.push(f);\n      poke();\n    },\n    error: (e) => {\n      failure = e;\n      poke();\n    },\n  });\n  dec.addEventListener('dequeue', poke);\n  const live = () => job === W.job;\n  // Give or close the decoded frames.\n  const drain = async () => {\n    while (out.length) {\n      const f = out.shift();\n      const t = W.tl.indexOfUs.get(f.timestamp);\n      if (t === undefined || !want(t) || !live()) {\n        f.close();\n        continue;\n      }\n      await deliver(t, f);\n    }\n  };\n  try {\n    for (const seg of segments) {\n      if (!live()) return false;\n      if (dec.state !== 'configured') dec.configure(decoderConfig(W.d));\n      for (let i = seg.start; i <= seg.end; i++) {\n        while (live() && !failure && (dec.decodeQueueSize >= MAX_QUEUE || out.length)) {\n          if (out.length) await drain();\n          else await wait();\n        }\n        if (failure) throw failure;\n        if (!live()) return false;\n        const s = S[i];\n        dec.decode(new EncodedVideoChunk({ type: i === seg.start ? 'key' : 'delta', timestamp: s.us, data: await reader.read(i) }));\n      }\n      // The flush gives the last frames (in display order); then the next segment starts at a sync sample.\n      const flushed = dec.flush().then(() => 'ok', (e) => e);\n      let done = false;\n      flushed.then(() => {\n        done = true;\n        poke();\n      });\n      while (!done && live() && !failure) {\n        if (out.length) await drain();\n        else await wait();\n      }\n      if (!live()) return false;\n      const r = await flushed;\n      if (r !== 'ok') throw r;\n      await drain();\n      if (failure) throw failure;\n    }\n    return live();\n  } finally {\n    for (const f of out) f.close();\n    try {\n      dec.close();\n    } catch { /* closed */ }\n  }\n}\n\n// Wait until the page has fewer than MAX_IN_FLIGHT frames, then send the frame.\nasync function sendFrame(job, t, frame, warm) {\n  while (W.inFlight >= MAX_IN_FLIGHT && job === W.job) await wait();\n  if (job !== W.job) {\n    frame.close();\n    return;\n  }\n  W.inFlight++;\n  post({ cmd: 'frame', job, index: t, warm, frame }, [frame]);\n}\n\nasync function open(file) {\n  const d = await demuxMp4(file);\n  if (!d) return post({ cmd: 'error', message: 'Only MP4 and MOV files are supported.' });\n  let ok = false;\n  try {\n    ok = typeof VideoDecoder === 'function' && (await VideoDecoder.isConfigSupported(decoderConfig(d))).supported;\n  } catch {\n    ok = false;\n  }\n  if (!ok) return post({ cmd: 'error', message: `This browser cannot decode this file (codec: ${d.codec}).` });\n  const tl = buildTimeline(d);\n  if (!tl.frames.length) return post({ cmd: 'error', message: 'This file has no video frames.' });\n  // Seeks start only at clean sync samples (IDR). The first sample is always one.\n  const clean = [];\n  for (const k of tl.keys) {\n    const s = d.samples[k];\n    const head = new Uint8Array(await file.slice(s.offset, s.offset + Math.min(s.size, 4096)).arrayBuffer());\n    if (!clean.length || isCleanStart(d, head)) clean.push(k);\n  }\n  tl.keys = clean;\n  Object.assign(W, { file, d, tl });\n  const a = d.audio;\n  post({\n    cmd: 'info',\n    name: file.name,\n    codec: d.codec,\n    rotation: d.rotation,\n    codedWidth: d.codedWidth,\n    codedHeight: d.codedHeight,\n    ...displaySize(d),\n    fps: tl.fps,\n    durationUs: tl.durationUs,\n    times: tl.frames.map((f) => f.us),\n    keyFrames: tl.frames.map((f, t) => (clean.includes(f.sample) ? t : -1)).filter((t) => t >= 0),\n    audio: a ? { codec: a.codec, channels: a.channels, sampleRate: a.sampleRate, durationUs: a.durationUs } : null,\n  });\n}\n\nasync function seek(m) {\n  const n = W.tl.frames.length;\n  const t = Math.max(0, Math.min(n - 1, m.t));\n  const from = Math.max(0, t - (m.depth || 0));\n  const list = [];\n  for (let i = from; i <= t; i++) list.push(i);\n  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (i) => i >= from && i <= t, (i, f) => sendFrame(m.job, i, f, i < t));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\nasync function play(m) {\n  const n = W.tl.frames.length;\n  const from = Math.max(0, Math.min(n - 1, m.from));\n  const to = Math.max(from, Math.min(n - 1, m.to ?? n - 1));\n  // One segment: from the sync sample of 'from' to the last sample that 'to' needs.\n  const seg = planSegments(W.tl, [from])[0];\n  let end = seg.end;\n  for (let i = from; i <= to; i++) end = Math.max(end, W.tl.frames[i].sample);\n  seg.end = end;\n  const ok = await decodeSegments(m.job, [seg], (i) => i >= from && i <= to, (i, f) => sendFrame(m.job, i, f, false));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\nasync function thumbs(m) {\n  if (typeof OffscreenCanvas === 'undefined') return post({ cmd: 'done', job: m.job });\n  const list = thumbIndices(W.tl.frames.length, m.count || 50);\n  const { width: dw, height: dh } = displaySize(W.d);\n  const w = m.width || 160;\n  const h = Math.max(1, Math.round((w * dh) / dw));\n  const canvas = new OffscreenCanvas(w, h);\n  const ctx = canvas.getContext('2d');\n  const pos = new Map(list.map((t, i) => [t, i]));\n  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (t) => pos.has(t), async (t, f) => {\n    const c = turnedCrop(W.d.rotation, f.displayWidth, f.displayHeight, { sx: 0, sy: 0, sw: W.d.rotation % 180 ? f.displayHeight : f.displayWidth, sh: W.d.rotation % 180 ? f.displayWidth : f.displayHeight }, w, h);\n    ctx.setTransform(...c.m);\n    ctx.drawImage(f, c.sx, c.sy, c.sw, c.sh, 0, 0, c.dw, c.dh);\n    f.close();\n    const bitmap = canvas.transferToImageBitmap();\n    post({ cmd: 'thumb', job: m.job, i: pos.get(t), index: t, bitmap }, [bitmap]);\n  });\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\n// The jobs run one at a time. A new job cancels the one in progress (plan §6.2).\nlet chain = Promise.resolve();\nconst runJob = (fn, m) => {\n  W.job = m.job;\n  poke();\n  chain = chain.then(() => (m.job === W.job ? fn(m) : null)).catch((e) => {\n    if (m.job === W.job) post({ cmd: 'error', job: m.job, message: String(e && e.message ? e.message : e) });\n  });\n};\n\nself.onmessage = (e) => {\n  const m = e.data;\n  if (m.cmd === 'ack') {\n    W.inFlight = Math.max(0, W.inFlight - 1);\n    poke();\n  } else if (m.cmd === 'stop') {\n    W.job = -1;\n    poke();\n  } else if (m.cmd === 'open') {\n    W.job = -1;\n    poke();\n    chain = chain.then(() => open(m.file)).catch((err) => post({ cmd: 'error', message: String(err && err.message ? err.message : err) }));\n  } else if (m.cmd === 'seek') runJob(seek, m);\n  else if (m.cmd === 'play') runJob(play, m);\n  else if (m.cmd === 'thumbs') runJob(thumbs, m);\n};\n\nreturn {  };\n})();\n";
+
+let player, preview, timeline;
 
 function showMessage(text) {
   const m = $('message');
-  m.textContent = text;
+  m.textContent = text || '';
   m.hidden = !text;
 }
 
-function openFile(file) {
+function status() {
+  const info = player.info;
+  const s = $('status');
+  if (!info) return;
+  const fps = player.stats.fps;
+  const slow = player.playing && fps > 0 && fps < info.fps * 0.9 && player.stats.shown > 10;
+  s.classList.toggle('warn', slow);
+  s.textContent = slow
+    ? `Preview ${Math.round(fps)} fps`
+    : `${info.width}×${info.height} · ${info.fps.toFixed(info.fps % 1 ? 2 : 0)} fps · ${info.times.length} frames · preview ${preview.canvas.width}×${preview.canvas.height}`;
+}
+
+async function openFile(file) {
   if (!file) return;
   if (!/\.(mp4|mov|m4v)$/i.test(file.name) && !/^video\/(mp4|quicktime)$/.test(file.type)) {
     showMessage('Only MP4 and MOV files are supported.');
     return;
   }
-  showMessage(`${file.name}: video loading comes in a later version.`);
+  showMessage('');
+  timeline.reset();
+  let info;
+  try {
+    info = await player.open(file);
+  } catch (e) {
+    document.body.dataset.state = 'start';
+    $('view').hidden = true;
+    showMessage(e.message);
+    return;
+  }
+  document.body.dataset.state = 'open';
+  $('view').hidden = false;
+  preview.setSource(info);
+  await player.seek(0);
+  status();
+}
+
+function keys(e) {
+  if (!player.info || e.target.closest('input, select, textarea')) return;
+  const P = player;
+  const k = e.key;
+  if (k === ' ') P.toggle();
+  else if (k === 'ArrowLeft') P.step(e.shiftKey ? -10 : -1);
+  else if (k === 'ArrowRight') P.step(e.shiftKey ? 10 : 1);
+  else if (k === 'Home') P.seek(0);
+  else if (k === 'End') P.seek(P.frameCount - 1);
+  else if (k === 'i' || k === 'I') timeline.setIn();
+  else if (k === 'o' || k === 'O') timeline.setOut();
+  else return;
+  e.preventDefault();
 }
 
 async function start() {
@@ -161,10 +1035,30 @@ async function start() {
     showMessage(p.fatal);
     return;
   }
-  if (p.gl) $('status').textContent = `WebGL2 · max layers ${p.gl.maxLayers} · v${VERSION}`;
   if (p.notes.length) showMessage(p.notes.join(' '));
+  preview = new Preview($('view'), $('preview'));
+  player = new Player(DECODE_WORKER, {
+    present: (index, frame) => preview.draw(frame),
+    onState: () => {
+      timeline.update();
+      status();
+    },
+    onThumb: (i, index, bitmap) => timeline.addThumb(i, index, bitmap),
+    onError: (msg) => showMessage(msg),
+  });
+  timeline = new Timeline($('transport'), player);
+  window.neofx.player = player;
+  window.neofx.timeline = timeline;
+  window.neofx.preview = preview;
+  window.neofx.openFile = openFile;
+  $('resSelect').addEventListener('change', (e) => {
+    preview.setShortSide(Number(e.target.value));
+    if (player.info && !player.playing) player.seek(player.current);
+    status();
+  });
   $('openBtn').addEventListener('click', () => $('fileInput').click());
   $('fileInput').addEventListener('change', (e) => openFile(e.target.files[0]));
+  document.addEventListener('keydown', keys);
   document.addEventListener('dragover', (e) => {
     e.preventDefault();
     document.body.classList.add('drag');

@@ -17,7 +17,10 @@ for (const f of files) {
     if (filter && !name.includes(filter)) continue;
     const s = Date.now();
     try {
-      await t.fn();
+      let timer;
+      const limit = t.timeout ?? 120000;
+      await Promise.race([t.fn(), new Promise((_, rej) => (timer = setTimeout(() => rej(new Error(`timeout after ${limit} ms`)), limit)))]);
+      clearTimeout(timer);
       pass++;
       console.log(`ok    ${name} (${Date.now() - s} ms)`);
     } catch (e) {
@@ -27,4 +30,4 @@ for (const f of files) {
   }
 }
 console.log(`\n${pass} passed, ${fail} failed (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
-process.exit(fail ? 1 : 0);
+process.exit(fail ? 1 : 0); // also ends the tests that timed out
