@@ -13,6 +13,8 @@
 //   { cmd: 'mapVideoFrame', i, frame, rotation }      one frame of it                     -> { cmd: 'map', ... }
 //   { cmd: 'mapClear' }
 //   { cmd: 'thumbs', maps, t, width, height }  map thumbnails (luma bytes)                -> { cmd: 'thumbs', images }
+//   { cmd: 'slitFrame', index, frame }     analysis pass: the slit history row of a frame    -> { cmd: 'slit', filled, rows }
+//   { cmd: 'slitStatus' }                                                                   -> { cmd: 'slit', filled, rows }
 //   { cmd: 'caps' }                                                                         -> { cmd: 'caps', ... }
 
 import { createContext, program, texParams, drawQuad } from './gl.js';
@@ -21,6 +23,7 @@ import { MapGen } from './mapgen.js';
 import { isDynamic } from '../maps/builtin.js';
 import { curveTable, CURVE_PRESETS } from '../maps/curve.js';
 import { BLEND_INDEX, DECAY_INDEX, hexRgb } from './blend.js';
+import { Slit } from './slit.js';
 
 const QUAD_VERT = "@GLSL:gpu/glsl/quad.vert";
 const UPLOAD_FRAG = "@GLSL:gpu/glsl/upload.frag";
@@ -49,6 +52,7 @@ export class Engine {
     this.decayTex = gl.createTexture();
     this.decayKey = '';
     this.mapgen = new MapGen(this);
+    this.slit = new Slit(this);
     this.mapTex = null;
     this.mapKey = '';
     this.layersTex = null;
@@ -88,6 +92,11 @@ export class Engine {
     }
     if (m.cmd === 'read') return this.read();
     if (m.cmd === 'compositeTest') return this.compositeTest(m);
+    if (m.cmd === 'slitFrame') {
+      this.slit.analysisFrame(m.index, m.frame);
+      return { cmd: 'slit', filled: this.slit.filled(), rows: this.slit.H };
+    }
+    if (m.cmd === 'slitStatus') return { cmd: 'slit', filled: this.slit.filled(), rows: this.slit.H };
     if (m.cmd === 'mapImage') {
       const b = m.bitmap;
       const s = Math.min(1, 2048 / Math.max(b.width, b.height));
@@ -165,10 +174,11 @@ export class Engine {
     else gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
     texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
     this.mapKey = '';
+    const slit = this.slit.configure(w, h, m.frames || 1);
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h) };
+    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h), rows: slit.rows };
   }
 
   free() {
@@ -196,8 +206,9 @@ export class Engine {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
-  // Upload a VideoFrame into layer index mod N (plan §6.3), then close it.
-  put(index, frame) {
+  // Convert a VideoFrame (turned, scaled to the working size) to YUV in layer `layer` of the arrays
+  // Y and C (plan §6.3), then close it.
+  putYuv(frame, Y, C, layer) {
     const gl = this.gl;
     try {
       gl.activeTexture(gl.TEXTURE0);
@@ -213,21 +224,31 @@ export class Engine {
     } finally {
       frame.close();
     }
-    const layer = index % this.n;
     gl.useProgram(this.upload.prog);
     gl.uniform1i(this.upload.u.u_src, 0);
     gl.uniform1i(this.upload.u.u_rot, this.rot);
     gl.uniform1i(this.upload.u.u_mode, 0);
-    this.target(this.storeY, layer, this.w, this.h);
+    this.target(Y, layer, this.w, this.h);
     drawQuad(gl);
     gl.uniform1i(this.upload.u.u_mode, 1);
-    this.target(this.storeC, layer, this.w / 2, this.h / 2);
+    this.target(C, layer, this.w / 2, this.h / 2);
     drawQuad(gl);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // Upload a VideoFrame into layer index mod N of the store (and its slit history row in Mode 2).
+  put(index, frame) {
+    const gl = this.gl;
+    const layer = index % this.n;
+    this.putYuv(frame, this.storeY, this.storeC, layer);
     this.layerFrame[layer] = index;
     if (this.settings && isDynamic(this.settings.map)) this.mapKey = ''; // self / motion read the store
     gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));
+    if (this.slit.active()) {
+      this.slit.update();
+      this.slit.writeRow(index, this.storeY, this.storeC, layer);
+    }
   }
 
   mapChanged(c) {
@@ -267,7 +288,7 @@ export class Engine {
   render(index, delay) {
     const gl = this.gl;
     this.last = { index, delay };
-    this.updateMap(index);
+    if (!this.settings || this.settings.mode !== 'slitscan') this.updateMap(index);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.w, this.h);
     if (delay !== undefined || !this.settings) {
@@ -278,6 +299,10 @@ export class Engine {
       return;
     }
     const s = this.settings;
+    if (s.mode === 'slitscan') {
+      this.slit.render(index);
+      return;
+    }
     const p = this.timemap;
     gl.useProgram(p.prog);
     this.bindStore(p);

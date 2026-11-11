@@ -19,6 +19,21 @@ export const DEFAULTS = {
     adjust: { invert: false, black: 0, white: 1, gamma: 1, contrast: 0, curve: 'linear', posterize: 0, blur: 0, tileX: 1, tileY: 1, mirrorTile: false, offsetX: 0, offsetY: 0 },
     anim: { phaseSpeed: 0, rotSpeed: 0, pulseAmount: 0, pulsePeriod: 60, seedEvery: 0 },
   },
+  slitscan: {
+    source: 'line', // 'line' | 'edge' (phase 9)
+    x: 0.5, // a point on the line (0..1 of the frame)
+    y: 0.5,
+    angle: 90, // the direction of the line: 90° = vertical, the scan goes to the right
+    flip: false, // turn the scan direction 180°
+    width: 1, // slit width (px): the average across the line
+    time: true, // Time On: pixels get older with the distance
+    rateType: 'constant', // modes/slit.js RATE_TYPES
+    rate: 1, // px/frame (at age 0)
+    rateEnd: 4, // px/frame at Max age (not Constant)
+    curve: 'easeIn', // the rate curve (rateType 'curve')
+    maxAge: 600, // frames
+    sampling: 'sharp', // 'sharp' (nearest frame) | 'blend' (mix 2 frames)
+  },
   composite: {
     mode: 'replace', // effect composite: 'replace' | 'blend' (§10.1)
     blend: 'normal', // gpu/blend.js BLEND_MODES

@@ -86,3 +86,12 @@ body[data-state="start"] #viewBar{display:none}
 .colorList{display:flex;gap:4px;align-items:center}
 .colorList input{width:32px;height:28px;padding:0;border:1px solid var(--line);border-radius:4px;background:none}
 .colorList button{min-width:28px;min-height:28px;padding:0}
+.handles{position:absolute;left:0;top:0;pointer-events:none;z-index:1;overflow:hidden}
+.handles .hLine{stroke:var(--accent);stroke-width:1.5;stroke-dasharray:6 4;filter:drop-shadow(0 0 1px #000)}
+.handles .hPoint,.handles .hRot{fill:rgba(0,0,0,.5);stroke:var(--accent);stroke-width:2;pointer-events:all;cursor:grab;touch-action:none}
+.handles .hRot{fill:var(--accent)}
+.handles .hArrow{fill:none;stroke:#fff;stroke-width:3;stroke-linecap:round;filter:drop-shadow(0 0 2px #000)}
+.handles .hArrowHit{fill:none;stroke:transparent;stroke-width:20;pointer-events:stroke;cursor:pointer}
+.snapBtn{position:absolute;left:8px;top:8px;z-index:2;min-height:28px;font-size:12px;background:rgba(0,0,0,.55)}
+.snapBtn.on{background:var(--accent);color:#000}
+@media (pointer:coarse){.handles .hPoint{r:16}.handles .hRot{r:14}}

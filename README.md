@@ -7,7 +7,7 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **phase 6 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, and the **compositor** (blend modes, opacity, age decay, age tint). Slit Scan, the cutout, and the export come in the next phases.
+> Status: v0.1.0, **phase 7 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, the **compositor**, and **Mode 2 — Slit Scan** with the line source. The cutout, the subject-edge source, and the export come in the next phases.
 
 ## How to use
 
@@ -41,6 +41,28 @@ A greyscale map gives each pixel a delay. Black = the current frame. White = the
 
 **Map animation** (built-in maps): Phase speed (the map moves in its direction; ramps repeat), Rotation speed (°/frame), Pulse (scale: amount and period), New seed every k frames.
 
+## Mode 2 — Slit Scan
+
+A 1 px source line repeats in one direction, perpendicular to the line. With **Time On**, each pixel gets older as its distance from the line increases: the trail shows the past of the line. With **Time Off**, the current line repeats (a static smear). Pixels on the other side of the line show the original video.
+
+Drag the line on the preview: the centre point moves it, the round handle turns it (Shift, or the **Snap 15°** button on touch screens: steps of 15°), the arrow flips the scan direction.
+
+| Setting | Values | Default |
+|---|---|---|
+| Source | Line (Subject edge: a later version) | Line |
+| Line x, y | 0–1 (a point on the line) | 0.5, 0.5 |
+| Line angle | 0–360° (90° = vertical) | 90° (the scan goes to the right) |
+| Flip direction | On / Off | Off |
+| Slit width | 1–16 px (the average across the line) | 1 |
+| Time | On / Off | On |
+| Rate type | Constant, Accelerate, Decelerate, Exponential, Curve | Constant |
+| Rate | 0.05–32 px/frame | 1 |
+| Rate at Max age | for the types that are not Constant | 4 |
+| Max age | 1 … the history length (frames) | 600 |
+| Sampling | Sharp (nearest frame) / Blend (mix 2 frames) | Sharp |
+
+The age at a distance s is A(s), the inverse of S(a) = ∫ rate. When the line changes, an **analysis pass** decodes the full video in the background and fills the slit history (one row for each frame, up to 4096 frames); the status bar shows "Analysis N %". Until it ends, the trail uses the rows that are there (the frames in the frame store at once); the other rows are black. The **Map** view shows the age as heat colours.
+
 ## Composite and Look
 
 **Effect composite**: **Replace** (default) shows the effect as it is; pixels that are not online are black. **Blend** puts the effect on the original video with a blend mode and an alpha; pixels that are not online are transparent (the original shows).
@@ -54,9 +76,9 @@ A greyscale map gives each pixel a delay. Black = the current frame. White = the
 | Linear blend | On / Off (blend in linear light) | Off |
 | Age tint | Off / a ramp of 2–4 colours from new to old, with an amount | Off |
 | Age brightness | the brightness multiplier at the Max age, 0–2 | 1 |
-| Spatial offset (Mode 1) | 0–64 px and an angle: each delayed pixel also moves by map value × offset | 0 |
+| Spatial offset (Mode 1 only) | 0–64 px and an angle: each delayed pixel also moves by map value × offset | 0 |
 
-The age of a pixel is its delay in frames (Mode 1). Blend mode, opacity, and decay apply with Blend; tint and brightness apply in both.
+The age of a pixel is its delay in frames (Mode 1) or A(s) (Mode 2). Blend mode, opacity, and decay apply with Blend; tint and brightness apply in both.
 
 The view switch above the preview shows **Result**, **Original** (the source frame), or **Map** (the map in grey). Double-click a setting label to reset it.
 
@@ -71,6 +93,7 @@ Input: MP4 and MOV only (not fragmented). Output: MP4, H.264.
 - Fragmented MP4 files are not supported.
 - Audio pass-through supports AAC (`mp4a`) and Opus.
 - Open-GOP files (keyframes that are not IDR) seek more slowly: Chrome's decoder must start at an IDR frame.
+- The slit history holds at most 4096 frames (and the GPU texture size limit). In a longer video, a seek far back shows black trails until the frames play again.
 - A video map keeps at most 256 MB of frames; a longer map video holds its last frame that fits.
 - Without float render targets, the map has 8-bit precision: with a long Max delay, the delays have steps of Max delay / 255 frames.
 - The frame store keeps 8-bit YUV 4:2:0 (BT.709, full range): a small colour change is possible on fine colour edges.
@@ -102,8 +125,9 @@ The last command writes the test videos (plan §13.1) to `samples/`. The tests m
 
 | Folder | Content |
 |---|---|
-| `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `preview.js`, `ui/` (timeline, inspector, widgets) |
-| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
+| `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `analysis.js` (Mode 2 analysis pass), `preview.js`, `ui/` (timeline, inspector, widgets, line handles) |
+| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `slit.js` (slit history, analysis rows, Mode 2 render), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
+| `src/modes/` | `slit.js` (Mode 2: rate types, S and A, line geometry) |
 | `src/maps/` | `builtin.js` (the map list and parameters), `curve.js` (monotone curves), `mapsource.js` (image and video maps) |
 | `src/io/` | `demux.js` (MP4/MOV reader), `mp4.js` (MP4 muxer), `timeline.js` (frame order, seek plan), `decode-worker.js` |
 | `tools/` | `build.mjs`, `make-fixtures.mjs` |

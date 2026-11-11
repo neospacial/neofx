@@ -1,5 +1,5 @@
-// neofx app (plan Phase 2): open a file, the Original preview, seek, play, timeline. The later phases
-// add the GPU work, the effects, and the inspector.
+// neofx app: open a file, the preview (GPU engine), seek, play, timeline, the inspector, Mode 1
+// (Time Map) and Mode 2 (Slit Scan, with its analysis pass and line handles).
 
 import { checkPlatform } from './platform.js';
 import { Player } from './player.js';
@@ -12,13 +12,16 @@ import { DEFAULTS, clone, setPath } from './settings.js';
 import { MAPS } from '../maps/builtin.js';
 import { loadImageMap, loadVideoMap } from '../maps/mapsource.js';
 import { THUMB_W, THUMB_H } from './ui/inspector.js';
+import { Analysis } from './analysis.js';
+import { LineHandles } from './ui/handles.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
 const DECODE_WORKER = "@WORKER:io/demux.js,io/timeline.js,io/decode-worker.js";
-const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/engine.js,gpu/gpu-worker.js";
+const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,modes/slit.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/engine.js,gpu/gpu-worker.js";
 
-let player, preview, timeline, gpu, inspector;
+let player, preview, timeline, gpu, inspector, analysis, handles;
+let currentFile = null;
 const settings = clone(DEFAULTS);
 // The store state: { short (the preview setting), width, height, n, bytes, budget }.
 const store = { short: 540, budget: 0, failAlloc: 0 };
@@ -38,6 +41,7 @@ function status() {
   const slow = player.playing && fps > 0 && fps < info.fps * 0.9 && player.stats.shown > 10;
   s.classList.toggle('warn', slow);
   const parts = [bufferText(store.n, store.width, store.height), `${info.fps.toFixed(info.fps % 1 ? 2 : 0)} fps`];
+  if (analysis && analysis.running) parts.unshift(`Analysis ${Math.round(analysis.progress * 100)} %`);
   if (slow) parts.push(`Preview ${Math.round(fps)} fps`);
   else parts.push(`${info.width}×${info.height}`);
   s.textContent = parts.join(' · ');
@@ -47,8 +51,10 @@ function status() {
 async function configureStore() {
   const info = player.info;
   const { width, height } = workingSize(info.width, info.height, store.short);
-  const r = await gpu.call({ cmd: 'configure', width, height, rotation: info.rotation, budget: store.budget || defaultBudget(navigator.userAgent), failAlloc: store.failAlloc });
-  Object.assign(store, { width, height, n: r.n, bytes: r.bytes, usedBudget: r.budget });
+  const r = await gpu.call({ cmd: 'configure', width, height, rotation: info.rotation, budget: store.budget || defaultBudget(navigator.userAgent), failAlloc: store.failAlloc, frames: info.times.length });
+  Object.assign(store, { width, height, n: r.n, bytes: r.bytes, usedBudget: r.budget, rows: r.rows });
+  if (settings.slitscan.maxAge > r.rows) settings.slitscan.maxAge = r.rows;
+  if (analysis) analysis.doneKey = ''; // the history is new and empty
   player.setStore(r.n);
   preview.setSize(width, height);
   // The Max delay cannot be more than N - 1 (plan §6.4).
@@ -56,14 +62,33 @@ async function configureStore() {
   inspector.build(settings, limits());
   await applySettings();
   updateThumbs();
+  handles.update();
+  scheduleAnalysis();
   return r;
 }
 
-const limits = () => ({ maxDelay: Math.max(0, store.n - 1) });
+const limits = () => ({ maxDelay: Math.max(0, store.n - 1), maxAge: Math.max(1, store.rows || 1) });
+
+// Mode 2: the analysis pass fills the slit history for the line (plan §8.3). It runs again when the
+// line, the slit width, the working size, or the file changes (300 ms after the last change).
+const slitKey = () => {
+  const sl = settings.slitscan;
+  return JSON.stringify([currentFile && currentFile.name, sl.x, sl.y, sl.angle, sl.flip, sl.width, store.width, store.height]);
+};
+let analysisTimer = 0;
+function scheduleAnalysis() {
+  clearTimeout(analysisTimer);
+  if (settings.mode !== 'slitscan' || !player.info || !currentFile) return;
+  const key = slitKey();
+  if (key === analysis.doneKey || key === analysis.key) return;
+  analysisTimer = setTimeout(() => {
+    if (settings.mode === 'slitscan' && slitKey() === key) analysis.start(currentFile, player.frameCount, key);
+  }, 300);
+}
 
 // The history that the effect needs: Mode 1, the Max delay (and the frames of the Motion map).
 function effectDepth() {
-  if (settings.mode !== 'timemap' || settings.view === 'original') return 0;
+  if (settings.mode !== 'timemap' || settings.view === 'original') return 0; // Mode 2 uses the slit history
   const m = settings.map;
   const motion = m.source === 'builtin' && m.type === 'motion' ? m.params.motion.frames + 1 : 0;
   return Math.max(settings.timemap.maxDelay, motion);
@@ -128,7 +153,7 @@ async function applySettings() {
 // A setting changed in the UI.
 function change(path, value) {
   setPath(settings, path, value);
-  const rebuild = ['map.source', 'map.type', 'mode', 'composite.mode', 'composite.decay', 'look.tint'];
+  const rebuild = ['map.source', 'map.type', 'mode', 'composite.mode', 'composite.decay', 'look.tint', 'slitscan.time', 'slitscan.rateType'];
   if (rebuild.includes(path) || (path === 'look.offset' && (value > 0) !== !!document.querySelector('[data-key="look.offsetAngle"]'))) {
     inspector.build(settings, limits());
     updateThumbs();
@@ -136,6 +161,8 @@ function change(path, value) {
   if (path.startsWith('map.params.')) updateThumbs(path.split('.')[2]);
   else if (path.startsWith('map.adjust.') || path.startsWith('map.anim.')) updateThumbs();
   if (path === 'view') for (const b of document.querySelectorAll('#viewBar button')) b.classList.toggle('on', b.dataset.view === value);
+  handles.update();
+  if (path === 'mode' || path.startsWith('slitscan.')) scheduleAnalysis();
   applySettings();
 }
 
@@ -153,6 +180,8 @@ async function openFile(file) {
   }
   showMessage('');
   timeline.reset();
+  if (analysis) analysis.stop();
+  currentFile = file;
   let info;
   try {
     info = await player.open(file);
@@ -164,6 +193,7 @@ async function openFile(file) {
   }
   document.body.dataset.state = 'open';
   $('view').hidden = false;
+  handles.update();
   try {
     await configureStore();
   } catch (e) {
@@ -220,11 +250,23 @@ async function start() {
     onProgress: setProgress,
   });
   timeline = new Timeline($('transport'), player);
+  handles = new LineHandles($('preview'), $('view'), { change, settings });
+  analysis = new Analysis(DECODE_WORKER, gpu, {
+    onProgress: (f) => {
+      setProgress(f);
+      status();
+    },
+    // New rows: show them on a paused preview.
+    onRows: () => {
+      if (!player.playing && !player.busy && player.current >= 0) gpu.call({ cmd: 'render', index: player.current });
+    },
+    onDone: () => status(),
+  });
   inspector = new Inspector($('inspector'), { change, openMap, info: () => mapInfo });
   inspector.build(settings, { maxDelay: 999 });
   gpu.call({ cmd: 'settings', settings: clone(settings) });
   for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
-  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs });
+  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey });
   $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));
   $('resSelect').addEventListener('change', async (e) => {
     store.short = Number(e.target.value);

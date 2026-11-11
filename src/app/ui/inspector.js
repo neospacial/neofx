@@ -3,6 +3,7 @@
 
 import { slider, segmented, toggle, section, select, colors } from './widgets.js';
 import { BLEND_MODES, DECAYS } from '../../gpu/blend.js';
+import { RATE_TYPES } from '../../modes/slit.js';
 import { getPath, fixSteps } from '../settings.js';
 import { MAPS } from '../../maps/builtin.js';
 import { CURVE_PRESETS } from '../../maps/curve.js';
@@ -26,7 +27,7 @@ export class Inspector {
     this.tiles = {}; // map id -> canvas
   }
 
-  // limits: { maxDelay } (the store limit, N - 1).
+  // limits: { maxDelay (the store limit, N - 1), maxAge (the slit history rows) }.
   build(settings, limits) {
     const S = settings;
     const r = this.root;
@@ -51,91 +52,114 @@ export class Inspector {
     const bool = (parent, key, label) => add(parent, toggle({ key, label, value: getPath(S, key), onChange: on(key) }));
 
     const mode = sec('mode', 'Mode');
-    add(mode, segmented({ key: 'mode', options: [['timemap', 'Time Map'], ['slitscan', 'Slit Scan', true]], value: S.mode, onChange: on('mode') }));
+    add(mode, segmented({ key: 'mode', options: [['timemap', 'Time Map'], ['slitscan', 'Slit Scan']], value: S.mode, onChange: on('mode') }));
 
-    // Map.
-    const M = S.map;
-    const map = sec('map', 'Map');
-    add(map, segmented({ key: 'map.source', label: 'Source', options: [['builtin', 'Built-in'], ['image', 'Image'], ['video', 'Video']], value: M.source, onChange: on('map.source') }));
-    if (M.source === 'builtin') {
-      const grid = el('div', 'mapGrid');
-      for (const m of MAPS) {
-        const b = el('button', 'mapTile');
-        b.type = 'button';
-        b.dataset.map = m.id;
-        b.title = m.needs ? `${m.name} (needs Cutout: a later version)` : m.name;
-        b.disabled = !!m.needs;
-        b.classList.toggle('on', m.id === M.type);
-        const c = el('canvas');
-        c.width = THUMB_W;
-        c.height = THUMB_H;
-        this.tiles[m.id] = c;
-        b.append(c, el('span', null, m.name));
-        b.addEventListener('click', () => this.app.change('map.type', m.id));
-        grid.append(b);
+    if (S.mode === 'timemap') {
+      // Map.
+      const M = S.map;
+      const map = sec('map', 'Map');
+      add(map, segmented({ key: 'map.source', label: 'Source', options: [['builtin', 'Built-in'], ['image', 'Image'], ['video', 'Video']], value: M.source, onChange: on('map.source') }));
+      if (M.source === 'builtin') {
+        const grid = el('div', 'mapGrid');
+        for (const m of MAPS) {
+          const b = el('button', 'mapTile');
+          b.type = 'button';
+          b.dataset.map = m.id;
+          b.title = m.needs ? `${m.name} (needs Cutout: a later version)` : m.name;
+          b.disabled = !!m.needs;
+          b.classList.toggle('on', m.id === M.type);
+          const c = el('canvas');
+          c.width = THUMB_W;
+          c.height = THUMB_H;
+          this.tiles[m.id] = c;
+          b.append(c, el('span', null, m.name));
+          b.addEventListener('click', () => this.app.change('map.type', m.id));
+          grid.append(b);
+        }
+        map.append(grid);
+        const spec = MAPS.find((m) => m.id === M.type);
+        for (const [k, label, min, max, step, def, unit] of spec.params) num(map, `map.params.${M.type}.${k}`, label, min, max, step, def, unit);
+        if (M.type === 'self') map.append(el('p', 'note', 'Bright = old. Use Invert (Adjust) for bright = new.'));
+      } else {
+        const info = this.app.info();
+        const row = el('div', 'setting fileRow');
+        const btn = el('button', null, M.source === 'image' ? 'Open image…' : 'Open video…');
+        btn.type = 'button';
+        btn.dataset.act = `open-${M.source}`;
+        btn.addEventListener('click', () => this.app.openMap(M.source));
+        const name = M.source === 'image' ? M.image.name : M.video.name;
+        row.append(btn, el('span', 'fileName', name ? `${name}${M.source === 'video' && info.mapFrames ? ` · ${info.mapFrames} frames` : ''}` : 'No file'));
+        map.append(row);
+        add(map, segmented({ key: 'map.image.fit', label: 'Fit', options: [['fill', 'Fill'], ['fit', 'Fit'], ['stretch', 'Stretch']], value: M.image.fit, onChange: on('map.image.fit') }));
+        num(map, 'map.image.outside', 'Outside value', 0, 1, 0.01, 0);
+        num(map, 'map.image.x', 'Position x', -1, 1, 0.01, 0);
+        num(map, 'map.image.y', 'Position y', -1, 1, 0.01, 0);
+        num(map, 'map.image.scale', 'Scale', 0.1, 8, 0.01, 1);
+        num(map, 'map.image.rotation', 'Rotation', -180, 180, 1, 0, '°');
+        bool(map, 'map.image.flipX', 'Flip horizontal');
+        bool(map, 'map.image.flipY', 'Flip vertical');
+        if (M.source === 'video') {
+          num(map, 'map.video.speed', 'Speed', -4, 4, 0.05, 1, '×');
+          num(map, 'map.video.offset', 'Offset', -1000, 1000, 1, 0, 'f');
+          add(map, segmented({ key: 'map.video.end', label: 'End', options: [['loop', 'Loop'], ['hold', 'Hold last'], ['pingpong', 'Ping-pong']], value: M.video.end, onChange: on('map.video.end') }));
+        }
       }
-      map.append(grid);
-      const spec = MAPS.find((m) => m.id === M.type);
-      for (const [k, label, min, max, step, def, unit] of spec.params) num(map, `map.params.${M.type}.${k}`, label, min, max, step, def, unit);
-      if (M.type === 'self') map.append(el('p', 'note', 'Bright = old. Use Invert (Adjust) for bright = new.'));
+
+      const adj = sec('adjust', 'Map adjust', false);
+      bool(adj, 'map.adjust.invert', 'Invert');
+      num(adj, 'map.adjust.black', 'Black point', 0, 1, 0.01, 0);
+      num(adj, 'map.adjust.white', 'White point', 0, 1, 0.01, 1);
+      num(adj, 'map.adjust.gamma', 'Gamma', 0.1, 5, 0.01, 1);
+      num(adj, 'map.adjust.contrast', 'Contrast', -1, 1, 0.01, 0);
+      add(adj, segmented({ key: 'map.adjust.curve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: M.adjust.curve, onChange: on('map.adjust.curve') }));
+      num(adj, 'map.adjust.posterize', 'Posterize', 0, 64, 1, 0);
+      num(adj, 'map.adjust.blur', 'Blur', 0, 64, 0.5, 0, 'px');
+      num(adj, 'map.adjust.tileX', 'Tile x', 1, 16, 1, 1);
+      num(adj, 'map.adjust.tileY', 'Tile y', 1, 16, 1, 1);
+      bool(adj, 'map.adjust.mirrorTile', 'Mirror tile');
+      num(adj, 'map.adjust.offsetX', 'Offset x', -1, 1, 0.01, 0);
+      num(adj, 'map.adjust.offsetY', 'Offset y', -1, 1, 0.01, 0);
+
+      if (M.source === 'builtin') {
+        const an = sec('anim', 'Map animation', false);
+        num(an, 'map.anim.phaseSpeed', 'Phase speed', -0.2, 0.2, 0.001, 0, '/f');
+        num(an, 'map.anim.rotSpeed', 'Rotation speed', -10, 10, 0.1, 0, '°/f');
+        num(an, 'map.anim.pulseAmount', 'Pulse amount', 0, 1, 0.01, 0);
+        num(an, 'map.anim.pulsePeriod', 'Pulse period', 2, 600, 1, 60, 'f');
+        num(an, 'map.anim.seedEvery', 'New seed every', 0, 600, 1, 0, 'f');
+      }
+
+      const time = sec('time', 'Time');
+      const T = S.timemap;
+      add(time, slider({ key: 'timemap.maxDelay', label: 'Max delay', min: 0, max: limits.maxDelay, step: 1, value: Math.min(T.maxDelay, limits.maxDelay), def: Math.min(30, limits.maxDelay), unit: 'f', onChange: on('timemap.maxDelay') }));
+      add(time, slider({ key: 'timemap.steps', label: 'Delay steps', min: 0, max: 64, step: 1, value: T.steps, def: 0, onChange: (v) => {
+        const f = fixSteps(v, T.steps);
+        this.rows['timemap.steps'].setValue(f);
+        this.app.change('timemap.steps', f);
+      } }));
+      add(time, toggle({ key: 'timemap.blend', label: 'Frame blend', value: T.blend, onChange: on('timemap.blend') }));
     } else {
-      const info = this.app.info();
-      const row = el('div', 'setting fileRow');
-      const btn = el('button', null, M.source === 'image' ? 'Open image…' : 'Open video…');
-      btn.type = 'button';
-      btn.dataset.act = `open-${M.source}`;
-      btn.addEventListener('click', () => this.app.openMap(M.source));
-      const name = M.source === 'image' ? M.image.name : M.video.name;
-      row.append(btn, el('span', 'fileName', name ? `${name}${M.source === 'video' && info.mapFrames ? ` · ${info.mapFrames} frames` : ''}` : 'No file'));
-      map.append(row);
-      add(map, segmented({ key: 'map.image.fit', label: 'Fit', options: [['fill', 'Fill'], ['fit', 'Fit'], ['stretch', 'Stretch']], value: M.image.fit, onChange: on('map.image.fit') }));
-      num(map, 'map.image.outside', 'Outside value', 0, 1, 0.01, 0);
-      num(map, 'map.image.x', 'Position x', -1, 1, 0.01, 0);
-      num(map, 'map.image.y', 'Position y', -1, 1, 0.01, 0);
-      num(map, 'map.image.scale', 'Scale', 0.1, 8, 0.01, 1);
-      num(map, 'map.image.rotation', 'Rotation', -180, 180, 1, 0, '°');
-      bool(map, 'map.image.flipX', 'Flip horizontal');
-      bool(map, 'map.image.flipY', 'Flip vertical');
-      if (M.source === 'video') {
-        num(map, 'map.video.speed', 'Speed', -4, 4, 0.05, 1, '×');
-        num(map, 'map.video.offset', 'Offset', -1000, 1000, 1, 0, 'f');
-        add(map, segmented({ key: 'map.video.end', label: 'End', options: [['loop', 'Loop'], ['hold', 'Hold last'], ['pingpong', 'Ping-pong']], value: M.video.end, onChange: on('map.video.end') }));
+      // Mode 2, Slit Scan (§8.5).
+      const SL = S.slitscan;
+      const src = sec('source', 'Source');
+      add(src, segmented({ key: 'slitscan.source', label: 'Source', options: [['line', 'Line'], ['edge', 'Subject edge', true]], value: SL.source, onChange: on('slitscan.source') }));
+      num(src, 'slitscan.x', 'Line x', 0, 1, 0.001, 0.5);
+      num(src, 'slitscan.y', 'Line y', 0, 1, 0.001, 0.5);
+      num(src, 'slitscan.angle', 'Line angle', 0, 360, 0.1, 90, '°');
+      bool(src, 'slitscan.flip', 'Flip direction');
+      num(src, 'slitscan.width', 'Slit width', 1, 16, 1, 1, 'px');
+      src.append(Object.assign(document.createElement('p'), { className: 'note', textContent: 'Drag the line on the preview. The round handle turns it (Shift: 15° steps). The arrow flips the direction.' }));
+      const time = sec('time2', 'Time');
+      bool(time, 'slitscan.time', 'Time');
+      if (SL.time) {
+        add(time, select({ key: 'slitscan.rateType', label: 'Rate type', options: RATE_TYPES, value: SL.rateType, onChange: on('slitscan.rateType') }));
+        num(time, 'slitscan.rate', SL.rateType === 'constant' ? 'Rate' : 'Rate (start)', 0.05, 32, 0.05, 1, 'px/f');
+        if (SL.rateType !== 'constant') num(time, 'slitscan.rateEnd', 'Rate at Max age', 0.05, 32, 0.05, 4, 'px/f');
+        if (SL.rateType === 'curve') add(time, segmented({ key: 'slitscan.curve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: SL.curve, onChange: on('slitscan.curve') }));
+        num(time, 'slitscan.maxAge', 'Max age', 1, limits.maxAge, 1, Math.min(600, limits.maxAge), 'f');
+        add(time, segmented({ key: 'slitscan.sampling', label: 'Sampling', options: [['sharp', 'Sharp'], ['blend', 'Blend']], value: SL.sampling, onChange: on('slitscan.sampling') }));
       }
     }
-
-    const adj = sec('adjust', 'Map adjust', false);
-    bool(adj, 'map.adjust.invert', 'Invert');
-    num(adj, 'map.adjust.black', 'Black point', 0, 1, 0.01, 0);
-    num(adj, 'map.adjust.white', 'White point', 0, 1, 0.01, 1);
-    num(adj, 'map.adjust.gamma', 'Gamma', 0.1, 5, 0.01, 1);
-    num(adj, 'map.adjust.contrast', 'Contrast', -1, 1, 0.01, 0);
-    add(adj, segmented({ key: 'map.adjust.curve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: M.adjust.curve, onChange: on('map.adjust.curve') }));
-    num(adj, 'map.adjust.posterize', 'Posterize', 0, 64, 1, 0);
-    num(adj, 'map.adjust.blur', 'Blur', 0, 64, 0.5, 0, 'px');
-    num(adj, 'map.adjust.tileX', 'Tile x', 1, 16, 1, 1);
-    num(adj, 'map.adjust.tileY', 'Tile y', 1, 16, 1, 1);
-    bool(adj, 'map.adjust.mirrorTile', 'Mirror tile');
-    num(adj, 'map.adjust.offsetX', 'Offset x', -1, 1, 0.01, 0);
-    num(adj, 'map.adjust.offsetY', 'Offset y', -1, 1, 0.01, 0);
-
-    if (M.source === 'builtin') {
-      const an = sec('anim', 'Map animation', false);
-      num(an, 'map.anim.phaseSpeed', 'Phase speed', -0.2, 0.2, 0.001, 0, '/f');
-      num(an, 'map.anim.rotSpeed', 'Rotation speed', -10, 10, 0.1, 0, '°/f');
-      num(an, 'map.anim.pulseAmount', 'Pulse amount', 0, 1, 0.01, 0);
-      num(an, 'map.anim.pulsePeriod', 'Pulse period', 2, 600, 1, 60, 'f');
-      num(an, 'map.anim.seedEvery', 'New seed every', 0, 600, 1, 0, 'f');
-    }
-
-    const time = sec('time', 'Time');
-    const T = S.timemap;
-    add(time, slider({ key: 'timemap.maxDelay', label: 'Max delay', min: 0, max: limits.maxDelay, step: 1, value: Math.min(T.maxDelay, limits.maxDelay), def: Math.min(30, limits.maxDelay), unit: 'f', onChange: on('timemap.maxDelay') }));
-    add(time, slider({ key: 'timemap.steps', label: 'Delay steps', min: 0, max: 64, step: 1, value: T.steps, def: 0, onChange: (v) => {
-      const f = fixSteps(v, T.steps);
-      this.rows['timemap.steps'].setValue(f);
-      this.app.change('timemap.steps', f);
-    } }));
-    add(time, toggle({ key: 'timemap.blend', label: 'Frame blend', value: T.blend, onChange: on('timemap.blend') }));
 
     // Composite (§10): Replace shows the effect as it is; Blend puts it on the original.
     const Cp = S.composite;
@@ -162,8 +186,8 @@ export class Inspector {
       add(look, slider({ key: 'look.tintAmount', label: 'Tint amount', min: 0, max: 1, step: 0.01, value: L.tintAmount, def: 1, onChange: on('look.tintAmount') }));
     }
     add(look, slider({ key: 'look.ageBrightness', label: 'Age brightness', min: 0, max: 2, step: 0.01, value: L.ageBrightness, def: 1, unit: '×', onChange: on('look.ageBrightness') }));
-    add(look, slider({ key: 'look.offset', label: 'Spatial offset', min: 0, max: 64, step: 0.5, value: L.offset, def: 0, unit: 'px', onChange: on('look.offset') }));
-    if (L.offset > 0) add(look, slider({ key: 'look.offsetAngle', label: 'Offset angle', min: 0, max: 360, step: 1, value: L.offsetAngle, def: 0, unit: '°', onChange: on('look.offsetAngle') }));
+    if (S.mode === 'timemap') add(look, slider({ key: 'look.offset', label: 'Spatial offset', min: 0, max: 64, step: 0.5, value: L.offset, def: 0, unit: 'px', onChange: on('look.offset') }));
+    if (S.mode === 'timemap' && L.offset > 0) add(look, slider({ key: 'look.offsetAngle', label: 'Offset angle', min: 0, max: 360, step: 1, value: L.offsetAngle, def: 0, unit: '°', onChange: on('look.offsetAngle') }));
   }
 
   // Draw map thumbnails: images = { id: Uint8Array luma (THUMB_W x THUMB_H) }.
