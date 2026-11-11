@@ -14,9 +14,18 @@
   <header id="topBar">
     <span id="logo">neofx</span>
     <button id="openBtn" type="button">Open</button>
+    <button id="presetsBtn" class="wide" type="button" aria-haspopup="dialog">Presets ▾</button>
+    <button id="undoBtn" class="wide" type="button" disabled aria-label="Undo" title="Undo (Ctrl+Z)">↶</button>
+    <button id="redoBtn" class="wide" type="button" disabled aria-label="Redo" title="Redo (Shift+Ctrl+Z)">↷</button>
     <span class="spacer"></span>
     <span id="status" aria-live="polite"></span>
+    <button id="menuBtn" class="narrow" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false">⋯</button>
     <button id="exportBtn" type="button" disabled>Export</button>
+    <div id="menu" role="menu" hidden>
+      <button type="button" role="menuitem" data-act="presets">Presets</button>
+      <button type="button" role="menuitem" data-act="undo">Undo</button>
+      <button type="button" role="menuitem" data-act="redo">Redo</button>
+    </div>
   </header>
 
   <main id="stage">
@@ -27,21 +36,29 @@
           <span>Drop a file here, or touch to select one.</span>
         </label>
         <div id="modeInfo">
-          <div><b>Time Map</b> — a greyscale map gives each pixel a delay in frames.</div>
-          <div><b>Slit Scan</b> — a 1 px line repeats in one direction, and gets older with distance.</div>
+          <figure><canvas id="demoTime" width="160" height="90" aria-label="Time Map example"></canvas>
+            <figcaption><b>Time Map</b> — a greyscale map gives each pixel a delay in frames.</figcaption></figure>
+          <figure><canvas id="demoSlit" width="160" height="90" aria-label="Slit Scan example"></canvas>
+            <figcaption><b>Slit Scan</b> — a 1 px line repeats in one direction, and gets older with distance.</figcaption></figure>
         </div>
       </div>
       <div id="viewBar" role="tablist" aria-label="View">
         <button type="button" data-view="result" class="on">Result</button>
         <button type="button" data-view="original">Original</button>
-        <button type="button" data-view="map">Map</button>
+        <button type="button" data-view="split">Split</button>
         <button type="button" data-view="mask">Mask</button>
+        <button type="button" data-view="map">Map</button>
+        <span class="vsep"></span>
+        <button type="button" data-zoom="fit" class="on">Fit</button>
+        <button type="button" data-zoom="100">100%</button>
       </div>
+      <div id="splitLine" hidden><span></span></div>
       <canvas id="view" hidden></canvas>
       <div id="progress" hidden></div>
       <div id="message" hidden></div>
     </section>
-    <aside id="inspector" aria-label="Inspector"></aside>
+    <div id="sizer" aria-hidden="true"></div>
+    <aside id="inspectorBox"><div id="sheetHandle" aria-hidden="true"><span></span></div><div id="inspector" aria-label="Inspector"></div></aside>
   </main>
 
   <footer id="transport">
@@ -64,11 +81,19 @@
     <canvas class="strip" aria-label="Timeline"></canvas>
   </footer>
   <dialog id="exportDialog" aria-label="Export"></dialog>
+  <dialog id="presetDialog" aria-label="Presets">
+    <div class="presetHead"><h2>Presets</h2>
+      <button type="button" id="presetSave">Save preset…</button>
+      <button type="button" id="presetLoad">Load preset…</button>
+      <button type="button" id="presetClose" aria-label="Close">✕</button></div>
+    <div id="presetGrid"></div>
+  </dialog>
+  <input id="presetFileInput" type="file" accept=".json,application/json" hidden>
   <input id="mapFileInput" type="file" hidden>
   <input id="plateFileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
   <input id="maskFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
   <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
 </div>
-<!--@modules:io/demux.js,io/mp4.js,io/encoder-config.js,maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/export.js,app/ui/exportdialog.js,app/main.js-->
+<!--@modules:io/demux.js,io/mp4.js,io/encoder-config.js,maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/curve.js,app/random.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/export.js,app/ui/exportdialog.js,app/history.js,app/presets.js,app/ui/layout.js,app/ui/startscreen.js,app/main.js-->
 </body>
 </html>

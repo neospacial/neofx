@@ -35,7 +35,46 @@ export function slider(opts) {
     row.classList.toggle('default', v === opts.def);
     if (fire) opts.onChange(v);
   };
-  range.addEventListener('input', () => set(range.value, true));
+  // Long press, then drag: fine steps (×0.1) (plan §12.3). The value follows the pointer from the
+  // place of the long press, at a tenth of the normal speed.
+  let fine = null, press = 0;
+  range.addEventListener('pointerdown', (e) => {
+    clearTimeout(press);
+    const x0 = e.clientX;
+    press = setTimeout(() => {
+      fine = { x: x0, v: Number(range.value), w: range.getBoundingClientRect().width || 1 };
+      row.classList.add('fine');
+    }, 450);
+    const move = (ev) => {
+      if (!fine && Math.abs(ev.clientX - x0) > 6) clearTimeout(press);
+      if (fine) fine.px = ev.clientX;
+    };
+    const up = () => {
+      clearTimeout(press);
+      fine = null;
+      row.classList.remove('fine');
+      range.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    range.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+  range.addEventListener('input', () => {
+    if (fine && fine.px !== undefined) {
+      const st = Number(opts.step ?? 1);
+      let v = fine.v + ((fine.px - fine.x) / fine.w) * (opts.max - opts.min) * 0.1;
+      v = Math.round(v / st) * st;
+      set(Number(v.toFixed(6)), true);
+      return;
+    }
+    set(range.value, true);
+  });
+  row.fineAt = (v0, dx) => {
+    // tests: the value of a fine drag of dx px from v0
+    const st = Number(opts.step ?? 1);
+    const w = range.getBoundingClientRect().width || 1;
+    return Math.round((v0 + (dx / w) * (opts.max - opts.min) * 0.1) / st) * st;
+  };
   num.addEventListener('change', () => set(num.value, true));
   label.addEventListener('dblclick', () => set(opts.def, true));
   // Mark the default on the track.

@@ -6,7 +6,8 @@ import { BLEND_MODES, DECAYS } from '../../gpu/blend.js';
 import { RATE_TYPES } from '../../modes/slit.js';
 import { getPath, fixSteps } from '../settings.js';
 import { MAPS } from '../../maps/builtin.js';
-import { CURVE_PRESETS } from '../../maps/curve.js';
+import { curveEditor } from './curve.js';
+import { RANDOM_SECTIONS } from '../random.js';
 
 export const THUMB_W = 72;
 export const THUMB_H = 40;
@@ -43,9 +44,35 @@ export class Inspector {
       return row;
     };
     const on = (key) => (v) => this.app.change(key, v);
+    // The tab of each section in the narrow layout (plan §12.3).
+    const TABS = { mode: 'mode', map: 'map', adjust: 'map', anim: 'map', source: 'map', time: 'time', time2: 'time', cutout: 'cutout', subject: 'cutout', composite: 'mix', look: 'look' };
     const sec = (name, title, def = true) => {
       const d = section(title, open[name] ?? def);
       d.dataset.name = name;
+      d.dataset.tab = TABS[name] || 'mode';
+      // Randomize (plan §12.5): a lock keeps the section; the dice changes only it.
+      if (RANDOM_SECTIONS.includes(name)) {
+        const tools = document.createElement('span');
+        tools.className = 'secTools';
+        const locked = this.app.locks && this.app.locks.has(name);
+        const lock = Object.assign(document.createElement('button'), { type: 'button', className: `lock${locked ? ' on' : ''}`, textContent: locked ? '🔒' : '🔓' });
+        lock.title = 'Lock: Randomize keeps this section';
+        lock.dataset.lock = name;
+        lock.setAttribute('aria-pressed', String(!!locked));
+        lock.addEventListener('click', (e) => {
+          e.preventDefault();
+          this.app.toggleLock(name);
+        });
+        const dice = Object.assign(document.createElement('button'), { type: 'button', className: 'dice', textContent: '🎲' });
+        dice.title = 'Randomize this section';
+        dice.dataset.dice = name;
+        dice.addEventListener('click', (e) => {
+          e.preventDefault();
+          this.app.randomize([name]);
+        });
+        tools.append(dice, lock);
+        d.querySelector('summary').append(tools);
+      }
       r.append(d);
       return d;
     };
@@ -113,7 +140,7 @@ export class Inspector {
       num(adj, 'map.adjust.white', 'White point', 0, 1, 0.01, 1);
       num(adj, 'map.adjust.gamma', 'Gamma', 0.1, 5, 0.01, 1);
       num(adj, 'map.adjust.contrast', 'Contrast', -1, 1, 0.01, 0);
-      add(adj, segmented({ key: 'map.adjust.curve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: M.adjust.curve, onChange: on('map.adjust.curve') }));
+      add(adj, curveEditor({ key: 'map.adjust.curve', label: 'Curve', value: M.adjust.curve, onChange: (v, final) => this.app.change('map.adjust.curve', v, final) }));
       num(adj, 'map.adjust.posterize', 'Posterize', 0, 64, 1, 0);
       num(adj, 'map.adjust.blur', 'Blur', 0, 64, 0.5, 0, 'px');
       num(adj, 'map.adjust.tileX', 'Tile x', 1, 16, 1, 1);
@@ -163,7 +190,7 @@ export class Inspector {
         add(time, select({ key: 'slitscan.rateType', label: 'Rate type', options: RATE_TYPES, value: SL.rateType, onChange: on('slitscan.rateType') }));
         num(time, 'slitscan.rate', SL.rateType === 'constant' ? 'Rate' : 'Rate (start)', 0.05, 32, 0.05, 1, 'px/f');
         if (SL.rateType !== 'constant') num(time, 'slitscan.rateEnd', 'Rate at Max age', 0.05, 32, 0.05, 4, 'px/f');
-        if (SL.rateType === 'curve') add(time, segmented({ key: 'slitscan.curve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: SL.curve, onChange: on('slitscan.curve') }));
+        if (SL.rateType === 'curve') add(time, curveEditor({ key: 'slitscan.curve', label: 'Rate curve', value: SL.curve, onChange: (v, final) => this.app.change('slitscan.curve', v, final) }));
         if (edge) {
           num(time, 'slitscan.maxAgeEdge', 'Max age', 1, Math.max(1, limits.maxAgeEdge), 1, Math.min(120, limits.maxAgeEdge), 'f');
           const st = this.app.edgeStats ? this.app.edgeStats() : null;
@@ -291,7 +318,7 @@ export class Inspector {
         add(comp, slider({ key: 'composite.decayLength', label: Cp.decay === 'exp' ? 'Half-life' : 'Decay length', min: 0, max: Math.max(1, limits.maxDelay), step: 1, value: Cp.decayLength, def: 0, unit: 'f', onChange: on('composite.decayLength') }));
         comp.append(Object.assign(document.createElement('p'), { className: 'note', textContent: '0 = the Max age.' }));
       }
-      if (Cp.decay === 'curve') add(comp, segmented({ key: 'composite.decayCurve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: Cp.decayCurve, onChange: on('composite.decayCurve') }));
+      if (Cp.decay === 'curve') add(comp, curveEditor({ key: 'composite.decayCurve', label: 'Decay curve', value: Cp.decayCurve, onChange: (v, final) => this.app.change('composite.decayCurve', v, final) }));
       add(comp, toggle({ key: 'composite.linear', label: 'Linear blend', value: Cp.linear, onChange: on('composite.linear') }));
     }
 
@@ -306,6 +333,43 @@ export class Inspector {
     add(look, slider({ key: 'look.ageBrightness', label: 'Age brightness', min: 0, max: 2, step: 0.01, value: L.ageBrightness, def: 1, unit: '×', onChange: on('look.ageBrightness') }));
     if (S.mode === 'timemap') add(look, slider({ key: 'look.offset', label: 'Spatial offset', min: 0, max: 64, step: 0.5, value: L.offset, def: 0, unit: 'px', onChange: on('look.offset') }));
     if (S.mode === 'timemap' && L.offset > 0) add(look, slider({ key: 'look.offsetAngle', label: 'Offset angle', min: 0, max: 360, step: 1, value: L.offsetAngle, def: 0, unit: '°', onChange: on('look.offsetAngle') }));
+
+    // The narrow layout: tabs for the sections (plan §12.3).
+    const tabs = document.createElement('div');
+    tabs.className = 'tabBar';
+    tabs.setAttribute('role', 'tablist');
+    for (const [id, text] of [['mode', 'Mode'], ['map', S.mode === 'timemap' ? 'Map' : 'Source'], ['time', 'Time'], ['cutout', 'Cutout'], ['mix', 'Mix'], ['look', 'Look']]) {
+      const b = Object.assign(document.createElement('button'), { type: 'button', textContent: text });
+      b.dataset.tab = id;
+      b.setAttribute('role', 'tab');
+      b.addEventListener('click', () => this.setTab(id));
+      tabs.append(b);
+    }
+    r.prepend(tabs);
+    this.setTab(this.tab || 'mode');
+
+    // Randomize (plan §12.5): the sections that are not locked; the seed is shown (and makes the same look).
+    const rb = document.createElement('div');
+    rb.className = 'randomBar';
+    const randBtn = Object.assign(document.createElement('button'), { type: 'button', id: 'randomizeBtn', textContent: '🎲 Randomize' });
+    randBtn.addEventListener('click', () => this.app.randomize());
+    const seed = Object.assign(document.createElement('span'), { className: 'seed', textContent: this.app.lastSeed && this.app.lastSeed() ? `Look #${this.app.lastSeed()}` : '' });
+    rb.append(randBtn, seed);
+    r.append(rb);
+  }
+
+  // The narrow layout shows the sections of one tab.
+  setTab(id) {
+    this.tab = id;
+    this.root.dataset.tab = id;
+    for (const b of this.root.querySelectorAll('.tabBar button')) {
+      b.classList.toggle('on', b.dataset.tab === id);
+      b.setAttribute('aria-selected', String(b.dataset.tab === id));
+    }
+    // In a tab, the sections are open.
+    if (window.matchMedia && window.matchMedia('(max-width: 999px)').matches) {
+      for (const d of this.root.querySelectorAll(`details[data-tab="${id}"]`)) d.open = true;
+    }
   }
 
   // Draw map thumbnails: images = { id: Uint8Array luma (THUMB_W x THUMB_H) }.
@@ -328,6 +392,10 @@ export class Inspector {
     for (const [key, row] of Object.entries(this.rows)) {
       if (key.startsWith('tools.')) continue;
       const v = getPath(settings, key);
+      if (row.classList.contains('curve')) {
+        row.setValue(v);
+        continue;
+      }
       row.setValue(typeof v === 'boolean' ? String(v) : v);
     }
   }

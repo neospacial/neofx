@@ -129,6 +129,32 @@ export class Mask {
     this.version++;
   }
 
+  // The garbage matte as RGBA bytes (R = always, G = never), the first row at the top (presets).
+  matteGet() {
+    const gl = this.gl;
+    const [w, h] = this.matteSize;
+    this.into(this.matte[0], w, h);
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    let any = false;
+    for (let i = 0; i < px.length; i += 4) if (px[i] || px[i + 1]) { any = true; break; }
+    return { cmd: 'matte', width: w, height: h, pixels: px, empty: !any };
+  }
+
+  // Set the matte from an image of the matte size (a preset).
+  matteSet(bitmap) {
+    const gl = this.gl;
+    const [w, h] = this.matteSize;
+    gl.bindTexture(gl.TEXTURE_2D, this.matte[0]);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+    bitmap.close();
+    this.version++;
+    return { cmd: 'matte', width: w, height: h };
+  }
+
   // A brush stroke (plan §9.1 step 3). points: [[u, v], ...] in 0..1 of the picture; size: the brush
   // diameter in working pixels; mode: 'always' | 'never' | 'erase'.
   stroke(points, size, hardness, mode) {

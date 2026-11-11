@@ -140,6 +140,8 @@ export class Engine {
     }
     if (m.cmd === 'maskImportClear') return this.rerender((this.mask.clearImport(), { cmd: 'import' }));
     if (m.cmd === 'pick') return this.pick(m);
+    if (m.cmd === 'matteGet') return this.mask.matteGet();
+    if (m.cmd === 'matteSet') return this.rerender(this.mask.matteSet(m.bitmap));
     if (m.cmd === 'exporting') {
       this.exporting = !!m.on;
       return { cmd: 'exporting', on: this.exporting };
@@ -415,6 +417,26 @@ export class Engine {
   // Render frame index to the canvas. delay (tests): show the stored frame index - delay.
   render(index, delay) {
     const gl = this.gl;
+    // Split view (plan §12.2): the result, and the original on the left of the divider.
+    if (delay === undefined && this.settings && this.settings.view === 'split') {
+      const saved = this.settings;
+      this.settings = { ...saved, view: 'result' };
+      try {
+        this.render(index);
+      } finally {
+        this.settings = saved;
+      }
+      this.last = { index, delay };
+      const x = Math.round(Math.min(1, Math.max(0, saved.splitPos ?? 0.5)) * this.w);
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(0, 0, x, this.h);
+      gl.useProgram(this.show.prog);
+      this.bindStore(this.show);
+      gl.uniform1f(this.show.u.u_layer, this.layerOf(index));
+      drawQuad(gl);
+      gl.disable(gl.SCISSOR_TEST);
+      return;
+    }
     this.last = { index, delay };
     const s0 = this.settings;
     if (s0 && delay === undefined && this.maskNeeded()) this.mask.update(index);
