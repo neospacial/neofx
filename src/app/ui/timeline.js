@@ -1,6 +1,10 @@
 // Transport and timeline (plan §12.2, §12.3, §12.7): buttons, time, frame number, Loop, the
 // thumbnail strip with the playhead and the In / Out markers. Drag on the strip to scrub.
 
+// The play / pause icons (SVG: the media symbols are emoji on iOS).
+const ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15L19.5 12z"/></svg>';
+const ICON_PAUSE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 5h4v14h-4zM13.5 5h4v14h-4z"/></svg>';
+
 export function formatTime(us) {
   const cs = Math.max(0, Math.floor(us / 10000));
   const m = Math.floor(cs / 6000), s = Math.floor(cs / 100) % 60, c = cs % 100;
@@ -74,8 +78,12 @@ export class Timeline {
     const P = this.player;
     const info = P.info;
     const t = Math.max(0, P.current);
-    this.$('[data-act=play]').textContent = P.playing ? '❚❚' : '▶';
-    this.$('[data-act=play]').setAttribute('aria-label', P.playing ? 'Pause' : 'Play');
+    const play = this.$('[data-act=play]');
+    if (play.dataset.icon !== String(P.playing)) {
+      play.dataset.icon = String(P.playing);
+      play.innerHTML = P.playing ? ICON_PAUSE : ICON_PLAY;
+    }
+    play.setAttribute('aria-label', P.playing ? 'Pause' : 'Play');
     this.$('[data-act=loop]').classList.toggle('on', P.loop);
     this.$('[data-act=in]').classList.toggle('on', P.inPoint !== null);
     this.$('[data-act=out]').classList.toggle('on', P.outPoint !== null);
@@ -119,7 +127,7 @@ export class Timeline {
       ctx.fillRect(x(a) - dpr, 0, 2 * dpr, h);
       ctx.fillRect(x(b) - dpr, 0, 2 * dpr, h);
     }
-    ctx.fillStyle = '#4fd1c5';
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#eee100';
     ctx.fillRect(x(Math.max(0, P.current)) - dpr, 0, 2 * dpr, h);
   }
 }

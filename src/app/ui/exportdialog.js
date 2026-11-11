@@ -82,6 +82,9 @@ export class ExportDialog {
       go.disabled = true;
       for (const i of form.querySelectorAll('select, input')) i.disabled = true;
       prog.hidden = false;
+      // Until the first frame: a moving bar (the encoder probe, the file index, the warm-up frames).
+      prog.classList.add('busy');
+      text.textContent = 'Preparing…';
       const s = size();
       const opts = {
         width: s.width, height: s.height, quality: quality.value, mbps: Number(mbps.value), keyint: Number(keyint.value),
@@ -90,20 +93,26 @@ export class ExportDialog {
       };
       try {
         const r = await this.app.run(opts, (p) => {
-          if (p.phase === 'analysis') {
+          prog.classList.toggle('busy', ['prepare', 'warmup', 'audio', 'mux'].includes(p.phase));
+          if (p.phase === 'prepare') text.textContent = 'Preparing…';
+          else if (p.phase === 'warmup') text.textContent = `Preparing the first frames… ${Math.round((p.warm || 0) * 100)} %`;
+          else if (p.phase === 'analysis') {
             bar.style.width = `${Math.round((p.analysis || 0) * 100)}%`;
             text.textContent = `Analysis ${Math.round((p.analysis || 0) * 100)} %`;
-          } else if (p.phase === 'mux') text.textContent = 'Writing the file…';
+          } else if (p.phase === 'audio') text.textContent = 'Copying the audio…';
+          else if (p.phase === 'mux') text.textContent = 'Writing the file…';
           else {
             bar.style.width = `${Math.round((100 * p.done) / p.total)}%`;
             text.textContent = `${p.done} / ${p.total} frames · ${p.fps.toFixed(1)} fps · ${Math.ceil(p.eta)} s left`;
           }
         });
         this.result = r;
+        prog.classList.remove('busy');
         bar.style.width = '100%';
         text.textContent = `Done: ${r.width}×${r.height}, ${r.frames} frames, ${(r.size / 1048576).toFixed(1)} MB${r.audio ? ', with audio' : ''}.`;
         this.showResult(buttons, r);
       } catch (e) {
+        prog.classList.remove('busy');
         text.textContent = e.message;
         cancel.textContent = 'Close';
       } finally {

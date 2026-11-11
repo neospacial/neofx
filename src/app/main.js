@@ -664,10 +664,50 @@ function toggleLock(name) {
   inspector.build(settings, limits());
 }
 
-// Presets (plan §12.5): the gallery, Save, Load.
-function openPresets() {
-  const grid = $('presetGrid');
-  grid.textContent = '';
+// Reset all the settings to the defaults (one undo step). The view, the Split divider and an
+// imported mask video stay (they belong to the footage and the screen, not to the look).
+function resetSettings() {
+  history.record(JSON.stringify(settings), 'reset');
+  history.cut();
+  const s = clone(DEFAULTS);
+  s.view = settings.view;
+  s.splitPos = settings.splitPos;
+  s.cutout.import = clone(settings.cutout.import);
+  s.map.image = clone(settings.map.image);
+  s.map.video = clone(settings.map.video);
+  return replaceSettings(s);
+}
+
+function pickPreset(p) {
+  history.record(JSON.stringify(settings), 'preset');
+  history.cut();
+  return replaceSettings(applyPreset(settings, p));
+}
+
+// Presets (plan §12.5): the Presets section of the inspector (its own tab on a phone): Randomize
+// all, Reset to defaults, the looks, Save and Load. The thumbnails are made once (cache).
+const presetThumbs = new Map(); // preset id -> ImageData
+const presetCanvases = new Map(); // preset id -> the canvas of the card now
+let presetQueue = null;
+function presetPanel(sec) {
+  const btn = (text, cls, fn) => {
+    const b = Object.assign(document.createElement('button'), { type: 'button', textContent: text });
+    if (cls) b.className = cls;
+    b.addEventListener('click', fn);
+    return b;
+  };
+  const acts = document.createElement('div');
+  acts.className = 'presetActions randomBar';
+  const rand = btn('🎲 Randomize all', 'primary', () => randomize());
+  rand.id = 'randomizeBtn';
+  rand.title = 'A new look for the sections that are not locked';
+  const reset = btn('Reset to defaults', '', () => resetSettings());
+  reset.id = 'resetBtn';
+  const seed = Object.assign(document.createElement('span'), { className: 'seed', textContent: lastSeed ? `Look #${lastSeed}` : '' });
+  acts.append(rand, reset, seed);
+  const grid = document.createElement('div');
+  grid.className = 'presetGrid';
+  presetCanvases.clear();
   for (const p of PRESETS) {
     const card = document.createElement('button');
     card.type = 'button';
@@ -677,21 +717,52 @@ function openPresets() {
     c.width = 160;
     c.height = 90;
     card.append(c, Object.assign(document.createElement('span'), { textContent: p.name }));
-    card.addEventListener('click', () => {
-      history.record(JSON.stringify(settings), 'preset');
-      history.cut();
-      replaceSettings(applyPreset(settings, p));
-      $('presetDialog').close();
-    });
+    card.addEventListener('click', () => pickPreset(p));
     grid.append(card);
-    presetThumb(p, c);
+    presetCanvases.set(p.id, c);
+    if (presetThumbs.has(p.id)) c.getContext('2d').putImageData(presetThumbs.get(p.id), 0, 0);
   }
-  $('presetDialog').showModal();
+  const files = document.createElement('div');
+  files.className = 'presetFiles';
+  const save = btn('Save preset…', '', savePreset);
+  save.id = 'presetSave';
+  const load = btn('Load preset…', '', () => {
+    $('presetFileInput').value = '';
+    $('presetFileInput').click();
+  });
+  load.id = 'presetLoad';
+  files.append(save, load);
+  sec.append(acts, grid, files);
+  makePresetThumbs();
 }
 
-// A preset thumbnail: the map of a Mode 1 preset (GPU), a line and an arrow for Mode 2.
-async function presetThumb(p, c) {
+// The missing thumbnails, one after the other (the GPU makes the map pictures).
+function makePresetThumbs() {
+  if (presetQueue) return presetQueue;
+  presetQueue = (async () => {
+    for (const p of PRESETS) {
+      if (presetThumbs.has(p.id)) continue;
+      const img = await presetThumb(p);
+      if (!img) continue;
+      presetThumbs.set(p.id, img);
+      const c = presetCanvases.get(p.id);
+      if (c) c.getContext('2d').putImageData(img, 0, 0);
+    }
+  })().finally(() => (presetQueue = null));
+  return presetQueue;
+}
+
+function openPresets() {
+  inspector.showPresets();
+}
+
+// A preset thumbnail (ImageData 160 x 90, or null): the map of a Mode 1 preset (GPU), a line and an
+// arrow for Mode 2.
+async function presetThumb(p) {
   const s = applyPreset(settings, p);
+  const c = document.createElement('canvas');
+  c.width = 160;
+  c.height = 90;
   const ctx = c.getContext('2d');
   // Maps of the frames or of the mask (Motion, Video luminance, Subject) have no picture without
   // them: an icon (a disc and its trail) for those.
@@ -702,13 +773,14 @@ async function presetThumb(p, c) {
       const y = r.images[0];
       const img = ctx.createImageData(160, 90);
       for (let i = 0; i < y.length; i++) img.data.set([y[i], y[i], y[i], 255], i * 4);
-      ctx.putImageData(img, 0, 0);
-    } catch { /* no thumbnail */ }
-    return;
+      return img;
+    } catch {
+      return null; // no thumbnail (yet): made again at the next build
+    }
   }
   const g = ctx.createLinearGradient(0, 0, 160, 0);
-  g.addColorStop(0, '#222');
-  g.addColorStop(1, '#4fd1c5');
+  g.addColorStop(0, '#1a1b1e');
+  g.addColorStop(1, '#5c5700');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 160, 90);
   if (s.mode === 'timemap') {
@@ -718,7 +790,7 @@ async function presetThumb(p, c) {
       ctx.arc(110 - i * 12, 45, 14, 0, 2 * Math.PI);
       ctx.fill();
     }
-    return;
+    return ctx.getImageData(0, 0, 160, 90);
   }
   ctx.strokeStyle = '#fff';
   ctx.lineWidth = 2;
@@ -734,6 +806,7 @@ async function presetThumb(p, c) {
     ctx.arc(80, 45, 12, 0, 2 * Math.PI);
     ctx.fill();
   }
+  return ctx.getImageData(0, 0, 160, 90);
 }
 
 async function savePreset() {
@@ -803,7 +876,6 @@ async function loadPreset(file) {
     openMap('video');
   }
   showMessage(notes.join(' '));
-  $('presetDialog').close();
 }
 
 async function start() {
@@ -877,7 +949,7 @@ async function start() {
     locks,
     toggleLock,
     randomize: (list) => randomize(list),
-    lastSeed: () => lastSeed,
+    presetPanel,
   });
   const saved = loadLocal();
   if (saved) {
@@ -910,12 +982,6 @@ async function start() {
   $('presetsBtn').addEventListener('click', openPresets);
   $('undoBtn').addEventListener('click', undo);
   $('redoBtn').addEventListener('click', redo);
-  $('presetClose').addEventListener('click', () => $('presetDialog').close());
-  $('presetSave').addEventListener('click', savePreset);
-  $('presetLoad').addEventListener('click', () => {
-    $('presetFileInput').value = '';
-    $('presetFileInput').click();
-  });
   $('presetFileInput').addEventListener('change', (e) => loadPreset(e.target.files[0]));
   document.addEventListener('keyup', keysUp);
   startDemos($('demoTime'), $('demoSlit'));
@@ -930,7 +996,7 @@ async function start() {
     cancel: () => exporter && exporter.cancel(),
   });
   $('exportBtn').addEventListener('click', () => exportDialog.open());
-  Object.assign(window.neofx, { undo, redo, history, randomize, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  Object.assign(window.neofx, { undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));
   $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));

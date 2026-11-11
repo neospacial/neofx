@@ -322,3 +322,26 @@ export function muxMp4(video, opts = {}) {
   }
   return { parts, size: head.length + r.moov.length + mdatHeader.length + mdatPayload };
 }
+
+// The data of packets ({ offset, size }, in file order) as one array. Packets that are near each
+// other (the audio of an interleaved chunk) are read with one read.
+export async function readPackets(file, list, gap = 262144, maxRun = 8 * 1048576) {
+  const total = list.reduce((n, s) => n + s.size, 0);
+  const out = new Uint8Array(total);
+  let i = 0, o = 0;
+  while (i < list.length) {
+    const start = list[i].offset;
+    let j = i, end = start + list[i].size;
+    while (j + 1 < list.length && list[j + 1].offset >= end && list[j + 1].offset - end <= gap && list[j + 1].offset + list[j + 1].size - start <= maxRun) {
+      j++;
+      end = list[j].offset + list[j].size;
+    }
+    const buf = new Uint8Array(await file.slice(start, end).arrayBuffer());
+    for (let k = i; k <= j; k++) {
+      out.set(buf.subarray(list[k].offset - start, list[k].offset - start + list[k].size), o);
+      o += list[k].size;
+    }
+    i = j + 1;
+  }
+  return out;
+}

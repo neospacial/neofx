@@ -14,7 +14,7 @@
   <header id="topBar">
     <span id="logo">neofx</span>
     <button id="openBtn" type="button">Open</button>
-    <button id="presetsBtn" class="wide" type="button" aria-haspopup="dialog">Presets ▾</button>
+    <button id="presetsBtn" class="wide" type="button">Presets</button>
     <button id="undoBtn" class="wide" type="button" disabled aria-label="Undo" title="Undo (Ctrl+Z)">↶</button>
     <button id="redoBtn" class="wide" type="button" disabled aria-label="Redo" title="Redo (Shift+Ctrl+Z)">↷</button>
     <span class="spacer"></span>
@@ -64,11 +64,11 @@
 
   <footer id="transport">
     <div class="controls">
-      <button type="button" data-act="first" aria-label="Go to start">⏮</button>
-      <button type="button" data-act="prev" aria-label="Previous frame">◀|</button>
-      <button type="button" data-act="play" aria-label="Play">▶</button>
-      <button type="button" data-act="next" aria-label="Next frame">|▶</button>
-      <button type="button" data-act="last" aria-label="Go to end">⏭</button>
+      <button type="button" data-act="first" aria-label="Go to start"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h2.5v14H4zM13 5v14L6.5 12zM20.5 5v14L14 12z"/></svg></button>
+      <button type="button" data-act="prev" aria-label="Previous frame"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 5v14L6 12zM17 5h2.5v14H17z"/></svg></button>
+      <button type="button" data-act="play" aria-label="Play"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15L19.5 12z"/></svg></button>
+      <button type="button" data-act="next" aria-label="Next frame"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5H7v14H4.5zM8.5 5v14L18 12z"/></svg></button>
+      <button type="button" data-act="last" aria-label="Go to end"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 5v14l6.5-7zM11 5v14l6.5-7zM17.5 5H20v14h-2.5z"/></svg></button>
       <span class="time">00:00.00 / 00:00.00</span>
       <span class="frame">f –</span>
       <span class="spacer"></span>
@@ -82,13 +82,6 @@
     <canvas class="strip" aria-label="Timeline"></canvas>
   </footer>
   <dialog id="exportDialog" aria-label="Export"></dialog>
-  <dialog id="presetDialog" aria-label="Presets">
-    <div class="presetHead"><h2>Presets</h2>
-      <button type="button" id="presetSave">Save preset…</button>
-      <button type="button" id="presetLoad">Load preset…</button>
-      <button type="button" id="presetClose" aria-label="Close">✕</button></div>
-    <div id="presetGrid"></div>
-  </dialog>
   <input id="presetFileInput" type="file" accept=".json,application/json" hidden>
   <input id="mapFileInput" type="file" hidden>
   <input id="plateFileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
