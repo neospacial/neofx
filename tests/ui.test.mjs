@@ -32,6 +32,14 @@ async function withApp(viewport, fn, opts = {}) {
   const { browser, page, errors } = await launch(viewport, '', false);
   try {
     if (!opts.noFile) await open(page, f[opts.file || 'color.mp4']);
+    if (opts.setFile) {
+      // The File object, without the change event of the input (the test opens it itself).
+      const buf = fs.readFileSync(f['color.mp4']).toString('base64');
+      await page.evaluate((b64) => {
+        const u = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        window.__file = new File([u], 'color.mp4', { type: 'video/mp4' });
+      }, buf);
+    }
     await fn(page, f);
     assert(!errors.length, errors.join('; '));
   } finally {
@@ -441,6 +449,29 @@ export const tests = [
         const w = (await page.locator('[data-key="timemap.maxDelay"] input[type=range]').boundingBox()).width;
         assert(Math.abs(fine[0] - (30 + Math.round(((100 / w) * fine[1]) / 10))) <= 1, `fine step ${fine[0]}`);
       });
+    },
+  },
+  {
+    name: 'opening a file: the loading indicator shows until the preview is there; the file inputs take video/* (iOS picker)',
+    timeout: 120000,
+    async fn() {
+      await withApp(DESKTOP, async (page, f) => {
+        const acc = await page.evaluate(() => [document.getElementById('fileInput').accept, document.getElementById('maskFileInput').accept]);
+        assert(acc.join() === 'video/*,video/*', `accept ${acc}`);
+        const r = await page.evaluate(async () => {
+          const N = window.neofx;
+          const seen = [];
+          const obs = new MutationObserver(() => seen.push(!document.getElementById('loading').hidden ? document.getElementById('loadingText').textContent : ''));
+          obs.observe(document.getElementById('loading'), { attributes: true, subtree: true, childList: true, characterData: true });
+          const input = document.getElementById('fileInput');
+          await N.openFile(input.files[0] || window.__file);
+          obs.disconnect();
+          return { seen, hidden: document.getElementById('loading').hidden, state: document.body.dataset.state };
+        });
+        void f;
+        assert(r.hidden && r.state === 'open', `after the open: ${JSON.stringify(r)}`);
+        assert(r.seen.some((t) => /^Opening .*color\.mp4…$/.test(t)) && r.seen.some((t) => /^Preparing /.test(t)), `the indicator showed: ${JSON.stringify(r.seen)}`);
+      }, { noFile: true, setFile: true });
     },
   },
   {
