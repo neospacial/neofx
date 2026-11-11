@@ -7,7 +7,7 @@
 import { makeWorker } from './player.js';
 import { demuxMp4 } from '../io/demux.js';
 import { muxMp4, DataPacker } from '../io/mp4.js';
-import { codecCandidates, bitrateFor, exportSizes, chunkSamples } from '../io/encoder-config.js';
+import { codecCandidates, bitrateFor, exportSizes, chunkSamples, FrameMatcher, checkSamples } from '../io/encoder-config.js';
 
 const MAX_ENCODE_QUEUE = 8;
 const OPFS_LIMIT = 1024 * 1048576; // larger files go to the Origin Private File System
@@ -113,7 +113,9 @@ export class Exporter {
       const chunks = [];
       const packer = new DataPacker(32 * 1048576);
       let description = null, queue = 0, failure = null;
-      const byTs = new Map(); // VideoFrame timestamp (µs) -> frame index
+      const frames = new FrameMatcher(); // chunk timestamp -> frame index (nearest, not exact)
+      // Tests: change the chunk timestamps as Safari does (opts.skewChunks: µs -> µs).
+      const skew = typeof opts.skewChunks === 'function' ? opts.skewChunks : null;
       const poke = () => {
         if (this.wake) {
           const f = this.wake;
@@ -126,7 +128,9 @@ export class Exporter {
         if (m.cmd === 'chunk') {
           if (m.description && !description) description = m.description;
           packer.add(m.data);
-          chunks.push({ pts: pts(byTs.get(m.timestamp)) - pts(a), size: m.data.length, key: m.key });
+          const t = frames.match(skew ? skew(m.timestamp) : m.timestamp);
+          if (t < 0) failure = new Error(`The encoder gave a frame with an unknown time (${m.timestamp} µs).`);
+          else chunks.push({ pts: pts(t) - pts(a), size: m.data.length, key: m.key });
         } else if (m.cmd === 'queue') queue = m.size;
         else if (m.cmd === 'error') failure = new Error(m.message);
         else if (m.cmd === 'flushed') this.flushed = true;
@@ -170,7 +174,7 @@ export class Exporter {
               const durUs = Math.round(((t + 1 < info.times.length ? pts(t + 1) - pts(t) : d.samples[frameSample[t]].duration) * 1e6) / ts);
               const r = await A.gpu.call({ cmd: 'upload', index: t, frame: m.frame, show, grab: show ? { timestamp: us, duration: durUs } : undefined }, [m.frame]);
               if (show) {
-                byTs.set(us, t);
+                frames.add(us, t);
                 const key = us - lastKey >= opts.keyint * 1e6;
                 if (key) lastKey = us;
                 await waitFor(() => queue <= MAX_ENCODE_QUEUE);
@@ -197,6 +201,9 @@ export class Exporter {
       // 5. Mux: video (the source timescale) + the audio packets of the range (copied, D16).
       const lastDur = d.samples[frameSample[b]].duration;
       const { samples, mediaTime } = chunkSamples(chunks, lastDur);
+      // Never write a file with broken frame times (it would play too fast, or not at all).
+      const bad = checkSamples(samples);
+      if (bad) throw new Error(`The export stopped: ${bad}. Please report this with the name of the browser.`);
       const video = { width, height, timescale: ts, avcc: description, samples, mediaTime, dataParts: packer.done() };
       let audio = null;
       const au = d.audio;

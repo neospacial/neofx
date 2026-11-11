@@ -199,3 +199,15 @@ a.button{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;b
   #inspectorBox{border-top:0;border-left:1px solid var(--line)}
   #sheetHandle{display:none}
 }
+
+/* The loading indicator (a file opens). */
+#loading{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
+  background:rgba(0,0,0,.72);color:var(--text);font-size:14px;text-align:center;padding:16px}
+#loading[hidden]{display:none}
+#loading p{margin:0;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#loading .spinner{width:36px;height:36px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);animation:spin .8s linear infinite}
+#loading .loadBar{width:min(240px,70%);height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+#loading .loadBar span{display:block;height:100%;width:30%;background:var(--accent);animation:slide 1.1s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(340%)}}
+@media (prefers-reduced-motion:reduce){#loading .spinner,#loading .loadBar span{animation:none}}

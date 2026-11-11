@@ -59,6 +59,10 @@ export const FIXTURES = {
   'greenscreen.mp4': () => [...subjectIn('color=c=0x30c040:s=320x240:r=30,noise=alls=6:allf=u'), '-vf', subjectFilter(170, 150, 190, false), '-frames:v', '60', '-c:v', 'libx264', '-crf', '10', '-pix_fmt', 'yuv420p'],
   // The ground-truth mask as a video (white disc on black), for the mask import.
   'subjectmask.mp4': () => ['-f', 'lavfi', '-i', 'color=c=black:s=320x240:r=30', '-vf', `geq=lum='if(lt(hypot(X-(${DISC.cx}),Y-(${DISC.cy})),${DISC.r}),255,0)':cb=128:cr=128`, '-frames:v', '60', '-c:v', 'libx264', '-crf', '4', '-pix_fmt', 'yuv420p'],
+  // Like an iPhone video: MOV, a 1/600 s time scale, 29.97 fps (frame times that are not whole
+  // microseconds), AAC, B-frames.
+  'iphone.mov': () => ['-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=30000/1001', '-f', 'lavfi', '-i', 'sine=frequency=330:sample_rate=44100:duration=4',
+    '-frames:v', '100', '-c:v', 'libx264', '-bf', '2', '-pix_fmt', 'yuv420p', '-video_track_timescale', '600', '-c:a', 'aac', '-shortest'],
   // AAC audio.
   'code_aac.mp4': () => [...codeIn(), '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3', '-vf', codeFilter, ...x264(['-bf', '2']), '-c:a', 'aac', '-shortest'],
 };

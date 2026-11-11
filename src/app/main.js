@@ -298,7 +298,9 @@ function updateThumbs(only) {
 // Open a custom map file (plan §7.4).
 function openMap(kind) {
   const input = $('mapFileInput');
-  input.accept = kind === 'image' ? 'image/png,image/jpeg,image/webp' : 'video/mp4,video/quicktime,.mp4,.mov,.m4v';
+  // video/*: the iOS picker closes when a video is touched (a list of types gives a picker without
+  // a Done button on iPad). The app checks the file itself (MP4 / MOV).
+  input.accept = kind === 'image' ? 'image/png,image/jpeg,image/webp' : 'video/*';
   input.dataset.kind = kind;
   input.value = '';
   input.click();
@@ -381,42 +383,57 @@ function setProgress(f) {
   if (!p.hidden) p.style.width = `${Math.round(f * 100)}%`;
 }
 
+// The loading indicator (a file opens; it can take some seconds for a large file).
+function setLoading(text) {
+  const el = $('loading');
+  el.hidden = !text;
+  $('loadingText').textContent = text || '';
+  document.body.classList.toggle('loading', !!text);
+}
+
 async function openFile(file) {
   if (!file) return;
-  if (!/\.(mp4|mov|m4v)$/i.test(file.name) && !/^video\/(mp4|quicktime)$/.test(file.type)) {
+  // The name or the type says video; the reader checks the file (MP4 / MOV only).
+  if (!/\.(mp4|mov|m4v)$/i.test(file.name) && !/^video\//.test(file.type)) {
     showMessage('Only MP4 and MOV files are supported.');
     return;
   }
   showMessage('');
-  timeline.reset();
-  if (analysis) analysis.stop();
-  if (plateJob) plateJob.terminate();
-  plateJob = null;
-  Object.assign(toolState, { plateOk: false, plateText: '' });
-  settings.cutout.import = { on: false, name: '' };
-  currentFile = file;
-  let info;
+  setLoading(`Opening ${file.name}…`);
   try {
-    info = await player.open(file);
-  } catch (e) {
-    document.body.dataset.state = 'start';
-    $('view').hidden = true;
-    showMessage(e.message);
-    return;
+    timeline.reset();
+    if (analysis) analysis.stop();
+    if (plateJob) plateJob.terminate();
+    plateJob = null;
+    Object.assign(toolState, { plateOk: false, plateText: '' });
+    settings.cutout.import = { on: false, name: '' };
+    currentFile = file;
+    let info;
+    try {
+      info = await player.open(file);
+    } catch (e) {
+      document.body.dataset.state = 'start';
+      $('view').hidden = true;
+      showMessage(e.message);
+      return;
+    }
+    setLoading(`Preparing ${file.name}…`);
+    document.body.dataset.state = 'open';
+    $('view').hidden = false;
+    $('exportBtn').disabled = !platform.encoder;
+    $('exportBtn').title = platform.encoder ? '' : 'This browser has no video encoder.';
+    handles.update();
+    try {
+      await configureStore();
+    } catch (e) {
+      showMessage(e.message);
+      return;
+    }
+    await player.seek(0);
+    status();
+  } finally {
+    setLoading(null);
   }
-  document.body.dataset.state = 'open';
-  $('view').hidden = false;
-  $('exportBtn').disabled = !platform.encoder;
-  $('exportBtn').title = platform.encoder ? '' : 'This browser has no video encoder.';
-  handles.update();
-  try {
-    await configureStore();
-  } catch (e) {
-    showMessage(e.message);
-    return;
-  }
-  await player.seek(0);
-  status();
 }
 
 // Export (plan §11): the engine is made again at the export size, then at the preview size after.

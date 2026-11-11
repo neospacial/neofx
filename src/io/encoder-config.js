@@ -64,3 +64,54 @@ export function chunkSamples(chunks, lastDuration) {
   }));
   return { samples, mediaTime: delay };
 }
+
+// Encoded chunks -> source frames (plan §11.2). An encoder can give the chunk timestamps a little
+// different from the timestamps of the frames (Safari: VideoToolbox keeps its own time scale, and
+// rounds), and in a different order (B-frames). So a chunk is not found by an exact key: it is the
+// frame with the nearest timestamp that has no chunk yet, within half of the frame interval.
+export class FrameMatcher {
+  constructor() {
+    this.us = []; // the timestamps of the frames given to the encoder (increasing)
+    this.t = []; // their frame indices
+    this.used = [];
+  }
+
+  add(us, t) {
+    this.us.push(us);
+    this.t.push(t);
+    this.used.push(false);
+  }
+
+  // The frame index of a chunk timestamp, or -1.
+  match(ts) {
+    const U = this.us;
+    if (!U.length) return -1;
+    let lo = 0, hi = U.length - 1;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (U[m] < ts) lo = m + 1;
+      else hi = m;
+    }
+    let best = -1, bd = Infinity;
+    for (let i = Math.max(0, lo - 2); i <= Math.min(U.length - 1, lo + 2); i++) {
+      if (this.used[i]) continue;
+      const d = Math.abs(U[i] - ts);
+      if (d < bd) [best, bd] = [i, d];
+    }
+    if (best < 0) return -1;
+    const gap = Math.min(best > 0 ? U[best] - U[best - 1] : Infinity, best + 1 < U.length ? U[best + 1] - U[best] : Infinity);
+    if (bd > Math.max(1000, (Number.isFinite(gap) ? gap : 1e6) / 2)) return -1;
+    this.used[best] = true;
+    return this.t[best];
+  }
+}
+
+// A sample list that the muxer can write: whole, positive durations and offsets. Else the reason.
+export function checkSamples(samples) {
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    if (!Number.isInteger(s.duration) || s.duration <= 0) return `frame ${i} has the duration ${s.duration}`;
+    if (!Number.isInteger(s.cto ?? 0) || (s.cto ?? 0) < 0) return `frame ${i} has the time offset ${s.cto}`;
+  }
+  return '';
+}

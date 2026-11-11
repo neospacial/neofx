@@ -13,7 +13,7 @@ import { makeFixtures, readCode, readCodeRow, subjectAt } from '../tools/make-fi
 import { FIX_DIR, groundTruth } from './fixtures.test.mjs';
 import { launch, open } from './playback.test.mjs';
 import { expectRows } from './mode1.test.mjs';
-import { h264Level, codecCandidates, bitrateFor, exportSizes, chunkSamples, exportName } from '../src/io/encoder-config.js';
+import { h264Level, codecCandidates, bitrateFor, exportSizes, chunkSamples, exportName, FrameMatcher, checkSamples } from '../src/io/encoder-config.js';
 import { frameBytes } from '../src/gpu/store.js';
 
 let chromium = null;
@@ -129,6 +129,60 @@ export const tests = [
       // Decode order I P B B (pts 0 3 1 2): dts are the sorted pts minus the delay; cto >= 0.
       const r = chunkSamples([{ pts: 0, key: true, size: 1 }, { pts: 3, size: 1 }, { pts: 1, size: 1 }, { pts: 2, size: 1 }], 1);
       assert(r.mediaTime === 1 && r.samples.map((x) => x.cto).join() === '1,3,0,0' && r.samples.map((x) => x.duration).join() === '1,1,1,1', JSON.stringify(r));
+    },
+  },
+  {
+    name: 'chunk timestamps (Node): the nearest frame, not an exact key (Safari rounds them); broken samples are refused',
+    fn() {
+      // 29.97 fps in a 1/600 time scale: the frame times are not whole microseconds.
+      const us = Array.from({ length: 50 }, (_, i) => Math.round((i * 1001 * 1e6) / 30000));
+      const fm = () => {
+        const m = new FrameMatcher();
+        us.forEach((u, i) => m.add(u, i + 10));
+        return m;
+      };
+      let m = fm();
+      assert(us.every((u, i) => m.match(u) === i + 10), 'exact');
+      m = fm();
+      assert(us.every((u, i) => m.match(Math.round(u / 1000) * 1000) === i + 10), 'rounded to the millisecond');
+      m = fm();
+      assert(us.every((u, i) => m.match(u + (i % 2 ? 3 : -3)) === i + 10), 'a few µs off');
+      // B-frame order (decode order: 0 3 1 2 6 4 5 ...), each a little off.
+      const order = [0, 3, 1, 2, 6, 4, 5, 9, 7, 8];
+      m = fm();
+      assert(order.every((i) => m.match(us[i] + 2) === i + 10), 'reordered');
+      m = fm();
+      assert(m.match(us[49] + 100000) === -1, 'far from each frame (100 ms after the last one): no match');
+      assert(checkSamples([{ duration: 20, cto: 0 }, { duration: 0 }]) && checkSamples([{ duration: NaN }]) && !checkSamples([{ duration: 20, cto: 40 }]), 'checkSamples');
+    },
+  },
+  {
+    name: 'export of an iPhone-like MOV (1/600 time scale, 29.97 fps, B-frames) with chunk timestamps as Safari gives them: the frame times and the audio are right',
+    timeout: 240000,
+    async fn() {
+      await withApp('iphone.mov', async (page, src) => {
+        await set(page, { 'timemap.maxDelay': 10 });
+        for (const [name, skew] of [['ms', 'Math.round(t / 1000) * 1000'], ['plus3', 't + 3'], ['none', 't']]) {
+          const r = await page.evaluate(async (skew) => {
+            const f = new Function('t', `return ${skew};`);
+            try {
+              const r = await window.neofx.exportVideo({ width: 320, height: 240, quality: 'high', keyint: 2, range: [0, 99], audio: true, hardware: 'hardware', name: 'i.mp4', skewChunks: f });
+              const buf = new Uint8Array(await r.blob.arrayBuffer());
+              let s = '';
+              for (let i = 0; i < buf.length; i += 32768) s += String.fromCharCode(...buf.subarray(i, i + 32768));
+              return { b64: s, frames: r.frames };
+            } catch (e) {
+              return { error: e.message };
+            }
+          }, skew);
+          assert(!r.error, `${name}: ${r.error}`);
+          const out = path.join(OUT_DIR, `export_iphone_${name}.mp4`);
+          fs.writeFileSync(out, Buffer.from(r.b64, 'latin1'));
+          checkFile(`iphone (${name})`, out, src, 0, 99, 320, 240, { audio: true, fullAudio: true });
+          const dv = streamDur(out, 'v:0'), ds = streamDur(src, 'v:0');
+          assert(Math.abs(dv - ds) < 0.02, `${name}: video duration ${dv} s, the source ${ds} s`);
+        }
+      });
     },
   },
   {

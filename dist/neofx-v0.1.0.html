@@ -209,6 +209,18 @@ a.button{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;b
   #inspectorBox{border-top:0;border-left:1px solid var(--line)}
   #sheetHandle{display:none}
 }
+
+/* The loading indicator (a file opens). */
+#loading{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
+  background:rgba(0,0,0,.72);color:var(--text);font-size:14px;text-align:center;padding:16px}
+#loading[hidden]{display:none}
+#loading p{margin:0;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#loading .spinner{width:36px;height:36px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);animation:spin .8s linear infinite}
+#loading .loadBar{width:min(240px,70%);height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+#loading .loadBar span{display:block;height:100%;width:30%;background:var(--accent);animation:slide 1.1s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(340%)}}
+@media (prefers-reduced-motion:reduce){#loading .spinner,#loading .loadBar span{animation:none}}
 </style>
 </head>
 <body data-state="start">
@@ -257,6 +269,7 @@ a.button{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;b
       <div id="splitLine" hidden><span></span></div>
       <canvas id="view" hidden></canvas>
       <div id="progress" hidden></div>
+      <div id="loading" role="status" aria-live="polite" hidden><div class="spinner"></div><p id="loadingText"></p><div class="loadBar"><span></span></div></div>
       <div id="message" hidden></div>
     </section>
     <div id="sizer" aria-hidden="true"></div>
@@ -293,8 +306,8 @@ a.button{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;b
   <input id="presetFileInput" type="file" accept=".json,application/json" hidden>
   <input id="mapFileInput" type="file" hidden>
   <input id="plateFileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
-  <input id="maskFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
-  <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
+  <input id="maskFileInput" type="file" accept="video/*" hidden>
+  <input id="fileInput" type="file" accept="video/*" hidden>
 </div>
 <script>
 'use strict';
@@ -979,7 +992,7 @@ return { avcC, DataPacker, muxMp4 };
 })();
 
 // ---- io/encoder-config.js
-const { h264Level, codecCandidates, QUALITY, bitrateFor, exportSizes, exportName, chunkSamples } = (() => {
+const { h264Level, codecCandidates, QUALITY, bitrateFor, exportSizes, exportName, chunkSamples, FrameMatcher, checkSamples } = (() => {
 // Export settings and the H.264 encoder configuration (plan §3, §11). No browser APIs.
 
 // H.264 levels (ITU-T H.264 Table A-1): [level_idc, max macroblocks for each frame, max macroblocks/s].
@@ -1047,7 +1060,58 @@ function chunkSamples(chunks, lastDuration) {
   return { samples, mediaTime: delay };
 }
 
-return { h264Level, codecCandidates, QUALITY, bitrateFor, exportSizes, exportName, chunkSamples };
+// Encoded chunks -> source frames (plan §11.2). An encoder can give the chunk timestamps a little
+// different from the timestamps of the frames (Safari: VideoToolbox keeps its own time scale, and
+// rounds), and in a different order (B-frames). So a chunk is not found by an exact key: it is the
+// frame with the nearest timestamp that has no chunk yet, within half of the frame interval.
+class FrameMatcher {
+  constructor() {
+    this.us = []; // the timestamps of the frames given to the encoder (increasing)
+    this.t = []; // their frame indices
+    this.used = [];
+  }
+
+  add(us, t) {
+    this.us.push(us);
+    this.t.push(t);
+    this.used.push(false);
+  }
+
+  // The frame index of a chunk timestamp, or -1.
+  match(ts) {
+    const U = this.us;
+    if (!U.length) return -1;
+    let lo = 0, hi = U.length - 1;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (U[m] < ts) lo = m + 1;
+      else hi = m;
+    }
+    let best = -1, bd = Infinity;
+    for (let i = Math.max(0, lo - 2); i <= Math.min(U.length - 1, lo + 2); i++) {
+      if (this.used[i]) continue;
+      const d = Math.abs(U[i] - ts);
+      if (d < bd) [best, bd] = [i, d];
+    }
+    if (best < 0) return -1;
+    const gap = Math.min(best > 0 ? U[best] - U[best - 1] : Infinity, best + 1 < U.length ? U[best + 1] - U[best] : Infinity);
+    if (bd > Math.max(1000, (Number.isFinite(gap) ? gap : 1e6) / 2)) return -1;
+    this.used[best] = true;
+    return this.t[best];
+  }
+}
+
+// A sample list that the muxer can write: whole, positive durations and offsets. Else the reason.
+function checkSamples(samples) {
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    if (!Number.isInteger(s.duration) || s.duration <= 0) return `frame ${i} has the duration ${s.duration}`;
+    if (!Number.isInteger(s.cto ?? 0) || (s.cto ?? 0) < 0) return `frame ${i} has the time offset ${s.cto}`;
+  }
+  return '';
+}
+
+return { h264Level, codecCandidates, QUALITY, bitrateFor, exportSizes, exportName, chunkSamples, FrameMatcher, checkSamples };
 })();
 
 // ---- maps/builtin.js
@@ -5448,7 +5512,9 @@ class Exporter {
       const chunks = [];
       const packer = new DataPacker(32 * 1048576);
       let description = null, queue = 0, failure = null;
-      const byTs = new Map(); // VideoFrame timestamp (µs) -> frame index
+      const frames = new FrameMatcher(); // chunk timestamp -> frame index (nearest, not exact)
+      // Tests: change the chunk timestamps as Safari does (opts.skewChunks: µs -> µs).
+      const skew = typeof opts.skewChunks === 'function' ? opts.skewChunks : null;
       const poke = () => {
         if (this.wake) {
           const f = this.wake;
@@ -5461,7 +5527,9 @@ class Exporter {
         if (m.cmd === 'chunk') {
           if (m.description && !description) description = m.description;
           packer.add(m.data);
-          chunks.push({ pts: pts(byTs.get(m.timestamp)) - pts(a), size: m.data.length, key: m.key });
+          const t = frames.match(skew ? skew(m.timestamp) : m.timestamp);
+          if (t < 0) failure = new Error(`The encoder gave a frame with an unknown time (${m.timestamp} µs).`);
+          else chunks.push({ pts: pts(t) - pts(a), size: m.data.length, key: m.key });
         } else if (m.cmd === 'queue') queue = m.size;
         else if (m.cmd === 'error') failure = new Error(m.message);
         else if (m.cmd === 'flushed') this.flushed = true;
@@ -5505,7 +5573,7 @@ class Exporter {
               const durUs = Math.round(((t + 1 < info.times.length ? pts(t + 1) - pts(t) : d.samples[frameSample[t]].duration) * 1e6) / ts);
               const r = await A.gpu.call({ cmd: 'upload', index: t, frame: m.frame, show, grab: show ? { timestamp: us, duration: durUs } : undefined }, [m.frame]);
               if (show) {
-                byTs.set(us, t);
+                frames.add(us, t);
                 const key = us - lastKey >= opts.keyint * 1e6;
                 if (key) lastKey = us;
                 await waitFor(() => queue <= MAX_ENCODE_QUEUE);
@@ -5532,6 +5600,9 @@ class Exporter {
       // 5. Mux: video (the source timescale) + the audio packets of the range (copied, D16).
       const lastDur = d.samples[frameSample[b]].duration;
       const { samples, mediaTime } = chunkSamples(chunks, lastDur);
+      // Never write a file with broken frame times (it would play too fast, or not at all).
+      const bad = checkSamples(samples);
+      if (bad) throw new Error(`The export stopped: ${bad}. Please report this with the name of the browser.`);
       const video = { width, height, timescale: ts, avcc: description, samples, mediaTime, dataParts: packer.done() };
       let audio = null;
       const au = d.audio;
@@ -6313,7 +6384,9 @@ function updateThumbs(only) {
 // Open a custom map file (plan §7.4).
 function openMap(kind) {
   const input = $('mapFileInput');
-  input.accept = kind === 'image' ? 'image/png,image/jpeg,image/webp' : 'video/mp4,video/quicktime,.mp4,.mov,.m4v';
+  // video/*: the iOS picker closes when a video is touched (a list of types gives a picker without
+  // a Done button on iPad). The app checks the file itself (MP4 / MOV).
+  input.accept = kind === 'image' ? 'image/png,image/jpeg,image/webp' : 'video/*';
   input.dataset.kind = kind;
   input.value = '';
   input.click();
@@ -6396,42 +6469,57 @@ function setProgress(f) {
   if (!p.hidden) p.style.width = `${Math.round(f * 100)}%`;
 }
 
+// The loading indicator (a file opens; it can take some seconds for a large file).
+function setLoading(text) {
+  const el = $('loading');
+  el.hidden = !text;
+  $('loadingText').textContent = text || '';
+  document.body.classList.toggle('loading', !!text);
+}
+
 async function openFile(file) {
   if (!file) return;
-  if (!/\.(mp4|mov|m4v)$/i.test(file.name) && !/^video\/(mp4|quicktime)$/.test(file.type)) {
+  // The name or the type says video; the reader checks the file (MP4 / MOV only).
+  if (!/\.(mp4|mov|m4v)$/i.test(file.name) && !/^video\//.test(file.type)) {
     showMessage('Only MP4 and MOV files are supported.');
     return;
   }
   showMessage('');
-  timeline.reset();
-  if (analysis) analysis.stop();
-  if (plateJob) plateJob.terminate();
-  plateJob = null;
-  Object.assign(toolState, { plateOk: false, plateText: '' });
-  settings.cutout.import = { on: false, name: '' };
-  currentFile = file;
-  let info;
+  setLoading(`Opening ${file.name}…`);
   try {
-    info = await player.open(file);
-  } catch (e) {
-    document.body.dataset.state = 'start';
-    $('view').hidden = true;
-    showMessage(e.message);
-    return;
+    timeline.reset();
+    if (analysis) analysis.stop();
+    if (plateJob) plateJob.terminate();
+    plateJob = null;
+    Object.assign(toolState, { plateOk: false, plateText: '' });
+    settings.cutout.import = { on: false, name: '' };
+    currentFile = file;
+    let info;
+    try {
+      info = await player.open(file);
+    } catch (e) {
+      document.body.dataset.state = 'start';
+      $('view').hidden = true;
+      showMessage(e.message);
+      return;
+    }
+    setLoading(`Preparing ${file.name}…`);
+    document.body.dataset.state = 'open';
+    $('view').hidden = false;
+    $('exportBtn').disabled = !platform.encoder;
+    $('exportBtn').title = platform.encoder ? '' : 'This browser has no video encoder.';
+    handles.update();
+    try {
+      await configureStore();
+    } catch (e) {
+      showMessage(e.message);
+      return;
+    }
+    await player.seek(0);
+    status();
+  } finally {
+    setLoading(null);
   }
-  document.body.dataset.state = 'open';
-  $('view').hidden = false;
-  $('exportBtn').disabled = !platform.encoder;
-  $('exportBtn').title = platform.encoder ? '' : 'This browser has no video encoder.';
-  handles.update();
-  try {
-    await configureStore();
-  } catch (e) {
-    showMessage(e.message);
-    return;
-  }
-  await player.seek(0);
-  status();
 }
 
 // Export (plan §11): the engine is made again at the export size, then at the preview size after.

@@ -12,7 +12,7 @@ The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries
 ## How to use
 
 1. Open `dist/neofx-v0.1.0.html` (or `index.html` on GitHub Pages) in desktop Chrome or Chrome on Android. The start screen shows an example of each mode.
-2. Drop an MP4 or MOV file on the page, or touch **Open**.
+2. Drop an MP4 or MOV file on the page, or touch **Open** (on iPhone / iPad: touch a video in the photo picker). A large file can take some seconds to open: the preview shows "Opening …" until it is ready.
 3. Select the **Mode** (Time Map or Slit Scan) and change the settings in the inspector (on a phone: the tabs **Mode · Map · Time · Cutout · Mix · Look** in the sheet under the preview; drag the handle of the sheet up to make it taller). Settings that do not apply are hidden. Double-click (double-tap) a label to reset the setting. On a phone, a long press on a slider and then a drag moves the value in fine steps (×0.1).
 4. Play, step, and scrub with the transport and the timeline strip. **In** and **Out** set a range; **Loop** plays it again and again.
 5. Touch **Export** for the MP4 file.
@@ -126,7 +126,7 @@ The app probes the encoder (H.264 High, then Main, then Baseline, at the level f
 
 ## Browser support
 
-Main targets: desktop Chrome and Chrome on Android. Other browsers with WebCodecs and WebGL2 must also work. At start, the app checks WebGL2, float render targets, `VideoDecoder`, `VideoEncoder`, and `OffscreenCanvas` with WebGL2 (plan §4). Without `OffscreenCanvas` WebGL2 in a worker, the GPU work runs on the main thread (open the page with `?gpu=main` to test this).
+Main targets: desktop Chrome and Chrome on Android. Other browsers with WebCodecs and WebGL2 must also work. Safari on iPad / iPhone: the app and the export work; the export matches each encoded frame to its source frame by the nearest time (Safari gives the encoded frames slightly different times), and it stops with a message, not a broken file, if a frame time is not known. At start, the app checks WebGL2, float render targets, `VideoDecoder`, `VideoEncoder`, and `OffscreenCanvas` with WebGL2 (plan §4). Without `OffscreenCanvas` WebGL2 in a worker, the GPU work runs on the main thread (open the page with `?gpu=main` to test this).
 
 Input: MP4 and MOV only (not fragmented). Output: MP4, H.264 (WebCodecs `VideoEncoder`; without it, the preview works and Export is off), with the audio of the source (AAC or Opus) copied.
 
