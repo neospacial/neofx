@@ -1,0 +1,11 @@
+{
+  "name": "neofx",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Time distortion video effects (time map, slit scan) in one standalone HTML file.",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node tests/run.mjs"
+  }
+}

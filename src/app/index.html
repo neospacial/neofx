@@ -1,0 +1,73 @@
+<!-- neofx v@VERSION@ -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111214">
+<meta name="color-scheme" content="dark">
+<title>neofx</title>
+<!--@css:style.css-->
+</head>
+<body data-state="start">
+<div id="app">
+  <header id="topBar">
+    <span id="logo">neofx</span>
+    <button id="openBtn" type="button">Open</button>
+    <span class="spacer"></span>
+    <span id="status" aria-live="polite"></span>
+    <button id="exportBtn" type="button" disabled>Export</button>
+  </header>
+
+  <main id="stage">
+    <section id="preview" aria-label="Preview">
+      <div id="startScreen">
+        <label id="dropArea" for="fileInput">
+          <strong>Open a video (MP4 or MOV)</strong>
+          <span>Drop a file here, or touch to select one.</span>
+        </label>
+        <div id="modeInfo">
+          <div><b>Time Map</b> — a greyscale map gives each pixel a delay in frames.</div>
+          <div><b>Slit Scan</b> — a 1 px line repeats in one direction, and gets older with distance.</div>
+        </div>
+      </div>
+      <div id="viewBar" role="tablist" aria-label="View">
+        <button type="button" data-view="result" class="on">Result</button>
+        <button type="button" data-view="original">Original</button>
+        <button type="button" data-view="map">Map</button>
+        <button type="button" data-view="mask">Mask</button>
+      </div>
+      <canvas id="view" hidden></canvas>
+      <div id="progress" hidden></div>
+      <div id="message" hidden></div>
+    </section>
+    <aside id="inspector" aria-label="Inspector"></aside>
+  </main>
+
+  <footer id="transport">
+    <div class="controls">
+      <button type="button" data-act="first" aria-label="Go to start">⏮</button>
+      <button type="button" data-act="prev" aria-label="Previous frame">◀|</button>
+      <button type="button" data-act="play" aria-label="Play">▶</button>
+      <button type="button" data-act="next" aria-label="Next frame">|▶</button>
+      <button type="button" data-act="last" aria-label="Go to end">⏭</button>
+      <span class="time">00:00.00 / 00:00.00</span>
+      <span class="frame">f –</span>
+      <span class="spacer"></span>
+      <button type="button" data-act="in" aria-label="Set In point">In</button>
+      <button type="button" data-act="out" aria-label="Set Out point">Out</button>
+      <button type="button" data-act="loop" aria-label="Loop">Loop</button>
+      <label class="res">Preview <select id="resSelect">
+        <option value="360">360p</option><option value="540" selected>540p</option><option value="720">720p</option><option value="1080">1080p</option><option value="0">Source</option>
+      </select></label>
+    </div>
+    <canvas class="strip" aria-label="Timeline"></canvas>
+  </footer>
+  <input id="mapFileInput" type="file" hidden>
+  <input id="plateFileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+  <input id="maskFileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
+  <input id="fileInput" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" hidden>
+</div>
+<!--@modules:maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/main.js-->
+</body>
+</html>
