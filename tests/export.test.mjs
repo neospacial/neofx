@@ -231,6 +231,34 @@ export const tests = [
     },
   },
   {
+    name: 'export, perfect loop (Mode 1): the first frames take their history from the end of the range; the file loops without a cut',
+    timeout: 240000,
+    async fn() {
+      await withApp('code_aac.mp4', async (page, src) => {
+        await set(page, { 'timemap.maxDelay': 30, 'timemap.blend': false, 'timemap.perfectLoop': true });
+        const r = await doExport(page, { width: 320, height: 240, range: [0, 89] }, 'export_loop.mp4');
+        assert(!r.error, r.error);
+        assert(r.frames === 90, JSON.stringify(r));
+        const codes = groundTruth(src).codes;
+        const d = decodeGray(r.file);
+        let bad = 0;
+        for (let t = 0; t < d.n; t++) {
+          const f = d.frame(t);
+          const rows = Array.from({ length: 30 }, (_, cy) => readCodeRow((x, y) => f[y * 320 + x], 320, cy));
+          const want = expectRows(codes, t, 30, 0, 90);
+          rows.forEach((c, i) => (bad += c !== want[i] ? 1 : 0));
+        }
+        assert(d.n === 90 && bad <= 0.005 * d.n * 30, `${bad} of ${d.n * 30} rows have a wrong delay`);
+        // The preview after the export: the perfect loop still works.
+        const rows = await page.evaluate(async () => {
+          await window.neofx.player.seek(3);
+          return window.neofx.player.vcur;
+        });
+        assert(rows >= 90, `the preview store index after the export: ${rows}`);
+      });
+    },
+  },
+  {
     name: '§13.3 export: In – Out range (frames, times moved, the audio packets of the range); VFR times; a 90° rotated file',
     timeout: 300000,
     async fn() {

@@ -84,6 +84,7 @@ export class Engine {
     this.layerFrame = null; // the frame index in each layer, -1 = empty
     this.last = { index: -1, delay: undefined };
     this.lost = false;
+    this.depthCap = Infinity; // perfect loop: the loop length − 1
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
@@ -150,6 +151,19 @@ export class Engine {
       return { cmd: 'exporting', on: this.exporting };
     }
     if (m.cmd === 'readMask') return this.readMask(m.index);
+    if (m.cmd === 'wrap') {
+      // Perfect loop on / off (m.cap: the largest delay, the loop length − 1). forget: the store
+      // indices change meaning: the store is empty for the shaders.
+      this.depthCap = m.cap ?? Infinity;
+      if (m.forget && this.layerFrame) {
+        this.layerFrame.fill(-1);
+        const gl = this.gl;
+        gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.n, 1, gl.RED_INTEGER, gl.INT, this.layerFrame);
+        this.last = { index: -1, delay: undefined };
+      }
+      return { cmd: 'wrap' };
+    }
     if (m.cmd === 'loseContext') {
       // Tests: a GPU reset.
       const ext = this.gl.getExtension('WEBGL_lose_context');
@@ -490,11 +504,11 @@ export class Engine {
     gl.uniform1i(p.u.u_layers, 4);
     gl.uniform1i(p.u.u_n, this.n);
     gl.uniform1i(p.u.u_t, index);
-    gl.uniform1f(p.u.u_max, Math.min(s.timemap.maxDelay, this.n - 1));
+    gl.uniform1f(p.u.u_max, Math.min(s.timemap.maxDelay, this.n - 1, this.depthCap));
     gl.uniform1i(p.u.u_steps, s.timemap.steps);
     gl.uniform1i(p.u.u_blend, s.timemap.blend ? 1 : 0);
     gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);
-    this.compositeUniforms(p, s, Math.min(s.timemap.maxDelay, this.n - 1));
+    this.compositeUniforms(p, s, Math.min(s.timemap.maxDelay, this.n - 1, this.depthCap));
     const L = s.look;
     const a = (L.offsetAngle * Math.PI) / 180;
     gl.uniform2f(p.u.u_shift, (L.offset * Math.cos(a)) / this.w, (L.offset * Math.sin(a)) / this.h);

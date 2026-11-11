@@ -20,13 +20,16 @@ const H = 240, ROWS = 30;
 const centre = (cy) => cy * 8 + 4;
 
 // The expected code of each block row at frame t (blend off). codes[k] = code of frame k.
-export function expectRows(codes, t, max, steps = 0) {
+// wrapL (perfect loop of frames 0 .. wrapL − 1): before frame 0, the frames of the end.
+export function expectRows(codes, t, max, steps = 0, wrapL = 0) {
   const out = [];
   for (let cy = 0; cy < ROWS; cy++) {
     let v = (centre(cy) + 0.5) / H;
     if (steps > 1) v = Math.min(Math.floor(v * steps), steps - 1) / (steps - 1);
     const d = v * max;
-    out.push(t - d < 0 ? 0 : codes[t - Math.floor(d + 0.5)]);
+    const k = t - Math.floor(d + 0.5);
+    if (wrapL) out.push(codes[k < 0 ? k + wrapL : k]);
+    else out.push(t - d < 0 ? 0 : codes[k]);
   }
   return out;
 }
@@ -107,6 +110,57 @@ export const tests = [
         });
         assert(r.length > 40, `${r.length} frames shown`);
         for (const [t, rows] of r) assert(same(rows, expectRows(codes, t, 30)), `play, frame ${t}: ${rows}`);
+      });
+    },
+  },
+  {
+    name: 'Mode 1, perfect loop: before frame 0 the rows show the end of the video (seek, and a looped playback across the wrap); off: black again',
+    timeout: 240000,
+    async fn() {
+      await withApp(async (page, codes) => {
+        const L = codes.length;
+        await setAll(page, { 'timemap.maxDelay': 30, 'timemap.blend': false, 'timemap.steps': 0, 'timemap.perfectLoop': true });
+        for (const t of [0, 1, 7, 15, 29, 30, 45, L - 1, 3, 60, 0]) {
+          const rows = await seekRows(page, t);
+          const want = expectRows(codes, t, 30, 0, L);
+          assert(same(rows, want), `t ${t}:\n        got  ${rows}\n        want ${want}`);
+        }
+        // Play from near the end with Loop on: each shown frame, also after the wrap (the history of
+        // the first frames is the end of the pass before: no decode of it again).
+        const r = await page.evaluate(async (L) => {
+          const P = window.neofx.player;
+          await P.seek(L - 15);
+          document.querySelector('[data-act=loop]').click();
+          const seen = [];
+          const consume = P.opts.consume;
+          P.opts.consume = (i, f, show) => {
+            const p = consume(i, f, show);
+            if (show) seen.push(window.neofx.gpu.call({ cmd: 'read' }).then((px) => [i, window.__rowsOf(px)]));
+            return p;
+          };
+          const jobs = P.stats.decodeJobs;
+          P.play();
+          const t0 = performance.now();
+          await new Promise((res) => {
+            const k = () => (P.vcur >= 2 * L + 35 || performance.now() - t0 > 120000 ? res() : setTimeout(k, 20));
+            k();
+          });
+          P.pause();
+          document.querySelector('[data-act=loop]').click();
+          P.opts.consume = consume;
+          return { shown: await Promise.all(seen), jobs: P.stats.decodeJobs - jobs, vcur: P.vcur };
+        }, L);
+        assert(r.vcur >= 2 * L + 35, `the playback came past the wrap: ${r.vcur}`);
+        const wrapped = r.shown.filter(([i]) => i % L < 30);
+        assert(wrapped.length > 10, `${wrapped.length} frames after the wrap`);
+        for (const [i, rows] of r.shown) assert(same(rows, expectRows(codes, i % L, 30, 0, L)), `play, frame ${i % L} (store ${i}): ${rows}`);
+        assert(r.jobs <= 3, `decode jobs ${r.jobs}`);
+        // Off: black before frame 0 again.
+        await setAll(page, { 'timemap.perfectLoop': false });
+        for (const t of [5, 40]) {
+          const rows = await seekRows(page, t);
+          assert(same(rows, expectRows(codes, t, 30)), `off, t ${t}: ${rows}`);
+        }
       });
     },
   },

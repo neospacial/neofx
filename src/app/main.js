@@ -110,7 +110,7 @@ async function makePlate(kind) {
   if (!player.info) return;
   settings.cutout.plate = kind;
   if (kind === 'frame') {
-    const r = await gpu.call({ cmd: 'plateFrame', index: Math.max(0, player.current) });
+    const r = await gpu.call({ cmd: 'plateFrame', index: Math.max(0, player.vcur) });
     Object.assign(toolState, { plateOk: r.ok, plateText: r.ok ? `Frame ${player.current}` : 'No frame' });
   } else if (kind === 'image') {
     const input = $('plateFileInput');
@@ -227,7 +227,7 @@ function setTool(tool) {
 }
 
 async function pick(u, v) {
-  const r = await gpu.call({ cmd: 'pick', index: Math.max(0, player.current), u, v });
+  const r = await gpu.call({ cmd: 'pick', index: Math.max(0, player.vcur), u, v });
   const hex = `#${r.rgb.map((c) => c.toString(16).padStart(2, '0')).join('')}`;
   settings.cutout.chroma.on = true;
   change('cutout.chroma.key', hex);
@@ -292,7 +292,7 @@ function updateThumbs(only) {
     if (!player.info || settings.map.source !== 'builtin') return;
     const ids = only ? [only] : MAPS.filter((m) => !m.needs).map((m) => m.id);
     const maps = ids.map((id) => ({ ...clone(settings.map), source: 'builtin', type: id, anim: { ...settings.map.anim }, adjust: settings.map.adjust }));
-    const r = await gpu.call({ cmd: 'thumbs', maps, t: Math.max(0, player.current), width: THUMB_W, height: THUMB_H });
+    const r = await gpu.call({ cmd: 'thumbs', maps, t: Math.max(0, player.vcur), width: THUMB_W, height: THUMB_H });
     inspector.drawThumbs(Object.fromEntries(ids.map((id, i) => [id, r.images[i]])));
   }, only ? 120 : 30);
 }
@@ -343,11 +343,24 @@ async function loadMapFile(file, kind) {
 // Send the settings to the engine. When the effect needs more history, a seek decodes it.
 async function applySettings() {
   const r = gpu.call({ cmd: 'settings', settings: clone(settings) });
+  await syncWrap();
   const depth = effectDepth();
   const more = depth > player.depth;
   player.depth = depth;
   if (more && player.info && !player.playing && player.current >= 0) await player.seek(player.current);
   await r;
+}
+
+// Perfect loop (Time Map): the frames before the start of the loop come from its end. On a change
+// (on / off, the loop range), the store indices change meaning: the engine forgets the store, and
+// the frame on the preview is loaded again. force: send the delay cap again (after the export).
+const wrapOn = () => settings.mode === 'timemap' && !!settings.timemap.perfectLoop;
+async function syncWrap(force = false) {
+  if (!player || !player.info) return;
+  const changed = player.setWrap(wrapOn());
+  if (!changed && !force) return;
+  await gpu.call({ cmd: 'wrap', cap: player.wrap ? player.wrap.L - 1 : null, forget: changed });
+  if (changed && player.current >= 0) await player.seek(player.current);
 }
 
 // A setting changed in the UI. final: the end of a drag (the next change is a new undo step).
@@ -494,6 +507,7 @@ async function exportVideo(opts, onProgress = () => {}) {
       an.start(currentFile, player.frameCount, 'export');
     }),
     depth: () => effectDepth(),
+    wrap: wrapOn,
   });
   const ex = exporter;
   const cancel = ex.cancel.bind(ex);
@@ -507,8 +521,9 @@ async function exportVideo(opts, onProgress = () => {}) {
   } finally {
     settings.view = view;
     exporter = null;
-    // The preview again.
+    // The preview again (the engine store is new; the delay cap of the preview loop).
     await configureStore();
+    await syncWrap(true);
     await player.seek(Math.max(0, player.current));
     status();
   }
@@ -534,8 +549,13 @@ function keys(e) {
   else if (k === 'ArrowRight') P.step(e.shiftKey ? 10 : 1);
   else if (k === 'Home') P.seek(0);
   else if (k === 'End') P.seek(P.frameCount - 1);
-  else if (k === 'i' || k === 'I') timeline.setIn();
-  else if (k === 'o' || k === 'O') timeline.setOut();
+  else if (k === 'i' || k === 'I') {
+    timeline.setIn();
+    syncWrap();
+  } else if (k === 'o' || k === 'O') {
+    timeline.setOut();
+    syncWrap();
+  }
   else if (k === 'm' || k === 'M') change('view', settings.view === 'mask' ? 'result' : 'mask');
   else if ((k === 'e' || k === 'E') && (e.ctrlKey || e.metaKey)) exportDialog.open();
   else if ((k === 'z' || k === 'Z') && (e.ctrlKey || e.metaKey)) (e.shiftKey ? redo() : undo());
@@ -802,7 +822,7 @@ async function presetThumb(p) {
   const iconMap = ['motion', 'self', 'subject', 'subjectdist'].includes(s.map.type);
   if (s.mode === 'timemap' && s.map.source === 'builtin' && !iconMap) {
     try {
-      const r = await gpu.call({ cmd: 'thumbs', maps: [s.map], t: Math.max(0, player.current), width: 160, height: 90 });
+      const r = await gpu.call({ cmd: 'thumbs', maps: [s.map], t: Math.max(0, player.vcur), width: 160, height: 90 });
       const y = r.images[0];
       const img = ctx.createImageData(160, 90);
       for (let i = 0; i < y.length; i++) img.data.set([y[i], y[i], y[i], 255], i * 4);
@@ -957,7 +977,7 @@ async function start() {
     },
     // New rows: show them on a paused preview.
     onRows: () => {
-      if (!player.playing && !player.busy && player.current >= 0) gpu.call({ cmd: 'render', index: player.current });
+      if (!player.playing && !player.busy && player.vcur >= 0) gpu.call({ cmd: 'render', index: player.vcur });
     },
     onDone: () => {
       status();

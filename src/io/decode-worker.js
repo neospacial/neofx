@@ -184,10 +184,13 @@ async function open(file) {
 async function seek(m) {
   const n = W.tl.frames.length;
   const t = Math.max(0, Math.min(n - 1, m.t));
-  const from = Math.max(0, Math.min(t, m.from ?? t - (m.depth || 0)));
-  const list = [];
-  for (let i = from; i <= t; i++) list.push(i);
-  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (i) => i >= from && i <= t, (i, f) => sendFrame(m.job, i, f, i < t));
+  // ranges (perfect loop): [[a, b], ...] of frames to decode (else from .. t). allWarm: no frame
+  // is the one to show (the page renders it after 'done').
+  const ranges = m.ranges || [[Math.max(0, Math.min(t, m.from ?? t - (m.depth || 0))), t]];
+  const set = new Set();
+  for (const [a, b] of ranges) for (let i = Math.max(0, a); i <= Math.min(n - 1, b); i++) set.add(i);
+  const list = [...set].sort((x, y) => x - y);
+  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (i) => set.has(i), (i, f) => sendFrame(m.job, i, f, m.allWarm || i !== t));
   if (ok) post({ cmd: 'done', job: m.job });
 }
 

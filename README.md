@@ -23,9 +23,11 @@ The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries
 
 **Randomize all** sets safe random values in the sections of the mode; the lock of a section keeps it, the dice of a section changes only that section. Each look has a number (its seed). **Reset to defaults** sets every setting back to its default (the view, an imported mask video, and the loaded map files stay); it is one undo step. **Undo** / **Redo** (↶ ↷, Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z) go back and forward through the setting changes; a slider drag is one change.
 
+**Perfect loop** (Time Map, in the Time section): the delayed pixels of the first frames take their frames from the end of the video (or of the In – Out range) instead of black, so the result loops without a cut: in the preview with **Loop** on, and in the export (the history of the first exported frames is decoded from the end of the range first). The Max delay is at most the loop length − 1. It does not apply to Slit Scan.
+
 **Curves** (Map adjust curve, Slit Scan rate curve, decay curve): drag a point; click on the line to add one; double-click (or long press) a point to remove it; or use a preset (Linear, Ease in, Ease out, S-curve, Step).
 
-Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out; J play backward, K stop, L play; hold \ to show the original; M the Mask view; Ctrl/Cmd+Z undo, Shift+Ctrl/Cmd+Z redo; Ctrl/Cmd+E export.
+Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out (the loop and export range; the transport has no In / Out buttons); J play backward, K stop, L play; hold \ to show the original; M the Mask view; Ctrl/Cmd+Z undo, Shift+Ctrl/Cmd+Z redo; Ctrl/Cmd+E export.
 
 The status bar shows the frame store: for example "Buffer: 240 frames at 540p (≈ 330 MB)". The store is a ring of past frames on the GPU (YUV 4:2:0, 1.5 bytes for each pixel). Its size is the smallest of: the GPU limit of texture layers, the memory budget divided by the size of one frame, and 1000 frames. The budget starts at 1 GB on desktop and 384 MB on Android, and halves when the GPU cannot allocate it. **Preview** (transport) sets the working resolution of the preview (short side: 360, 540, 720, 1080, or Source). The preview drops frames when the device is too slow ("Preview N fps" in amber); the export never does.
 

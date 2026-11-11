@@ -38,6 +38,31 @@ export class Player {
     this.clock = null; // { wall, us }
     this.stats = { shown: 0, dropped: 0, t0: 0, fps: 0, decodeJobs: 0 };
     this.log = []; // the presented frame indices of the last playback (for tests)
+    // Perfect loop (Time Map): the store indices are virtual: real + pass × L (the loop [a, a + L − 1]),
+    // so the history of the first frames of the loop is the end of the loop (the pass before).
+    // Without it, the store index is the frame index.
+    this.wrap = null; // null, or { a, L }
+    this.pass = 0;
+    this.vcur = -1; // the store index of the frame on the preview
+    this.jobPass = () => this.pass; // real frame -> its pass, for the frames of the decode job
+  }
+
+  // Perfect loop on (the loop range) or off. The store is forgotten (the indices change meaning).
+  setWrap(on) {
+    const [a, b] = this.range();
+    const w = on && this.info ? { a, L: b - a + 1 } : null;
+    if (JSON.stringify(w) === JSON.stringify(this.wrap)) return false;
+    this.pause();
+    this.wrap = w;
+    this.pass = w ? 1 : 0;
+    this.have.fill(-1);
+    this.vcur = -1;
+    return true;
+  }
+
+  // The store index of real frame t in a pass.
+  virt(t, pass = this.pass) {
+    return this.wrap ? t + pass * this.wrap.L : t;
   }
 
   get frameCount() {
@@ -72,6 +97,9 @@ export class Player {
     this.wk = this.thumbWk = null;
     this.info = null;
     this.current = -1;
+    this.vcur = -1;
+    this.wrap = null;
+    this.pass = 0;
     this.busy = false;
     this.pendingSeek = null;
     this.inPoint = this.outPoint = null;
@@ -117,7 +145,7 @@ export class Player {
 
   // The history depth that the store can hold.
   get usableDepth() {
-    return Math.max(0, Math.min(this.depth, this.n - 1));
+    return Math.max(0, Math.min(this.depth, this.n - 1, this.wrap ? this.wrap.L - 1 : Infinity));
   }
 
   // The first frame of from..t that is not in the store, or t + 1.
@@ -131,6 +159,7 @@ export class Player {
   seek(t) {
     if (!this.info) return Promise.resolve();
     t = Math.max(0, Math.min(this.frameCount - 1, Math.round(t)));
+    if (this.wrap) t = Math.max(this.wrap.a, Math.min(this.wrap.a + this.wrap.L - 1, t)); // the loop
     if (this.playing) this.pause();
     return new Promise((resolve) => {
       if (this.pendingSeek) this.pendingSeek.resolve();
@@ -146,20 +175,35 @@ export class Player {
     this.busy = true;
     this.seekDone = p.resolve;
     this.target = p.t;
-    const from = this.firstMissing(Math.max(0, p.t - this.usableDepth), p.t);
-    if (from > p.t) {
+    const pass = this.pass;
+    const v = this.virt(p.t);
+    const from = this.firstMissing(Math.max(0, v - this.usableDepth), v);
+    if (from > v) {
       // All in the store: no decode.
       const job = ++this.job;
-      this.opts.render(p.t).then(() => {
+      this.opts.render(v).then(() => {
         if (job !== this.job) return;
         this.current = p.t;
+        this.vcur = v;
         this.finishSeek();
       }, (e) => this.fail(e.message));
       return;
     }
-    this.warm = { from, total: p.t - from + 1, done: 0 };
+    this.warm = { from, total: v - from + 1, done: 0 };
     this.stats.decodeJobs++;
-    this.wk.postMessage({ cmd: 'seek', job: ++this.job, t: p.t, from });
+    const W = this.wrap;
+    if (W && from < this.virt(W.a)) {
+      // The history starts in the pass before: the end of the loop, then its start up to t. All go
+      // into the store first; then frame t is rendered (renderAfter).
+      const realFrom = from - (pass - 1) * W.L;
+      this.jobPass = (r) => (r > p.t ? pass - 1 : pass);
+      this.renderAfter = { t: p.t, v };
+      this.wk.postMessage({ cmd: 'seek', job: ++this.job, t: p.t, ranges: [[W.a, p.t], [realFrom, W.a + W.L - 1]], allWarm: true });
+      return;
+    }
+    this.jobPass = () => pass;
+    this.renderAfter = null;
+    this.wk.postMessage({ cmd: 'seek', job: ++this.job, t: p.t, from: from - (W ? pass * W.L : 0) });
   }
 
   finishSeek() {
@@ -186,8 +230,22 @@ export class Player {
     const [a, b] = this.range();
     let from = this.current + 1;
     if (from > b || from < a) from = a;
+    const W = this.wrap;
+    const v = this.virt(from);
+    // Perfect loop: a history in the pass before that is not in the store: a seek loads it first.
+    if (W && !this.seekingForPlay && this.firstMissing(Math.max(0, v - this.usableDepth), v - 1) < this.virt(W.a)) {
+      this.seekingForPlay = true;
+      this.seek(from).then(() => {
+        this.seekingForPlay = false;
+        if (this.current === from) this.play();
+      });
+      return;
+    }
     // The decode starts at the first frame of the history of 'from' that is not in the store.
-    const start = this.firstMissing(Math.max(0, from - this.usableDepth), from);
+    const start = this.firstMissing(Math.max(W ? this.virt(W.a) : 0, v - this.usableDepth), v) - (W ? this.pass * W.L : 0);
+    const pass = this.pass;
+    this.jobPass = () => pass;
+    this.renderAfter = null;
     this.playing = true;
     this.pendingSeek = null;
     this.busy = false;
@@ -223,9 +281,13 @@ export class Player {
   }
 
   // Into the store (and on the preview when show). The decode worker gets its ack after the upload.
-  deliver(index, frame, show) {
+  deliver(t, frame, show) {
+    const index = this.virt(t, this.jobPass(t));
     if (this.n) this.have[index % this.n] = index;
-    if (show) this.current = index;
+    if (show) {
+      this.current = t;
+      this.vcur = index;
+    }
     const wk = this.wk;
     return this.opts.consume(index, frame, show).catch((e) => this.fail(e.message)).finally(() => {
       if (wk) wk.postMessage({ cmd: 'ack' });
@@ -254,6 +316,19 @@ export class Player {
       this.state();
     } else if (m.cmd === 'done') {
       if (m.job !== this.job || this.playing) return;
+      const ra = this.renderAfter;
+      if (ra) {
+        // A perfect-loop seek: all the frames are in the store; now frame t.
+        this.renderAfter = null;
+        const job = this.job;
+        this.opts.render(ra.v).then(() => {
+          if (job !== this.job) return;
+          this.current = ra.t;
+          this.vcur = ra.v;
+          this.finishSeek();
+        }, (e) => this.fail(e.message));
+        return;
+      }
       this.finishSeek();
     } else if (m.cmd === 'error') {
       if (m.job !== undefined && m.job !== this.job) return;
@@ -298,6 +373,7 @@ export class Player {
       if (this.loop) {
         this.playing = false;
         this.current = -1;
+        if (this.wrap) this.pass++; // the next pass: its history is the end of this one
         this.play();
         return;
       }

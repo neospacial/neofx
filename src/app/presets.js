@@ -55,6 +55,7 @@ export const PRESETS = [
 export function applyPreset(current, preset) {
   const s = merge(DEFAULTS, preset.s);
   s.view = current.view;
+  s.timemap.perfectLoop = !!(current.timemap && current.timemap.perfectLoop); // an output choice, not a look
   const keep = clone(current.cutout);
   s.cutout = { ...keep, mode: (preset.s.cutout && preset.s.cutout.mode) || 'off' };
   if (s.cutout.mode === 'scan' && s.mode !== 'slitscan') s.cutout.mode = 'overlay';
