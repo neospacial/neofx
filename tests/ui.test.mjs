@@ -96,7 +96,12 @@ export const tests = [
     async fn() {
       await withApp(DESKTOP, async (page) => {
         for (const id of ['openBtn', 'presetsBtn', 'undoBtn', 'redoBtn', 'exportBtn']) assert(await page.isVisible(`#${id}`), `${id} visible`);
-        assert(!(await page.isVisible('#menuBtn')) && !(await page.isVisible('.tabBar')), 'no phone controls');
+        assert(!(await page.isVisible('.tabBar')), 'no phone tabs');
+        // The ⋯ menu on desktop: only the Performance test (Presets, Undo, Redo are in the top bar).
+        await page.click('#menuBtn');
+        const items = await page.evaluate(() => [...document.querySelectorAll('#menu button')].filter((b) => b.offsetParent !== null).map((b) => b.dataset.act));
+        assert(items.join() === 'bench', `menu ${items}`);
+        await page.click('#menuBtn');
         // Inspector width: drag the bar.
         const sz = await page.locator('#sizer').boundingBox();
         await page.mouse.move(sz.x + 2, sz.y + 100);
@@ -499,7 +504,7 @@ export const tests = [
     },
   },
   {
-    name: 'iOS picker: multiple (an Add button), the wait for the video shows from the picker on (touch), Cancel; a GPU reset stops playback with a message; the iPad budget',
+    name: 'iOS picker: multiple (an Add button), the wait for the video shows from the picker on (touch), Cancel; the iPad budget; a GPU reset restarts the engine (main thread on iOS) and keeps the edit',
     timeout: 120000,
     async fn() {
       await withApp(PHONE, async (page, f) => {
@@ -522,13 +527,104 @@ export const tests = [
         // The iPad (a Mac user agent with touch): the iOS budget.
         const b = await page.evaluate(() => window.neofx.store.usedBudget);
         assert(b <= 256 * 1048576, `budget ${b}`);
-        // A GPU reset during a loop: the playback stops and a message stays.
+        // A GPU reset during a loop: a new engine (on the main thread: an iPad), the edit stays
+        // (settings, the garbage matte, the frame), the budget halves.
+        await page.evaluate(async () => {
+          const N = window.neofx;
+          N.change('timemap.maxDelay', 12);
+          N.change('cutout.mode', 'overlay');
+          await N.gpu.call({ cmd: 'matteStroke', points: [[0.2, 0.2], [0.4, 0.4]], size: 30, hardness: 1, mode: 'never' });
+        });
+        await page.evaluate(() => window.neofx.snapMatte());
+        await page.waitForTimeout(600);
+        await page.evaluate(() => window.neofx.player.seek(20));
         await page.click('[data-act=loop]');
         await page.click('[data-act=play]');
+        const old = await page.evaluate(() => (window.__oldGpu = window.neofx.gpu, window.neofx.gpu.mode));
         const r = await page.evaluate(() => window.neofx.gpu.call({ cmd: 'loseContext' }));
         assert(r.ok, 'WEBGL_lose_context');
-        await page.waitForFunction(() => !window.neofx.player.playing && /The GPU stopped/.test(document.getElementById('message').textContent), null, { timeout: 10000 });
+        await page.waitForFunction(() => window.neofx.gpu !== window.__oldGpu && /restored/.test(document.getElementById('message').textContent) && document.getElementById('loading').hidden, null, { timeout: 30000 });
+        const after = await page.evaluate(async () => {
+          const N = window.neofx;
+          const m = await N.gpu.call({ cmd: 'matteGet' });
+          const px = await N.gpu.call({ cmd: 'read' });
+          return { mode: N.gpu.mode, playing: N.player.playing, cur: N.player.current, delay: N.settings.timemap.maxDelay, cut: N.settings.cutout.mode, matte: !m.empty, drawn: px.pixels.some((v, i) => i % 4 !== 3 && v > 0), budget: N.store.usedBudget, view: document.getElementById('view') === N.preview.canvas };
+        });
+        assert(old === 'worker' && after.mode === 'main', `the engine: ${old} -> ${after.mode}`);
+        assert(!after.playing && after.delay === 12 && after.cut === 'overlay' && after.matte && after.drawn && after.view, `after the restart ${JSON.stringify(after)}`);
+        assert(after.budget <= 128 * 1048576, `the budget halves: ${after.budget}`);
       }, { noFile: true, allowErrors: true });
+    },
+  },
+  {
+    name: 'GPU resets: a tab in the background pauses, the restart waits until it is back; a reset during an export: a clear error, then the preview is restored',
+    timeout: 180000,
+    async fn() {
+      await withApp(DESKTOP, async (page) => {
+        const hide = (h) => page.evaluate((h) => {
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => h });
+          Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (h ? 'hidden' : 'visible') });
+          document.dispatchEvent(new Event('visibilitychange'));
+        }, h);
+        await page.click('[data-act=play]');
+        await hide(true);
+        assert(!(await page.evaluate(() => window.neofx.player.playing)), 'hidden: paused');
+        await page.evaluate(() => (window.__oldGpu = window.neofx.gpu, window.neofx.gpu.call({ cmd: 'loseContext' })));
+        await page.waitForTimeout(1000);
+        assert(await page.evaluate(() => window.neofx.gpu === window.__oldGpu && !document.getElementById('loading').hidden), 'the restart waits for the tab');
+        await hide(false);
+        await page.waitForFunction(() => window.neofx.gpu !== window.__oldGpu && document.getElementById('loading').hidden && /restored/.test(document.getElementById('message').textContent), null, { timeout: 30000 });
+        // Back with a live GPU: the frame is drawn again, no restart.
+        await hide(true);
+        await hide(false);
+        await page.waitForTimeout(500);
+        assert(await page.evaluate(() => document.getElementById('loading').hidden), 'no restart for a live GPU');
+        // A reset during an export.
+        const r = await page.evaluate(async () => {
+          const N = window.neofx;
+          window.__oldGpu = N.gpu;
+          let lost = false;
+          const p = N.exportVideo({ width: 320, height: 240, quality: 'high', keyint: 2, range: [0, 89], audio: false, hardware: 'hardware', name: 'l.mp4' }, (pr) => {
+            if (!lost && pr.done > 10) {
+              lost = true;
+              N.gpu.call({ cmd: 'loseContext' });
+            }
+          }).then(() => 'finished', (e) => e.message);
+          return p;
+        });
+        assert(/reset the GPU during the export/.test(r), r);
+        await page.waitForFunction(() => window.neofx.gpu !== window.__oldGpu && document.getElementById('loading').hidden && window.neofx.player.vcur >= 0, null, { timeout: 30000 });
+        const px = await page.evaluate(async () => {
+          const N = window.neofx;
+          await N.player.seek(40); // (frame 0 is black: nothing is online yet)
+          const r = await N.gpu.call({ cmd: 'read' });
+          return { drawn: r.pixels.some((v, i) => i % 4 !== 3 && v > 0), cur: N.player.current, vcur: N.player.vcur, n: N.store.n, msg: document.getElementById('message').textContent, w: r.width };
+        });
+        assert(px.drawn, `the preview after the restart ${JSON.stringify(px)}`);
+      }, { allowErrors: true });
+    },
+  },
+  {
+    name: 'performance test (phase 12): preview fps for each mode at 540p, export fps at 1080p (or the source size), buffer limits; the settings come back',
+    timeout: 240000,
+    async fn() {
+      await withApp(DESKTOP, async (page) => {
+        await page.evaluate(() => window.neofx.change('timemap.maxDelay', 17));
+        const before = await S(page);
+        await page.click('#menuBtn');
+        await page.click('#menu button[data-act="bench"]');
+        await page.click('#benchRun');
+        await page.waitForFunction(() => !document.getElementById('benchOut').hidden || /Error|cannot/i.test(document.getElementById('benchStep').textContent), null, { timeout: 200000 });
+        const r = await page.evaluate(() => ({ text: document.getElementById('benchOut').value, b: window.neofx.lastBench }));
+        console.log(r.text.split('\n').map((l) => `      | ${l}`).join('\n'));
+        assert(r.b && Object.keys(r.b.preview).length === 2 && Object.values(r.b.preview).every((p) => p.fps > 0), 'preview fps');
+        assert(r.b.export && r.b.export.fps > 0 && r.b.export.frames > 0, 'export fps');
+        assert(r.b.buffer[540].n > 0 && r.b.buffer[1080].n > 0, 'buffer');
+        assert(/Preview 540p, Time Map/.test(r.text) && /Export \d+×\d+: /.test(r.text), r.text);
+        const after = await S(page);
+        assert(JSON.stringify(after) === JSON.stringify(before), 'the settings come back');
+        await page.click('#benchClose');
+      });
     },
   },
   {

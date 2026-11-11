@@ -164,6 +164,7 @@ export class Engine {
       }
       return { cmd: 'wrap' };
     }
+    if (m.cmd === 'alive') return { cmd: 'alive', lost: this.lost || this.gl.isContextLost() };
     if (m.cmd === 'loseContext') {
       // Tests: a GPU reset.
       const ext = this.gl.getExtension('WEBGL_lose_context');

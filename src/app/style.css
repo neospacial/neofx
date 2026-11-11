@@ -102,7 +102,8 @@ body[data-state="start"] #viewBar{display:none}
 .subhead{padding:8px 12px 2px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
 .setting.color{grid-template-columns:96px auto 1fr}
 .setting.color input[type=color]{width:40px;height:28px;padding:0;border:1px solid var(--line);border-radius:4px;background:none}
-#exportDialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:0;width:min(440px,calc(100vw - 32px))}
+#benchDialog textarea{width:100%;font:12px ui-monospace,monospace;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px}
+#benchDialog,#exportDialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:0;width:min(440px,calc(100vw - 32px))}
 #exportDialog::backdrop{background:rgba(0,0,0,.6)}
 .exportForm{display:grid;gap:8px;padding:16px}
 .exportForm h2{margin:0 0 4px;font-size:16px}

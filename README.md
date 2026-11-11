@@ -7,7 +7,7 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **phase 11 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: everything in the plan but the device tests (phase 12): the build, the MP4/MOV reader and muxer, frame-exact seek and playback, the GPU frame store, **Time Map** with the full map library, the **compositor**, **Slit Scan** (line and subject edge), the **cutout**, the **export**, and the **UI** (desktop and phone layouts, presets, undo, randomize, the curve editor, the keyboard).
+> Status: v0.1.0, **all 12 phases done** (see `neofx-plan-v0.1.0.md` §14): the build, the MP4/MOV reader and muxer, frame-exact seek and playback, the GPU frame store, **Time Map** with the full map library and the perfect loop, the **compositor**, **Slit Scan** (line and subject edge), the **cutout**, the **export**, the **UI** (desktop and phone layouts, presets, undo, randomize, the curve editor, the keyboard), and the **performance test** with the device results below (phase 12). The device rows of the results table are filled in from the in-app test on each device.
 
 ## How to use
 
@@ -128,9 +128,26 @@ The app probes the encoder (H.264 High, then Main, then Baseline, at the level f
 
 ## Browser support
 
-Main targets: desktop Chrome and Chrome on Android. Other browsers with WebCodecs and WebGL2 must also work. Safari on iPad / iPhone (and Opera or Chrome on iOS, which use the same engine): the app and the export work. The frame store budget there is 256 MB (iPadOS gives a Mac user agent: a Mac with touch points counts as an iPad), because the GPU memory counts in the memory limit of the tab. The video pickers allow several files, so the iOS photo picker shows an **Add** button (the first file is used); on a touch device the loading indicator shows from the moment the picker opens, because iOS copies (and can convert) a video from Photos before the page gets it, with a **Cancel** button. If the browser resets the GPU (most often: out of memory), the playback stops and the app says to reload the page and choose a lower Preview resolution. Also on iOS: the export matches each encoded frame to its source frame by the nearest time (Safari gives the encoded frames slightly different times), and it stops with a message, not a broken file, if a frame time is not known. At start, the app checks WebGL2, float render targets, `VideoDecoder`, `VideoEncoder`, and `OffscreenCanvas` with WebGL2 (plan §4). Without `OffscreenCanvas` WebGL2 in a worker, the GPU work runs on the main thread (open the page with `?gpu=main` to test this).
+Main targets: desktop Chrome and Chrome on Android. Other browsers with WebCodecs and WebGL2 must also work. Safari on iPad / iPhone (and Opera or Chrome on iOS, which use the same engine): the app and the export work. The frame store budget there is 256 MB (iPadOS gives a Mac user agent: a Mac with touch points counts as an iPad), because the GPU memory counts in the memory limit of the tab. The video pickers allow several files, so the iOS photo picker shows an **Add** button (the first file is used); on a touch device the loading indicator shows from the moment the picker opens, because iOS copies (and can convert) a video from Photos before the page gets it, with a **Cancel** button. On iOS the GPU work runs on the main thread (not in a worker with OffscreenCanvas: the page flashed there), and playback pauses while the tab is in the background. Also on iOS: the export matches each encoded frame to its source frame by the nearest time (Safari gives the encoded frames slightly different times), and it stops with a message, not a broken file, if a frame time is not known. At start, the app checks WebGL2, float render targets, `VideoDecoder`, `VideoEncoder`, and `OffscreenCanvas` with WebGL2 (plan §4). Without `OffscreenCanvas` WebGL2 in a worker, the GPU work runs on the main thread (open the page with `?gpu=main` to test this).
 
 Input: MP4 and MOV only (not fragmented). Output: MP4, H.264 (WebCodecs `VideoEncoder`; without it, the preview works and Export is off), with the audio of the source (AAC or Opus) copied.
+
+## GPU resets
+
+A browser can take the GPU context back (most often when the device is short of memory, or for a tab that was in the background on iOS). The app then makes a new GPU context by itself and puts back the edit: the frame store (with half of the memory budget, so a reset for memory is less likely again), the settings, the image or video map, the mask video, the clean plate, the garbage matte, and the frame on the preview. A message says so. An export that the reset stops ends with a clear error (start it again, at a lower resolution). After three resets in two minutes, the message advises a lower Preview resolution or a shorter Max delay. When the tab comes back from the background, the app checks the GPU and draws the frame again.
+
+## Performance (device tests, plan §13.4)
+
+**⋯ → Performance test…** (with a video open) plays the video for a few seconds in each mode at 540p, exports up to 150 frames at 1080p (the file is not kept), reads the frame buffer limit, and gives the result as text (with **Copy**). Use a 1080p (or larger) video, so that 540p and 1080p are real sizes.
+
+| Device | Browser | Preview 540p, Time Map | Preview 540p, Slit Scan | Export 1080p | Buffer 540p / 1080p |
+|---|---|---|---|---|---|
+| Test container (4 CPU threads, no GPU: SwiftShader software rendering, software H.264) | Headless Chrome 153 | 9.2 fps | 4.8 fps | 1.8 fps | 1000 / 345 frames |
+| Desktop (Windows or macOS) | Chrome | (run the test) | | | |
+| Android phone (mid-range) | Chrome | (run the test) | | | |
+| iPad | Safari | (run the test) | | | |
+
+The container row is a floor, not a target: it has no GPU, so every shader and the H.264 encoder run on the CPU. The source was a 1920×1080, 30 fps, 10 s test pattern (H.264 High). Real devices with a GPU and a hardware encoder are many times faster; their rows come from the in-app test.
 
 ## Known limits
 
@@ -144,6 +161,7 @@ Input: MP4 and MOV only (not fragmented). Output: MP4, H.264 (WebCodecs `VideoEn
 - The cutout is made for a camera that does not move. Temporal smooth and hysteresis use the mask of the previous frame: they apply in playback (and export), not to a single seek.
 - Grow / shrink and the outline use a square kernel: corners grow a little more than round edges.
 - Undo covers the settings, not the painted matte, the clean plate, or the custom map files.
+- A GPU reset during an export stops the export (the preview is restored; start the export again).
 - A video map keeps at most 256 MB of frames; a longer map video holds its last frame that fits.
 - Without float render targets, the map has 8-bit precision: with a long Max delay, the delays have steps of Max delay / 255 frames.
 - The frame store keeps 8-bit YUV 4:2:0 (BT.709, full range): a small colour change is possible on fine colour edges.

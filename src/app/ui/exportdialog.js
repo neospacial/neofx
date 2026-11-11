@@ -16,6 +16,19 @@ export class ExportDialog {
     this.d = dialog;
     this.app = app;
     this.result = null;
+    this.url = null;
+    // The exported file stays in memory only while the dialog is open: then its URL is given back.
+    dialog.addEventListener('close', () => this.release());
+  }
+
+  release() {
+    if (this.url) URL.revokeObjectURL(this.url);
+    // A large export was written to the browser storage (OPFS): remove that file too.
+    if (this.result && this.result.opfs && navigator.storage && navigator.storage.getDirectory) {
+      navigator.storage.getDirectory().then((d) => d.removeEntry('neofx-export.mp4')).catch(() => {});
+    }
+    this.url = null;
+    this.result = null;
   }
 
   open() {
@@ -23,7 +36,7 @@ export class ExportDialog {
     if (!info) return;
     const d = this.d;
     d.textContent = '';
-    this.result = null;
+    this.release();
     const form = el('form', { method: 'dialog', className: 'exportForm' });
     form.append(el('h2', {}, 'Export'));
     const row = (label, input) => {
@@ -124,7 +137,7 @@ export class ExportDialog {
 
   showResult(buttons, r) {
     buttons.textContent = '';
-    const url = URL.createObjectURL(r.blob);
+    const url = (this.url = URL.createObjectURL(r.blob));
     const dl = el('a', { href: url, download: r.name, className: 'button primary', id: 'exportDownload' }, 'Download');
     buttons.append(dl);
     // Share (iOS-like environments, plan §11.2 step 7).

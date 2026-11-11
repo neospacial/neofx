@@ -32,13 +32,32 @@ export class GpuClient {
     }
   }
 
+  // Stop this engine (a GPU restart makes a new one on a new canvas): the calls that wait fail, and
+  // the context is given back (its memory) when it still lives.
+  dispose() {
+    this.disposed = true;
+    if (this.wk) this.wk.terminate();
+    for (const w of this.waiting.values()) w.reject(new Error('The GPU was restarted.'));
+    this.waiting.clear();
+    if (this.engine) {
+      try {
+        const ext = this.engine.gl.getExtension('WEBGL_lose_context');
+        if (ext && !this.engine.gl.isContextLost()) ext.loseContext();
+      } catch { /* lost */ }
+    }
+  }
+
   lostNow() {
-    if (this.lost) return;
+    if (this.lost || this.disposed) return;
     this.lost = true;
     if (this.onLost) this.onLost();
   }
 
   call(msg, transfer = []) {
+    if (this.disposed) {
+      if (msg.frame) try { msg.frame.close(); } catch { /* closed */ }
+      return Promise.reject(new Error('The GPU was restarted.'));
+    }
     if (this.engine) {
       try {
         return Promise.resolve(this.engine.handle(msg));
