@@ -41,7 +41,7 @@ async function withApp(viewport, fn, opts = {}) {
       }, buf);
     }
     await fn(page, f);
-    assert(!errors.length, errors.join('; '));
+    if (!opts.allowErrors) assert(!errors.length, errors.join('; '));
   } finally {
     await browser.close();
   }
@@ -496,6 +496,39 @@ export const tests = [
         assert(r.hidden && r.state === 'open', `after the open: ${JSON.stringify(r)}`);
         assert(r.seen.some((t) => /^Opening .*color\.mp4…$/.test(t)) && r.seen.some((t) => /^Preparing /.test(t)), `the indicator showed: ${JSON.stringify(r.seen)}`);
       }, { noFile: true, setFile: true });
+    },
+  },
+  {
+    name: 'iOS picker: multiple (an Add button), the wait for the video shows from the picker on (touch), Cancel; a GPU reset stops playback with a message; the iPad budget',
+    timeout: 120000,
+    async fn() {
+      await withApp(PHONE, async (page, f) => {
+        assert(await page.evaluate(() => document.getElementById('fileInput').multiple && document.getElementById('maskFileInput').multiple), 'multiple');
+        // An iPad: Safari gives a Mac user agent, with touch points.
+        await page.evaluate(() => {
+          Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 5 });
+          Object.defineProperty(Navigator.prototype, 'userAgent', { get: () => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' });
+        });
+        // Open, then Cancel on the indicator.
+        let [fc] = await Promise.all([page.waitForEvent('filechooser'), page.click('#dropArea')]);
+        assert(await page.isVisible('#loading') && /Waiting for the video/.test(await page.textContent('#loadingText')) && await page.isVisible('#loadingCancel'), 'the wait shows with Cancel');
+        await page.click('#loadingCancel');
+        assert(!(await page.isVisible('#loading')), 'Cancel hides it');
+        // Open, then a file: the indicator goes on to the open, then away.
+        [fc] = await Promise.all([page.waitForEvent('filechooser'), page.click('#dropArea')]);
+        assert(await page.isVisible('#loading'), 'the wait shows');
+        await fc.setFiles(f['color.mp4']);
+        await page.waitForFunction(() => document.body.dataset.state === 'open' && document.getElementById('loading').hidden && window.neofx.player.info, null, { timeout: 30000 });
+        // The iPad (a Mac user agent with touch): the iOS budget.
+        const b = await page.evaluate(() => window.neofx.store.usedBudget);
+        assert(b <= 256 * 1048576, `budget ${b}`);
+        // A GPU reset during a loop: the playback stops and a message stays.
+        await page.click('[data-act=loop]');
+        await page.click('[data-act=play]');
+        const r = await page.evaluate(() => window.neofx.gpu.call({ cmd: 'loseContext' }));
+        assert(r.ok, 'WEBGL_lose_context');
+        await page.waitForFunction(() => !window.neofx.player.playing && /The GPU stopped/.test(document.getElementById('message').textContent), null, { timeout: 10000 });
+      }, { noFile: true, allowErrors: true });
     },
   },
   {

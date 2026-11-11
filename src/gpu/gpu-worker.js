@@ -11,6 +11,7 @@ self.onmessage = (e) => {
     let reply;
     if (msg.cmd === 'init') {
       engine = new Engine(msg.canvas);
+      engine.onLost = () => self.postMessage({ event: 'lost' });
       reply = { cmd: 'caps', ...engine.caps };
     } else reply = engine.handle(msg);
     if (engine && engine.lost) self.postMessage({ id, error: 'The GPU context was lost.' });

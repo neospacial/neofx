@@ -75,7 +75,9 @@ export class Engine {
     this.settings = null;
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
-    this.src = gl.createTexture();
+    this.src = null; // the frames of the store (immutable storage, made for each frame size)
+    this.srcKey = '';
+    this.src2 = gl.createTexture(); // other pictures (clean plate, mask and map videos): any size
     this.fb = gl.createFramebuffer();
     this.storeY = this.storeC = null;
     this.n = 0;
@@ -85,6 +87,7 @@ export class Engine {
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
+      if (this.onLost) this.onLost();
     });
   }
 
@@ -147,6 +150,12 @@ export class Engine {
       return { cmd: 'exporting', on: this.exporting };
     }
     if (m.cmd === 'readMask') return this.readMask(m.index);
+    if (m.cmd === 'loseContext') {
+      // Tests: a GPU reset.
+      const ext = this.gl.getExtension('WEBGL_lose_context');
+      if (ext) ext.loseContext();
+      return { cmd: 'lost', ok: !!ext };
+    }
     if (m.cmd === 'mapImage') {
       const b = m.bitmap;
       const s = Math.min(1, 2048 / Math.max(b.width, b.height));
@@ -264,13 +273,24 @@ export class Engine {
     const gl = this.gl;
     try {
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.src);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, frame);
       // A large source: mipmaps, so the scale down does not alias.
       const turned = this.rot % 180 !== 0;
-      const sw = turned ? frame.displayHeight : frame.displayWidth;
+      const fw = frame.displayWidth, fh = frame.displayHeight;
+      const sw = turned ? fh : fw;
       const mip = sw > 2 * this.w;
+      // The source texture is made once for each frame size (immutable storage), then each frame
+      // goes into it: no new texture memory for each frame (WebKit keeps the old memory for a while,
+      // and a long playback ran out of memory on iPad).
+      const key = `${fw}x${fh}x${mip ? 1 : 0}`;
+      if (this.srcKey !== key) {
+        if (this.src) gl.deleteTexture(this.src);
+        this.src = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, this.src);
+        gl.texStorage2D(gl.TEXTURE_2D, mip ? Math.floor(Math.log2(Math.max(fw, fh))) + 1 : 1, gl.RGBA8, fw, fh);
+        this.srcKey = key;
+      } else gl.bindTexture(gl.TEXTURE_2D, this.src);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, fw, fh, gl.RGBA, gl.UNSIGNED_BYTE, frame);
       if (mip) gl.generateMipmap(gl.TEXTURE_2D);
       texParams(gl, gl.TEXTURE_2D, gl.LINEAR, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
     } finally {
@@ -336,7 +356,7 @@ export class Engine {
   lumaInto(tex, i, w, h, source, rotation) {
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.src);
+    gl.bindTexture(gl.TEXTURE_2D, this.src2);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.generateMipmap(gl.TEXTURE_2D);

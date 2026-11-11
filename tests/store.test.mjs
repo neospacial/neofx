@@ -6,7 +6,7 @@ import { assert, hasFfmpeg, ffmpeg, run } from './lib/util.mjs';
 import { makeFixtures } from '../tools/make-fixtures.mjs';
 import { FIX_DIR, groundTruth } from './fixtures.test.mjs';
 import { launch, open } from './playback.test.mjs';
-import { layerCount, frameBytes, defaultBudget, bufferText, workingSize, BUDGET_ANDROID, BUDGET_DESKTOP } from '../src/gpu/store.js';
+import { layerCount, frameBytes, defaultBudget, bufferText, workingSize, BUDGET_ANDROID, BUDGET_IOS, BUDGET_DESKTOP } from '../src/gpu/store.js';
 
 let chromium = null;
 try {
@@ -143,6 +143,9 @@ export const tests = [
       assert(layerCount(BUDGET_DESKTOP, 256, 320, 240) === 256, 'MAX_ARRAY_TEXTURE_LAYERS');
       assert(layerCount(10, 2048, 1920, 1080) === 1, 'at least 1');
       assert(defaultBudget('Mozilla/5.0 (Linux; Android 14; Pixel 8)') === BUDGET_ANDROID && defaultBudget('Mozilla/5.0 (Windows NT 10.0)') === BUDGET_DESKTOP, 'budgets');
+      // iPadOS: a Mac user agent with touch points; a real Mac has none.
+      const mac = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15';
+      assert(defaultBudget(mac, 5) === BUDGET_IOS && defaultBudget(mac, 0) === BUDGET_DESKTOP && defaultBudget('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', 5) === BUDGET_IOS, 'the iOS budget');
       assert(bufferText(240, 960, 540) === 'Buffer: 240 frames at 540p (≈ 178 MB)', bufferText(240, 960, 540));
       const a = workingSize(1920, 1080, 540), b = workingSize(320, 240, 540), c = workingSize(1080, 1920, 0), d = workingSize(1000, 563, 360);
       assert(a.width === 960 && a.height === 540 && b.width === 320 && c.height === 1920 && d.height % 2 === 0 && d.width % 2 === 0, 'working sizes');

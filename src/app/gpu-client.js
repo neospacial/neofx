@@ -8,11 +8,14 @@ import { makeWorker } from './player.js';
 export class GpuClient {
   constructor(canvas, workerSrc, useWorker) {
     this.mode = useWorker ? 'worker' : 'main';
+    this.lost = false;
+    this.onLost = null; // the GPU context was lost (the browser reset the GPU, often: out of memory)
     this.next = 1;
     this.waiting = new Map();
     if (useWorker) {
       this.wk = makeWorker(workerSrc);
       this.wk.onmessage = (e) => {
+        if (e.data.event === 'lost') return this.lostNow();
         const { id, reply, error } = e.data;
         const w = this.waiting.get(id);
         this.waiting.delete(id);
@@ -24,8 +27,15 @@ export class GpuClient {
       this.ready = this.call({ cmd: 'init', canvas: off }, [off]);
     } else {
       this.engine = new Engine(canvas);
+      this.engine.onLost = () => this.lostNow();
       this.ready = Promise.resolve({ cmd: 'caps', ...this.engine.caps });
     }
+  }
+
+  lostNow() {
+    if (this.lost) return;
+    this.lost = true;
+    if (this.onLost) this.onLost();
   }
 
   call(msg, transfer = []) {
