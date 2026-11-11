@@ -170,6 +170,8 @@ export class Inspector {
         this.app.change('timemap.steps', f);
       } }));
       add(time, toggle({ key: 'timemap.blend', label: 'Frame blend', value: T.blend, onChange: on('timemap.blend') }));
+      add(time, toggle({ key: 'timemap.perfectLoop', label: 'Perfect loop', value: !!T.perfectLoop, onChange: on('timemap.perfectLoop') }));
+      time.append(el('p', 'note', 'Perfect loop: the delayed pixels at the start take their frames from the end of the video, so the result loops without a cut (no black start). The Max delay is at most the loop length − 1.'));
     } else {
       // Mode 2, Slit Scan (§8.5).
       const SL = S.slitscan;

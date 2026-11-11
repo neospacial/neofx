@@ -30,8 +30,6 @@ export class Timeline {
       P.loop = !P.loop;
       this.update();
     });
-    on('[data-act=in]', () => this.setIn());
-    on('[data-act=out]', () => this.setOut());
     // Scrub: pointer down and move on the strip.
     let drag = false;
     const scrub = (e) => {
@@ -85,8 +83,6 @@ export class Timeline {
     }
     play.setAttribute('aria-label', P.playing ? 'Pause' : 'Play');
     this.$('[data-act=loop]').classList.toggle('on', P.loop);
-    this.$('[data-act=in]').classList.toggle('on', P.inPoint !== null);
-    this.$('[data-act=out]').classList.toggle('on', P.outPoint !== null);
     this.$('.time').textContent = info ? `${formatTime(info.times[t])} / ${formatTime(info.durationUs)}` : '00:00.00 / 00:00.00';
     this.$('.frame').textContent = info ? `f ${t}` : 'f –';
     this.draw();

@@ -218,13 +218,13 @@ export const tests = [
         }
         // The timeline thumbnails (one for each 2 %) came from the second decode worker.
         await page.waitForFunction(() => window.__tl().filter(Boolean).length >= 50, null, { timeout: 10000 });
-        // In / Out and Loop: play 30..40 in a loop for a while.
+        // In / Out (the I and O keys) and Loop: play 30..40 in a loop for a while.
         const r = await page.evaluate(async () => {
           const P = window.neofx.player;
           await P.seek(30);
-          document.querySelector('[data-act=in]').click();
+          window.neofx.timeline.setIn();
           await P.seek(40);
-          document.querySelector('[data-act=out]').click();
+          window.neofx.timeline.setOut();
           document.querySelector('[data-act=loop]').click();
           await P.seek(30);
           P.play();

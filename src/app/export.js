@@ -101,7 +101,12 @@ export class Exporter {
     await A.gpu.call({ cmd: 'exporting', on: true });
     try {
       const conf = await A.configure(width, height);
-      const depth = A.depth();
+      // Perfect loop (Time Map): the history of the first frames is the end of the range. Store
+      // indices: the end frames of the range (the pass before) at their frame index, the range at
+      // frame index + L. The delay is at most L − 1.
+      const wrapL = A.wrap && A.wrap() ? total : 0;
+      const depth = wrapL ? Math.min(A.depth(), wrapL - 1) : A.depth();
+      await A.gpu.call({ cmd: 'wrap', cap: wrapL ? wrapL - 1 : null, forget: true });
       if (depth > conf.n - 1) throw new Error(`The Max delay (${depth} frames) is more than the buffer at ${Math.min(width, height)}p (${conf.n} frames). Choose a lower resolution.`);
       if (A.settings.mode === 'slitscan') {
         onProgress({ done: 0, total, fps: 0, eta: 0, phase: 'analysis' });
@@ -148,7 +153,9 @@ export class Exporter {
       // 4. Decode from the warm-up start (the history of frame a), render, encode.
       const dec = makeWorker(A.decodeSrc);
       this.workers.push(dec);
-      const from = Math.max(0, a - depth);
+      const from = wrapL ? a : Math.max(0, a - depth);
+      // Decode jobs: 1 = the end of the range (perfect loop history), 2 = from .. b.
+      const firstJob = wrapL && depth > 0 ? 1 : 2;
       let done = 0, lastKey = -Infinity;
       const t0 = performance.now();
       await new Promise((resolve, reject) => {
@@ -161,19 +168,25 @@ export class Exporter {
         };
         const handle = async (m) => {
           try {
-            if (m.cmd === 'info') dec.postMessage({ cmd: 'play', job: 1, from, to: b });
-            else if (m.cmd === 'error') fail(new Error(m.message));
-            else if (m.cmd === 'done') resolve();
-            else if (m.cmd === 'frame') {
+            if (m.cmd === 'info') {
+              if (firstJob === 1) dec.postMessage({ cmd: 'play', job: 1, from: b - depth + 1, to: b });
+              else dec.postMessage({ cmd: 'play', job: 2, from, to: b });
+            } else if (m.cmd === 'error') fail(new Error(m.message));
+            else if (m.cmd === 'done') {
+              if (m.job === 1) dec.postMessage({ cmd: 'play', job: 2, from, to: b });
+              else resolve();
+            } else if (m.cmd === 'frame') {
               const t = m.index;
               if (this.cancelled) {
                 m.frame.close();
                 return;
               }
-              const show = t >= a;
+              const history = m.job === 1;
+              const show = !history && t >= a;
+              const index = history ? t : t + wrapL;
               const us = Math.round(((pts(t) - pts(a)) * 1e6) / ts);
               const durUs = Math.round(((t + 1 < info.times.length ? pts(t + 1) - pts(t) : d.samples[frameSample[t]].duration) * 1e6) / ts);
-              const r = await A.gpu.call({ cmd: 'upload', index: t, frame: m.frame, show, grab: show ? { timestamp: us, duration: durUs } : undefined }, [m.frame]);
+              const r = await A.gpu.call({ cmd: 'upload', index, frame: m.frame, show, grab: show ? { timestamp: us, duration: durUs } : undefined }, [m.frame]);
               if (show) {
                 frames.add(us, t);
                 const key = us - lastKey >= opts.keyint * 1e6;
@@ -185,7 +198,7 @@ export class Exporter {
                 const sec = (performance.now() - t0) / 1000;
                 const fps = done / Math.max(sec, 1e-3);
                 onProgress({ done, total, fps, eta: (total - done) / Math.max(fps, 1e-3), phase: 'encode' });
-              } else if (t % 4 === 0) onProgress({ done: 0, total, fps: 0, eta: 0, phase: 'warmup', warm: (t - from + 1) / Math.max(1, a - from) });
+              } else if (t % 4 === 0) onProgress({ done: 0, total, fps: 0, eta: 0, phase: 'warmup', warm: history ? (t - (b - depth)) / Math.max(1, depth) : (t - from + 1) / Math.max(1, a - from) });
               dec.postMessage({ cmd: 'ack' });
             }
           } catch (err) {

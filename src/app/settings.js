@@ -10,6 +10,7 @@ export const DEFAULTS = {
     maxDelay: 30, // frames (white); the store limits it to N - 1
     steps: 0, // 0 = smooth, else 2..64
     blend: true, // frame blend
+    perfectLoop: false, // the frames before the loop start come from its end (a seamless loop)
   },
   map: {
     source: 'builtin', // 'builtin' | 'image' | 'video'
