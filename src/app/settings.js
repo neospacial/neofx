@@ -20,7 +20,7 @@ export const DEFAULTS = {
     anim: { phaseSpeed: 0, rotSpeed: 0, pulseAmount: 0, pulsePeriod: 60, seedEvery: 0 },
   },
   slitscan: {
-    source: 'line', // 'line' | 'edge' (phase 9)
+    source: 'line', // 'line' | 'edge' (the subject edge; needs Cutout, plan §8.4)
     x: 0.5, // a point on the line (0..1 of the frame)
     y: 0.5,
     angle: 90, // the direction of the line: 90° = vertical, the scan goes to the right
@@ -33,9 +33,12 @@ export const DEFAULTS = {
     curve: 'easeIn', // the rate curve (rateType 'curve')
     maxAge: 600, // frames
     sampling: 'sharp', // 'sharp' (nearest frame) | 'blend' (mix 2 frames)
+    edgeAngle: 0, // the scan direction of the Subject edge source (0° = to the right)
+    joinLimit: 8, // px: join the trail of an emitter to the one of the frame before when nearer
+    maxAgeEdge: 120, // frames (Subject edge source)
   },
   cutout: {
-    mode: 'off', // 'off' | 'overlay' | 'scan' (Mode 2, phase 9) (plan §9.4)
+    mode: 'off', // 'off' | 'overlay' | 'scan' (Scan object: Mode 2 only, the subject edge) (plan §9.4)
     bgdiff: { on: true, lightTol: 0.5, threshold: 0.12, softness: 0.06, shadow: 0 },
     chroma: { on: false, key: '#00ff00', tolerance: 0.08, softness: 0.05, spill: 0.5 },
     luma: { on: false, low: 0.7, high: 1, softness: 0.05, invert: false },

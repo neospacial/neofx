@@ -46,19 +46,19 @@ export function slider(opts) {
   return row;
 }
 
-// opts: { label, options: [[value, text, disabled?]], value, onChange(v), key }
+// opts: { label, options: [[value, text, disabled?, why?]], value, onChange(v), key }
 export function segmented(opts) {
   const row = el('div', 'setting seg');
   row.dataset.key = opts.key || '';
   if (opts.label) row.append(el('label', null, opts.label));
   const box = el('div', 'segs');
   box.setAttribute('role', 'radiogroup');
-  const buttons = opts.options.map(([v, text, disabled]) => {
+  const buttons = opts.options.map(([v, text, disabled, why]) => {
     const b = el('button', null, text);
     b.type = 'button';
     b.dataset.value = v;
     b.disabled = !!disabled;
-    if (disabled) b.title = 'Coming in a later version';
+    if (disabled) b.title = why || 'Not available here';
     b.addEventListener('click', () => {
       row.setValue(v);
       opts.onChange(v);

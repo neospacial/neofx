@@ -137,9 +137,14 @@ export class Slit {
 
   // A frame of the analysis pass: into the staging layer, then its history row (not the store).
   analysisFrame(index, frame) {
-    this.update();
     const e = this.e;
     e.putYuv(frame, this.stY, this.stC, 0);
+    if (e.edgeActive()) {
+      e.edge.update();
+      e.edge.addFrame(index, { Y: this.stY, C: this.stC, layer: 0 });
+      return;
+    }
+    this.update();
     if (this.active()) this.writeRow(index, this.stY, this.stC, 0);
   }
 
@@ -155,7 +160,13 @@ export class Slit {
     const e = this.e;
     const s = e.settings;
     const sl = s.slitscan;
+    const edge = e.edgeActive();
     this.update();
+    if (edge) {
+      e.edge.update();
+      e.edge.drawTrail(index);
+      gl.viewport(0, 0, e.w, e.h);
+    }
     const g = this.geo;
     const p = this.scan;
     gl.useProgram(p.prog);
@@ -181,12 +192,22 @@ export class Slit {
     gl.uniform1f(p.u.u_c, g.c);
     gl.uniform1f(p.u.u_len, this.len);
     gl.uniform1i(p.u.u_H, this.H);
-    gl.uniform1i(p.u.u_M, this.M);
+    gl.uniform1i(p.u.u_M, edge ? e.edge.M : this.M);
+    gl.uniform1i(p.u.u_edge, edge ? 1 : 0);
+    if (edge) e.edge.uniforms(p);
+    else {
+      // The edge samplers on their own units also when not used: two samplers of different types
+      // (isampler2D, sampler2D) on one unit make the draw fail.
+      gl.uniform1i(p.u.u_trail, 10);
+      gl.uniform1i(p.u.u_epos, 11);
+      gl.uniform1i(p.u.u_ecol, 12);
+      gl.uniform1i(p.u.u_eframes, 13);
+    }
     gl.uniform1i(p.u.u_timeOn, sl.time ? 1 : 0);
     gl.uniform1i(p.u.u_sharp, sl.sampling === 'blend' ? 0 : 1);
     gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);
-    e.compositeUniforms(p, s, this.M);
-    e.mask.subjectUniforms(p, s.cutout.mode === 'overlay');
+    e.compositeUniforms(p, s, edge ? e.edge.M : this.M);
+    e.mask.subjectUniforms(p, s.cutout.mode === 'overlay' || s.cutout.mode === 'scan');
     drawQuad(gl);
   }
 }

@@ -7,7 +7,7 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **phase 8 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, the **compositor**, **Mode 2 — Slit Scan** with the line source, and the **cutout** (subject mask without a machine-learning model, Overlay). The subject-edge source, Scan object, and the export come in the next phases.
+> Status: v0.1.0, **phase 9 of 12** (see `neofx-plan-v0.1.0.md` §14). Done: the build, the MP4/MOV reader and muxer (video + audio pass-through), frame-exact seek and playback, the GPU frame store, **Mode 1 — Time Map** with the full map library, the **compositor**, **Mode 2 — Slit Scan** with the line and the **subject-edge** sources, and the **cutout** (Overlay and **Scan object**). The export comes in the next phase.
 
 ## How to use
 
@@ -49,7 +49,7 @@ Drag the line on the preview: the centre point moves it, the round handle turns 
 
 | Setting | Values | Default |
 |---|---|---|
-| Source | Line (Subject edge: a later version) | Line |
+| Source | Line / Subject edge | Line |
 | Line x, y | 0–1 (a point on the line) | 0.5, 0.5 |
 | Line angle | 0–360° (90° = vertical) | 90° (the scan goes to the right) |
 | Flip direction | On / Off | Off |
@@ -61,11 +61,13 @@ Drag the line on the preview: the centre point moves it, the round handle turns 
 | Max age | 1 … the history length (frames) | 600 |
 | Sampling | Sharp (nearest frame) / Blend (mix 2 frames) | Sharp |
 
+**Subject edge source** (needs the cutout): all the edge pixels of the subject are the source, so the source moves with the subject. Set the **Edge direction** (0° = to the right) with the round handle on the preview. In each row of the direction, the places where the subject ends (up to 4) emit a trail with the colour of the last subject pixel; the trail of one frame joins to the trail of the frame before when their edges are nearer than the **Join limit** (default 8 px). Where trails cross, the youngest pixel wins. Time Off: the edge colour repeats to the end of the row. The Max age of the edge source (default 120 frames, at most 512) is also limited by the GPU time of the trail (target 20 ms at the preview resolution); the inspector shows the limit.
+
 The age at a distance s is A(s), the inverse of S(a) = ∫ rate. When the line changes, an **analysis pass** decodes the full video in the background and fills the slit history (one row for each frame, up to 4096 frames); the status bar shows "Analysis N %". Until it ends, the trail uses the rows that are there (the frames in the frame store at once); the other rows are black. The **Map** view shows the age as heat colours.
 
 ## Cutout
 
-The cutout finds the subject without a machine-learning model. It is made for footage from a tripod. **Overlay** puts the subject (the current frame, not changed by the effect) on top of the effect, in Mode 1 and Mode 2. The **Mask** view (or the M key) shows the mask in white. The Subject mask and Subject distance maps of Mode 1 also use it.
+The cutout finds the subject without a machine-learning model. It is made for footage from a tripod. **Overlay** puts the subject (the current frame, not changed by the effect) on top of the effect, in Mode 1 and Mode 2. **Scan object** (Mode 2 only): the background is the original video, the effect is the trail of the subject edge (always blended on the original), and the subject is on top. The **Mask** view (or the M key) shows the mask in white. The Subject mask and Subject distance maps of Mode 1 also use it.
 
 Mask pipeline, in this order:
 
@@ -111,6 +113,7 @@ Input: MP4 and MOV only (not fragmented). Output: MP4, H.264.
 - Audio pass-through supports AAC (`mp4a`) and Opus.
 - Open-GOP files (keyframes that are not IDR) seek more slowly: Chrome's decoder must start at an IDR frame.
 - The slit history holds at most 4096 frames (and the GPU texture size limit). In a longer video, a seek far back shows black trails until the frames play again.
+- The Subject edge source needs float render targets (EXT_color_buffer_float), which current Chrome has.
 - The cutout is made for a camera that does not move. Temporal smooth and hysteresis use the mask of the previous frame: they apply in playback (and export), not to a single seek.
 - Grow / shrink and the outline use a square kernel: corners grow a little more than round edges.
 - A clean plate from This frame or an Image is not kept when the preview resolution changes (make it again); Auto is made again.
@@ -146,7 +149,7 @@ The last command writes the test videos (plan §13.1) to `samples/`. The tests m
 | Folder | Content |
 |---|---|
 | `src/app/` | the page, styles, platform checks, `settings.js`, `player.js` (seek, playback clock, store mirror), `gpu-client.js`, `analysis.js` (Mode 2 analysis pass), `preview.js`, `ui/` (timeline, inspector, widgets, line handles, eyedropper and matte brush) |
-| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `slit.js` (slit history, analysis rows, Mode 2 render), `mask.js` (cutout mask pipeline, clean plate, matte, subject layer), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
+| `src/gpu/` | `engine.js` (WebGL2: frame store, upload, Time Map render, compositor), `blend.js` (blend modes), `slit.js` (slit history, analysis rows, Mode 2 render), `mask.js` (cutout mask pipeline, clean plate, matte, subject layer), `edge.js` (subject-edge emitters and trail), `mapgen.js` (map: generate, blur, adjust, thumbnails), `gl.js`, `store.js` (sizes, budget), `gpu-worker.js`, `glsl/` |
 | `src/analysis/` | `cleanplate.js` (median), `regions.js` (fill holes, keep largest), `analysis-worker.js` |
 | `src/modes/` | `slit.js` (Mode 2: rate types, S and A, line geometry) |
 | `src/maps/` | `builtin.js` (the map list and parameters), `curve.js` (monotone curves), `mapsource.js` (image and video maps) |

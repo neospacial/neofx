@@ -1,6 +1,7 @@
 // Mask pipeline steps 1–3 (plan §9.1): the methods (background difference, chroma key, luma key;
 // each a soft mask), combined (union or intersect), or an imported mask; then the garbage matte.
 uniform int u_t;
+uniform int u_override; // >= 0: read this layer of the bound arrays (the analysis staging), not frame t
 uniform highp sampler2DArray u_plateY; // the clean plate, YUV as the store (layer 0)
 uniform highp sampler2DArray u_plateC;
 uniform bool u_bgOn;
@@ -28,7 +29,7 @@ void main() {
   if (u_imp) m = texture(u_impTex, vec3(uv, u_impLayer)).r;
   else {
     // Frame t and the plate as the store keeps them (Y, CbCr): the same 4:2:0 path for both.
-    int l = layerOf(u_t);
+    int l = u_override >= 0 ? u_override : layerOf(u_t);
     vec3 c = l < 0 ? vec3(0.0, 0.5, 0.5) : vec3(texture(u_storeY, vec3(uv, float(l))).r, texture(u_storeC, vec3(uv, float(l))).rg);
     float acc = u_union ? 0.0 : 1.0;
     bool any = false;

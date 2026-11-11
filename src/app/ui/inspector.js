@@ -28,7 +28,7 @@ export class Inspector {
     this.thumbCache = {}; // map id -> the last thumbnail (luma), drawn again after a rebuild
   }
 
-  // limits: { maxDelay (the store limit, N - 1), maxAge (the slit history rows) }.
+  // limits: { maxDelay (the store limit, N - 1), maxAge (the slit history rows), maxAgeEdge }.
   build(settings, limits) {
     const S = settings;
     const r = this.root;
@@ -144,13 +144,19 @@ export class Inspector {
       // Mode 2, Slit Scan (§8.5).
       const SL = S.slitscan;
       const src = sec('source', 'Source');
-      add(src, segmented({ key: 'slitscan.source', label: 'Source', options: [['line', 'Line'], ['edge', 'Subject edge', true]], value: SL.source, onChange: on('slitscan.source') }));
-      num(src, 'slitscan.x', 'Line x', 0, 1, 0.001, 0.5);
-      num(src, 'slitscan.y', 'Line y', 0, 1, 0.001, 0.5);
-      num(src, 'slitscan.angle', 'Line angle', 0, 360, 0.1, 90, '°');
+      const edge = SL.source === 'edge' || S.cutout.mode === 'scan';
+      add(src, segmented({ key: 'slitscan.source', label: 'Source', options: [['line', 'Line', S.cutout.mode === 'scan', 'Scan object uses the subject edge'], ['edge', 'Subject edge']], value: edge ? 'edge' : 'line', onChange: on('slitscan.source') }));
+      if (!edge) {
+        num(src, 'slitscan.x', 'Line x', 0, 1, 0.001, 0.5);
+        num(src, 'slitscan.y', 'Line y', 0, 1, 0.001, 0.5);
+        num(src, 'slitscan.angle', 'Line angle', 0, 360, 0.1, 90, '°');
+      } else num(src, 'slitscan.edgeAngle', 'Edge direction', 0, 360, 0.1, 0, '°');
       bool(src, 'slitscan.flip', 'Flip direction');
-      num(src, 'slitscan.width', 'Slit width', 1, 16, 1, 1, 'px');
-      src.append(Object.assign(document.createElement('p'), { className: 'note', textContent: 'Drag the line on the preview. The round handle turns it (Shift: 15° steps). The arrow flips the direction.' }));
+      if (!edge) num(src, 'slitscan.width', 'Slit width', 1, 16, 1, 1, 'px');
+      else num(src, 'slitscan.joinLimit', 'Join limit', 1, 64, 1, 8, 'px');
+      src.append(Object.assign(document.createElement('p'), { className: 'note', textContent: edge
+        ? 'All the edge pixels of the subject (Cutout) are the source. Drag the round handle to set the direction.'
+        : 'Drag the line on the preview. The round handle turns it (Shift: 15° steps). The arrow flips the direction.' }));
       const time = sec('time2', 'Time');
       bool(time, 'slitscan.time', 'Time');
       if (SL.time) {
@@ -158,15 +164,23 @@ export class Inspector {
         num(time, 'slitscan.rate', SL.rateType === 'constant' ? 'Rate' : 'Rate (start)', 0.05, 32, 0.05, 1, 'px/f');
         if (SL.rateType !== 'constant') num(time, 'slitscan.rateEnd', 'Rate at Max age', 0.05, 32, 0.05, 4, 'px/f');
         if (SL.rateType === 'curve') add(time, segmented({ key: 'slitscan.curve', label: 'Curve', options: Object.keys(CURVE_PRESETS).map((k) => [k, { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', sCurve: 'S', step: 'Step' }[k]]), value: SL.curve, onChange: on('slitscan.curve') }));
-        num(time, 'slitscan.maxAge', 'Max age', 1, limits.maxAge, 1, Math.min(600, limits.maxAge), 'f');
-        add(time, segmented({ key: 'slitscan.sampling', label: 'Sampling', options: [['sharp', 'Sharp'], ['blend', 'Blend']], value: SL.sampling, onChange: on('slitscan.sampling') }));
+        if (edge) {
+          num(time, 'slitscan.maxAgeEdge', 'Max age', 1, Math.max(1, limits.maxAgeEdge), 1, Math.min(120, limits.maxAgeEdge), 'f');
+          const st = this.app.edgeStats ? this.app.edgeStats() : null;
+          const note = Object.assign(document.createElement('p'), { className: 'note edgeLimit' });
+          note.textContent = st ? `Limit: ${st.limit} frames (GPU ${st.ms.toFixed(1)} ms for ${st.maxAge} frames; target 20 ms)` : 'Limit: the history length.';
+          time.append(note);
+        } else {
+          num(time, 'slitscan.maxAge', 'Max age', 1, limits.maxAge, 1, Math.min(600, limits.maxAge), 'f');
+          add(time, segmented({ key: 'slitscan.sampling', label: 'Sampling', options: [['sharp', 'Sharp'], ['blend', 'Blend']], value: SL.sampling, onChange: on('slitscan.sampling') }));
+        }
       }
     }
 
     // Cutout (§9): the subject mask, and the subject layer on top (Overlay).
     const Cu = S.cutout;
     const cut = sec('cutout', 'Cutout', false);
-    add(cut, segmented({ key: 'cutout.mode', label: 'Cutout', options: [['off', 'Off'], ['overlay', 'Overlay'], ['scan', 'Scan object', true]], value: Cu.mode, onChange: on('cutout.mode') }));
+    add(cut, segmented({ key: 'cutout.mode', label: 'Cutout', options: [['off', 'Off'], ['overlay', 'Overlay'], ['scan', 'Scan object', S.mode !== 'slitscan', 'Slit Scan only']], value: Cu.mode, onChange: on('cutout.mode') }));
     const sub = (text) => cut.append(Object.assign(document.createElement('div'), { className: 'subhead', textContent: text }));
     const btn = (row, text, act, fn, isOn) => {
       const b = Object.assign(document.createElement('button'), { type: 'button', textContent: text });
@@ -245,7 +259,7 @@ export class Inspector {
     if (Cu.import.name) btn(ir, 'Remove', 'removeMask', () => this.app.removeMask());
     ir.append(Object.assign(document.createElement('span'), { className: 'fileName', textContent: Cu.import.name || 'No mask video' }));
     cut.append(ir);
-    if (Cu.mode === 'overlay') {
+    if (Cu.mode === 'overlay' || Cu.mode === 'scan') {
       const Sb = S.subject;
       const sl = sec('subject', 'Subject layer');
       add(sl, select({ key: 'subject.blend', label: 'Blend mode', options: BLEND_MODES, value: Sb.blend, onChange: on('subject.blend') }));

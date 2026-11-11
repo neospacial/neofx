@@ -302,12 +302,13 @@ export class Mask {
     });
   }
 
-  // The mask of frame t (plan §9.1). Returns false when it is the same as before.
-  update(t) {
+  // The mask of frame t (plan §9.1). Returns false when it is the same as before. src (optional):
+  // { Y, C, layer } arrays to read the frame from (the analysis staging), in place of the store.
+  update(t, src) {
     const s = this.e.settings;
     const C = s.cutout, Sb = s.subject;
     const base = JSON.stringify([C, Sb, this.version, this.e.w, this.e.h]);
-    const key = `${base}@${t}`;
+    const key = `${base}@${t}${src ? 'A' : ''}`;
     if (key === this.key) return false;
     const gl = this.gl;
     const e = this.e;
@@ -317,6 +318,13 @@ export class Mask {
     this.into(T.a, e.w, e.h);
     gl.useProgram(m.prog);
     e.bindStore(m);
+    if (src) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, src.Y);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, src.C);
+    }
+    gl.uniform1i(m.u.u_override, src ? src.layer : -1);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, e.layersTex);
     gl.uniform1i(m.u.u_layers, 4);

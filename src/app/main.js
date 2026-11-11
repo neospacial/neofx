@@ -22,12 +22,13 @@ import { usesMask } from '../maps/builtin.js';
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
 const DECODE_WORKER = "@WORKER:io/demux.js,io/timeline.js,io/decode-worker.js";
-const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/engine.js,gpu/gpu-worker.js";
+const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,gpu/gpu-worker.js";
 const ANALYSIS_WORKER = "@WORKER:analysis/cleanplate.js,analysis/analysis-worker.js";
 
 let player, preview, timeline, gpu, inspector, analysis, handles, tools;
 // The state of the preview tools and the clean plate (not part of the settings).
-const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false };
+const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false, matteVersion: 0 };
+let edgeStats = null; // the Subject edge source: the measured GPU time and the Max age limit
 let currentFile = null;
 const settings = clone(DEFAULTS);
 // The store state: { short (the preview setting), width, height, n, bytes, budget }.
@@ -59,8 +60,10 @@ async function configureStore() {
   const info = player.info;
   const { width, height } = workingSize(info.width, info.height, store.short);
   const r = await gpu.call({ cmd: 'configure', width, height, rotation: info.rotation, budget: store.budget || defaultBudget(navigator.userAgent), failAlloc: store.failAlloc, frames: info.times.length });
-  Object.assign(store, { width, height, n: r.n, bytes: r.bytes, usedBudget: r.budget, rows: r.rows });
+  Object.assign(store, { width, height, n: r.n, bytes: r.bytes, usedBudget: r.budget, rows: r.rows, edgeRows: r.edgeRows });
   if (settings.slitscan.maxAge > r.rows) settings.slitscan.maxAge = r.rows;
+  if (r.edgeRows && settings.slitscan.maxAgeEdge > r.edgeRows) settings.slitscan.maxAgeEdge = r.edgeRows;
+  edgeStats = null;
   if (analysis) analysis.doneKey = ''; // the history is new and empty
   toolState.plateOk = false; // the clean plate and the mask textures are new
   player.setStore(r.n);
@@ -136,6 +139,7 @@ async function makePlate(kind) {
     setProgress(null);
     await gpu.call({ cmd: 'plateYuv', Y: med.Y, C: med.C }, [med.Y.buffer, med.C.buffer]);
     Object.assign(toolState, { plateOk: true, plateText: `Median of ${frames.Y.length} frames` });
+    scheduleAnalysis();
   }
   inspector.build(settings, limits());
 }
@@ -213,18 +217,41 @@ async function pick(u, v) {
   tools.setTool(null);
 }
 
-const limits = () => ({ maxDelay: Math.max(0, store.n - 1), maxAge: Math.max(1, store.rows || 1) });
+const limits = () => ({ maxDelay: Math.max(0, store.n - 1), maxAge: Math.max(1, store.rows || 1), maxAgeEdge: Math.max(1, store.edgeRows || 1) });
+
+// Mode 2 with the Subject edge source (or Scan object).
+const edgeMode = () => settings.mode === 'slitscan' && (settings.slitscan.source === 'edge' || settings.cutout.mode === 'scan');
+
+// The GPU time of the trail and the Max age limit (plan §8.4), shown in the inspector.
+let edgeTimer = 0;
+function refreshEdgeStats() {
+  clearTimeout(edgeTimer);
+  edgeTimer = setTimeout(async () => {
+    if (!edgeMode() || !player.info) return;
+    const r = await gpu.call({ cmd: 'slitStatus' });
+    edgeStats = r.edge;
+    const note = document.querySelector('#inspector .edgeLimit');
+    if (note && edgeStats) note.textContent = `Limit: ${edgeStats.limit} frames (GPU ${edgeStats.ms.toFixed(1)} ms for ${edgeStats.maxAge} frames; target 20 ms)`;
+  }, 200);
+}
 
 // Mode 2: the analysis pass fills the slit history for the line (plan §8.3). It runs again when the
 // line, the slit width, the working size, or the file changes (300 ms after the last change).
 const slitKey = () => {
   const sl = settings.slitscan;
+  if (edgeMode()) {
+    // The emitters need the mask: its settings, the clean plate, the matte, the imported mask.
+    return JSON.stringify(['edge', currentFile && currentFile.name, sl.edgeAngle, sl.flip, settings.cutout, toolState.plateText, toolState.matteVersion, store.width, store.height]);
+  }
   return JSON.stringify([currentFile && currentFile.name, sl.x, sl.y, sl.angle, sl.flip, sl.width, store.width, store.height]);
 };
 let analysisTimer = 0;
 function scheduleAnalysis() {
   clearTimeout(analysisTimer);
   if (settings.mode !== 'slitscan' || !player.info || !currentFile) return;
+  // The edge source with background difference: wait for the clean plate (it schedules again).
+  const C = settings.cutout;
+  if (edgeMode() && C.bgdiff.on && !C.import.on && !toolState.plateOk) return;
   const key = slitKey();
   if (key === analysis.doneKey || key === analysis.key) return;
   analysisTimer = setTimeout(() => {
@@ -299,8 +326,12 @@ async function applySettings() {
 // A setting changed in the UI.
 function change(path, value) {
   setPath(settings, path, value);
+  // The Subject edge source needs the cutout (plan §8.5); Scan object is Mode 2 only.
+  if (path === 'slitscan.source' && value === 'edge' && settings.cutout.mode === 'off') settings.cutout.mode = 'overlay';
+  if (path === 'cutout.mode' && value === 'off' && settings.slitscan.source === 'edge') settings.slitscan.source = 'line';
+  if (path === 'mode' && value === 'timemap' && settings.cutout.mode === 'scan') settings.cutout.mode = 'overlay';
   const rebuild = ['map.source', 'map.type', 'mode', 'composite.mode', 'composite.decay', 'look.tint', 'slitscan.time', 'slitscan.rateType',
-    'cutout.mode', 'cutout.bgdiff.on', 'cutout.chroma.on', 'cutout.luma.on', 'cutout.hysteresis', 'subject.outline'];
+    'cutout.mode', 'cutout.bgdiff.on', 'cutout.chroma.on', 'cutout.luma.on', 'cutout.hysteresis', 'subject.outline', 'slitscan.source'];
   if (rebuild.includes(path) || (path === 'look.offset' && (value > 0) !== !!document.querySelector('[data-key="look.offsetAngle"]'))) {
     inspector.build(settings, limits());
     updateThumbs();
@@ -309,7 +340,8 @@ function change(path, value) {
   else if (path.startsWith('map.adjust.') || path.startsWith('map.anim.')) updateThumbs();
   if (path === 'view') for (const b of document.querySelectorAll('#viewBar button')) b.classList.toggle('on', b.dataset.view === value);
   handles.update();
-  if (path === 'mode' || path.startsWith('slitscan.')) scheduleAnalysis();
+  if (path === 'mode' || path.startsWith('slitscan.') || (edgeMode() && path.startsWith('cutout.'))) scheduleAnalysis();
+  refreshEdgeStats();
   if (path === 'view' || path.startsWith('cutout.') || path.startsWith('map.')) ensurePlate();
   applySettings();
 }
@@ -403,7 +435,7 @@ async function start() {
     onProgress: setProgress,
   });
   timeline = new Timeline($('transport'), player);
-  handles = new LineHandles($('preview'), $('view'), { change, settings, tools: toolState });
+  handles = new LineHandles($('preview'), $('view'), { change, settings, tools: toolState, edgeMode: () => edgeMode() });
   analysis = new Analysis(DECODE_WORKER, gpu, {
     onProgress: (f) => {
       setProgress(f);
@@ -413,11 +445,18 @@ async function start() {
     onRows: () => {
       if (!player.playing && !player.busy && player.current >= 0) gpu.call({ cmd: 'render', index: player.current });
     },
-    onDone: () => status(),
+    onDone: () => {
+      status();
+      refreshEdgeStats();
+    },
   });
   tools = new PreviewTools($('preview'), $('view'), {
     pick,
-    stroke: (points, mode) => gpu.call({ cmd: 'matteStroke', points, size: toolState.brush.size, hardness: toolState.brush.hardness, mode }),
+    stroke: (points, mode) => {
+      toolState.matteVersion++;
+      scheduleAnalysis();
+      return gpu.call({ cmd: 'matteStroke', points, size: toolState.brush.size, hardness: toolState.brush.hardness, mode });
+    },
     brush: toolState.brush,
     onTool: (t) => {
       toolState.tool = t;
@@ -427,12 +466,17 @@ async function start() {
   });
   inspector = new Inspector($('inspector'), {
     change, openMap, info: () => mapInfo, tools: toolState, setTool, plate: makePlate, importMask, removeMask,
-    clearMatte: () => gpu.call({ cmd: 'matteClear' }),
+    clearMatte: () => {
+      toolState.matteVersion++;
+      scheduleAnalysis();
+      return gpu.call({ cmd: 'matteClear' });
+    },
+    edgeStats: () => edgeStats,
   });
   inspector.build(settings, { maxDelay: 999 });
   gpu.call({ cmd: 'settings', settings: clone(settings) });
   for (const b of document.querySelectorAll('#viewBar button')) b.addEventListener('click', () => change('view', b.dataset.view));
-  Object.assign(window.neofx, { player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  Object.assign(window.neofx, { refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));
   $('mapFileInput').addEventListener('change', (e) => loadMapFile(e.target.files[0], e.target.dataset.kind));

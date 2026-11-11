@@ -50,6 +50,15 @@ export class LineHandles {
       if (!drag) return;
       const { x, y, r } = this.toFrame(e.clientX, e.clientY);
       const S = this.app.settings.slitscan;
+      if (this.app.edgeMode && this.app.edgeMode()) {
+        // The Subject edge source: the direction from the frame centre to the pointer.
+        let a = (Math.atan2((y - 0.5) * r.h, (x - 0.5) * r.w) * 180) / Math.PI;
+        if (S.flip) a += 180;
+        a = ((a % 360) + 360) % 360;
+        if (e.shiftKey || this.snap) a = (Math.round(a / 15) * 15) % 360;
+        this.app.change('slitscan.edgeAngle', Math.round(a * 10) / 10);
+        return;
+      }
       if (drag === 'move') {
         this.app.change('slitscan.x', Math.round(Math.min(1, Math.max(0, x)) * 1000) / 1000);
         this.app.change('slitscan.y', Math.round(Math.min(1, Math.max(0, y)) * 1000) / 1000);
@@ -85,11 +94,21 @@ export class LineHandles {
     this.svg.style.top = `${b.top - a.top}px`;
     const ox = 0, oy = 0;
     const sl = S.slitscan;
-    const px = ox + sl.x * b.width, py = oy + sl.y * b.height;
+    const edge = this.app.edgeMode && this.app.edgeMode();
+    // Line: the line through the point. Subject edge: only the direction, from the frame centre.
+    const px = ox + (edge ? 0.5 : sl.x) * b.width, py = oy + (edge ? 0.5 : sl.y) * b.height;
     const t = (sl.angle * Math.PI) / 180;
-    const e = [Math.cos(t), Math.sin(t)];
+    let e = [Math.cos(t), Math.sin(t)];
     let d = [Math.sin(t), -Math.cos(t)];
+    if (edge) {
+      const te = (sl.edgeAngle * Math.PI) / 180;
+      d = [Math.cos(te), Math.sin(te)];
+      e = d; // the round handle is on the direction
+    }
     if (sl.flip) d = [-d[0], -d[1]];
+    this.line.style.display = edge ? 'none' : '';
+    this.center.style.display = edge ? 'none' : '';
+    if (edge) e = d;
     const L = Math.hypot(b.width, b.height);
     this.svg.setAttribute('width', b.width);
     this.svg.setAttribute('height', b.height);

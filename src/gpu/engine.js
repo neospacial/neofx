@@ -32,6 +32,7 @@ import { curveTable, CURVE_PRESETS } from '../maps/curve.js';
 import { BLEND_INDEX, DECAY_INDEX, hexRgb } from './blend.js';
 import { Slit } from './slit.js';
 import { Mask } from './mask.js';
+import { Edge } from './edge.js';
 import { usesMask } from '../maps/builtin.js';
 
 const QUAD_VERT = "@GLSL:gpu/glsl/quad.vert";
@@ -64,6 +65,7 @@ export class Engine {
     this.mapgen = new MapGen(this);
     this.slit = new Slit(this);
     this.mask = new Mask(this);
+    this.edge = new Edge(this);
     this.mapTex = null;
     this.mapKey = '';
     this.layersTex = null;
@@ -105,9 +107,14 @@ export class Engine {
     if (m.cmd === 'compositeTest') return this.compositeTest(m);
     if (m.cmd === 'slitFrame') {
       this.slit.analysisFrame(m.index, m.frame);
-      return { cmd: 'slit', filled: this.slit.filled(), rows: this.slit.H };
+      return this.slitStatus();
     }
-    if (m.cmd === 'slitStatus') return { cmd: 'slit', filled: this.slit.filled(), rows: this.slit.H };
+    if (m.cmd === 'slitStatus') return this.slitStatus();
+    if (m.cmd === 'edgeTest') {
+      this.edge.forceMsPerAge = m.msPerAge || 0; // tests: a slow GPU
+      this.edge.stats = { ms: 0, msPerAge: 0, limit: this.edge.H || 1, renders: 0 };
+      return this.slitStatus();
+    }
     if (m.cmd === 'plateGrab') return this.mask.grabYuv(m.frame);
     if (m.cmd === 'plateYuv') return this.rerender({ cmd: 'plate', ok: this.mask.setPlateYuv(m.Y, m.C) });
     if (m.cmd === 'plateImage') return this.rerender({ cmd: 'plate', ok: this.mask.setPlateImage(m.bitmap) !== false });
@@ -205,10 +212,11 @@ export class Engine {
     this.mapKey = '';
     const slit = this.slit.configure(w, h, m.frames || 1);
     this.mask.configure(w, h);
+    this.edge.configure(w, h, m.frames || 1);
     gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h), rows: slit.rows };
+    return { cmd: 'configured', n: this.n, budget, bytes: this.n * frameBytes(w, h), rows: slit.rows, edgeRows: this.edge.H || 0 };
   }
 
   free() {
@@ -275,10 +283,27 @@ export class Engine {
     if (this.settings && isDynamic(this.settings.map)) this.mapKey = ''; // self / motion read the store
     gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));
-    if (this.slit.active()) {
+    if (this.edgeActive()) {
+      this.edge.update();
+      this.edge.addFrame(index, { Y: this.storeY, C: this.storeC, layer });
+    } else if (this.slit.active()) {
       this.slit.update();
       this.slit.writeRow(index, this.storeY, this.storeC, layer);
     }
+  }
+
+  // Mode 2 with the Subject edge source (or Scan object), when the GPU has float targets.
+  edgeActive() {
+    const s = this.settings;
+    return !!(s && s.mode === 'slitscan' && (s.slitscan.source === 'edge' || s.cutout.mode === 'scan') && this.edge.tex);
+  }
+
+  slitStatus() {
+    const ed = this.edge;
+    return {
+      cmd: 'slit', filled: this.slit.filled(), rows: this.slit.H,
+      edge: ed.tex ? { filled: ed.filled(), rows: ed.H, ms: ed.stats.ms, msPerAge: ed.stats.msPerAge, limit: ed.stats.limit, maxAge: ed.M } : null,
+    };
   }
 
   // The cutout mask is needed: Cutout on, the Mask view, or a map that uses it.
@@ -419,7 +444,7 @@ export class Engine {
     const L = s.look;
     const a = (L.offsetAngle * Math.PI) / 180;
     gl.uniform2f(p.u.u_shift, (L.offset * Math.cos(a)) / this.w, (L.offset * Math.sin(a)) / this.h);
-    this.mask.subjectUniforms(p, s.cutout.mode === 'overlay');
+    this.mask.subjectUniforms(p, s.cutout.mode === 'overlay' || s.cutout.mode === 'scan');
     drawQuad(gl);
   }
 
@@ -427,7 +452,8 @@ export class Engine {
   compositeUniforms(p, s, maxAge) {
     const gl = this.gl;
     const C = s.composite, L = s.look;
-    gl.uniform1i(p.u.u_comp, C.mode === 'blend' ? 1 : 0);
+    // Scan object (plan §9.4, O1): the effect always goes on the original with Blend.
+    gl.uniform1i(p.u.u_comp, C.mode === 'blend' || s.cutout.mode === 'scan' ? 1 : 0);
     gl.uniform1i(p.u.u_blendMode, BLEND_INDEX[C.blend] ?? 0);
     gl.uniform1i(p.u.u_linear, C.linear ? 1 : 0);
     gl.uniform1f(p.u.u_opacity, C.opacity);
