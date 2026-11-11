@@ -14,7 +14,7 @@ self.onmessage = (e) => {
       reply = { cmd: 'caps', ...engine.caps };
     } else reply = engine.handle(msg);
     if (engine && engine.lost) self.postMessage({ id, error: 'The GPU context was lost.' });
-    else self.postMessage({ id, reply }, reply && reply.pixels ? [reply.pixels.buffer] : []);
+    else self.postMessage({ id, reply }, reply && reply.pixels ? [reply.pixels.buffer] : reply && reply.frame ? [reply.frame] : []);
   } catch (err) {
     if (msg.frame) try { msg.frame.close(); } catch { /* closed */ }
     self.postMessage({ id, error: String(err && err.message ? err.message : err) });
