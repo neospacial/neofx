@@ -20,6 +20,12 @@ export function merge(base, over) {
 // (more is merged deeply: { map: { anim } } keeps the map type.)
 const m1 = (type, params = {}, time = {}, more = {}) => merge({ mode: 'timemap', map: { source: 'builtin', type, params: { [type]: params } }, timemap: { blend: true, ...time } }, more);
 const m2 = (slit = {}, more = {}) => merge({ mode: 'slitscan', slitscan: slit }, more);
+// Datamosh: the encoder look (the session size and frame rate stay those of the user).
+const m3 = (look = {}, more = {}) => merge({ mode: 'datamosh', mosh: look }, more);
+const tint = (colors, amount = 1) => ({ look: { tint: true, tintColors: colors, tintAmount: amount } });
+
+// The groups of the gallery (the mode of each preset).
+export const PRESET_GROUPS = [['timemap', 'Time Map'], ['slitscan', 'Slit Scan'], ['datamosh', 'Datamosh']];
 
 export const PRESETS = [
   { id: 'wave', name: 'Time wave', s: m1('linear', { angle: 90 }, { maxDelay: 30 }) },
@@ -50,6 +56,39 @@ export const PRESETS = [
   { id: 'finish', name: 'Photo finish', s: m2({ source: 'line', time: true, rate: 2, angle: 90, x: 0.5 }, { look: { tint: true, tintColors: ['#ffffff', '#eee100'], tintAmount: 0.5 } }) },
   { id: 'melt', name: 'Melt', s: m2({ source: 'line', time: true, rateType: 'decelerate', rate: 4, rateEnd: 0.5, angle: 0, y: 0.4 }) },
   { id: 'neon', name: 'Neon trail', s: m2({ source: 'edge', edgeAngle: 270, rate: 3, maxAgeEdge: 120 }, { cutout: { mode: 'scan' }, composite: { mode: 'blend', blend: 'screen', decay: 'exp' }, look: { tint: true, tintColors: ['#eee100', '#ff2d55', '#2b00ff'] } }) },
+  // Time Map: more maps and composites.
+  { id: 'shutter', name: 'Rolling shutter', s: m1('linear', { angle: 90 }, { maxDelay: 8 }) },
+  { id: 'stutter', name: 'Stutter steps', s: m1('linear', { angle: 0 }, { maxDelay: 32, steps: 4, blend: false }) },
+  { id: 'diamond', name: 'Diamond time', s: m1('box', { size: 0.6, roundness: 0 }, { maxDelay: 40, steps: 6, blend: false }) },
+  { id: 'corners', name: 'Corner clock', s: m1('corners', { tl: 0, tr: 0.33, bl: 0.66, br: 1 }, { maxDelay: 45 }) },
+  { id: 'checker', name: 'Checker time', s: m1('checker', { cells: 6 }, { maxDelay: 20, blend: false }) },
+  { id: 'smoke', name: 'Ridged smoke', s: m1('ridged', { scale: 3, octaves: 5 }, { maxDelay: 50 }, { map: { anim: { phaseSpeed: 0.008 } }, ...tint(['#ffffff', '#8a7cff'], 0.5) }) },
+  { id: 'cells', name: 'Cell echo', s: m1('worley', { scale: 5, metric: 1 }, { maxDelay: 36 }, { map: { anim: { seedEvery: 45 } } }) },
+  { id: 'galaxy', name: 'Spiral galaxy', s: m1('spiral', { arms: 5, tightness: 12 }, { maxDelay: 50 }, { map: { anim: { rotSpeed: 1 } }, ...tint(['#ffffff', '#ff7a00', '#5b2bff'], 0.7) }) },
+  { id: 'heartbeat', name: 'Heartbeat', s: m1('radial', { radius: 0.8 }, { maxDelay: 30 }, { map: { anim: { pulseAmount: 0.35, pulsePeriod: 30 } } }) },
+  { id: 'difference', name: 'Time difference', s: m1('linear', { angle: 0, width: 4 }, { maxDelay: 6 }, { composite: { mode: 'blend', blend: 'difference' } }) },
+  { id: 'prism', name: 'Prism', s: m1('radial', { radius: 1 }, { maxDelay: 12 }, { look: { offset: 14, offsetAngle: 0, tint: true, tintColors: ['#ffffff', '#00e5ff', '#ff2bd6'], tintAmount: 0.8 } }) },
+  { id: 'exposure', name: 'Long exposure', s: m1('motion', { gain: 10, frames: 4 }, { maxDelay: 40 }, { composite: { mode: 'blend', blend: 'lighten', decay: 'exp' } }) },
+  { id: 'halo', name: 'Subject halo', s: m1('subjectdist', { falloff: 140 }, { maxDelay: 40 }, { cutout: { mode: 'overlay' }, ...tint(['#ffffff', '#eee100', '#ff3d7f'], 0.6) }) },
+  // Slit Scan: rates and trail shapes.
+  { id: 'stretch', name: 'Time stretch', s: m2({ source: 'line', time: true, rate: 0.25, angle: 90, x: 0.5, sampling: 'blend' }) },
+  { id: 'warpspeed', name: 'Warp speed', s: m2({ source: 'line', time: true, rateType: 'exponential', rate: 0.5, rateEnd: 16, angle: 90, x: 0.5, warp: { spread: 2 } }, tint(['#ffffff', '#3d7bff'], 0.6)) },
+  { id: 'spiralscan', name: 'Spiral scan', s: m2({ source: 'line', time: true, rate: 1, angle: 90, x: 0.5, y: 0.5, warp: { twist: 540 } }) },
+  { id: 'sidewinder', name: 'Sidewinder', s: m2({ source: 'line', time: true, rate: 1.5, angle: 0, y: 0.35, warp: { drift: 0.6, wave: 20, waveLength: 160, waveSpeed: 2 } }) },
+  { id: 'horizon', name: 'Horizon melt', s: m2({ source: 'line', time: true, rate: 1, angle: 0, y: 0.5, sampling: 'blend' }, { composite: { mode: 'blend', blend: 'normal', decay: 'linear' } }) },
+  { id: 'diagonal', name: 'Diagonal scan', s: m2({ source: 'line', time: true, rate: 2, angle: 45, x: 0.3, y: 0.3 }, tint(['#ffffff', '#ff7a00'], 0.5)) },
+  { id: 'frozen', name: 'Frozen wave', s: m2({ source: 'line', time: false, angle: 90, x: 0.6, warp: { wave: 24, waveLength: 90, waveSpeed: 4 } }) },
+  { id: 'smoketrail', name: 'Smoke trail', s: m2({ source: 'edge', edgeAngle: 270, rate: 2, maxAgeEdge: 90, warp: { spread: 1, wave: 18, waveLength: 140, waveSpeed: 2 } }, { cutout: { mode: 'scan' }, composite: { mode: 'blend', blend: 'screen', decay: 'exp' } }) },
+  { id: 'comet', name: 'Comet', s: m2({ source: 'edge', edgeAngle: 180, rate: 4, maxAgeEdge: 60 }, { cutout: { mode: 'overlay' }, composite: { decay: 'linear' }, ...tint(['#ffffff', '#2b6bff']) }) },
+  // Datamosh: encoder looks (neomosh settings) for the next clip.
+  { id: 'moshclassic', name: 'Classic mosh', s: m3({ qp: 30, searchRange: 32, precision: 'quarter', skipBias: 50, heal: 'low', denoise: 'low' }) },
+  { id: 'moshmelt', name: 'Pixel melt', s: m3({ qp: 32, searchRange: 64, precision: 'quarter', skipBias: 85, heal: 'off', denoise: 'high' }) },
+  { id: 'moshsmear', name: 'Long smear', s: m3({ qp: 30, searchRange: 64, precision: 'half', skipBias: 100, heal: 'off', denoise: 'low' }) },
+  { id: 'moshblocks', name: 'Block storm', s: m3({ qp: 40, searchRange: 16, precision: 'full', skipBias: 30, heal: 'off', denoise: 'off' }) },
+  { id: 'moshcrunch', name: 'Crunch', s: m3({ qp: 44, searchRange: 8, precision: 'full', skipBias: 60, heal: 'off', denoise: 'off' }) },
+  { id: 'moshvhs', name: 'Lo-fi tape', s: m3({ qp: 38, searchRange: 32, precision: 'half', skipBias: 50, heal: 'low', denoise: 'off' }) },
+  { id: 'moshdrift', name: 'Clean drift', s: m3({ qp: 22, searchRange: 32, precision: 'quarter', skipBias: 50, heal: 'high', denoise: 'low' }) },
+  { id: 'moshbleed', name: 'Soft bleed', s: m3({ qp: 26, searchRange: 64, precision: 'quarter', skipBias: 0, heal: 'high', denoise: 'high' }) },
 ];
 
 // The settings of a preset: on the defaults, keeping the cutout method settings, the custom maps,
@@ -63,6 +102,11 @@ export function applyPreset(current, preset) {
   if (s.cutout.mode === 'scan' && s.mode !== 'slitscan') s.cutout.mode = 'overlay';
   s.map.image = clone(current.map.image);
   s.map.video = clone(current.map.video);
+  // Datamosh: a Datamosh preset sets the encoder look; the session size, frame rate, Guide and Mosh
+  // preview stay (the setup of the user). The other presets keep the Datamosh settings as they are.
+  const cm = current.mosh || DEFAULTS.mosh;
+  if (s.mode === 'datamosh') Object.assign(s.mosh, { size: cm.size, fps: cm.fps, guide: cm.guide, preview: cm.preview });
+  else s.mosh = clone(cm);
   return s;
 }
 

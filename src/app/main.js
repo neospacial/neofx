@@ -23,7 +23,7 @@ import { ExportDialog } from './ui/exportdialog.js';
 import { layerCount } from '../gpu/store.js';
 import { History } from './history.js';
 import { rng, randomizeSection } from './random.js';
-import { PRESETS, applyPreset, presetFile, parsePresetFile, dataUrlBlob, merge } from './presets.js';
+import { PRESETS, PRESET_GROUPS, applyPreset, presetFile, parsePresetFile, dataUrlBlob, merge } from './presets.js';
 import { initLayout } from './ui/layout.js';
 import { startDemos } from './ui/startscreen.js';
 import { runBench } from './bench.js';
@@ -970,10 +970,22 @@ function presetPanel(sec) {
   reset.id = 'resetBtn';
   const seed = Object.assign(document.createElement('span'), { className: 'seed', textContent: lastSeed ? `Look #${lastSeed}` : '' });
   acts.append(rand, reset, seed);
-  const grid = document.createElement('div');
-  grid.className = 'presetGrid';
   presetCanvases.clear();
-  for (const p of PRESETS) {
+  // One group for each mode, the group of the mode in use first.
+  const groups = [...PRESET_GROUPS].sort((a, b) => (b[0] === settings.mode) - (a[0] === settings.mode));
+  const grids = [];
+  for (const [mode, title] of groups) {
+    const list = PRESETS.filter((p) => p.s.mode === mode);
+    if (!list.length) continue;
+    const head = Object.assign(document.createElement('div'), { className: 'presetGroup', textContent: `${title} · ${list.length}` });
+    head.dataset.group = mode;
+    const grid = document.createElement('div');
+    grid.className = 'presetGrid';
+    grid.dataset.group = mode;
+    for (const p of list) addCard(grid, p);
+    grids.push(head, grid);
+  }
+  function addCard(grid, p) {
     const card = document.createElement('button');
     card.type = 'button';
     card.className = 'presetCard';
@@ -997,8 +1009,11 @@ function presetPanel(sec) {
   });
   load.id = 'presetLoad';
   files.append(save, load);
-  sec.append(acts, grid, files);
-  makePresetThumbs();
+  sec.append(acts, ...grids, files);
+  // The thumbnails are made when the section is open (the GPU work of 57 cards competed with the
+  // playback when it ran at each build of the inspector).
+  if (sec.open) makePresetThumbs();
+  else sec.addEventListener('toggle', () => sec.open && makePresetThumbs());
 }
 
 // The missing thumbnails, one after the other (the GPU makes the map pictures).
@@ -1007,6 +1022,8 @@ function makePresetThumbs() {
   presetQueue = (async () => {
     for (const p of PRESETS) {
       if (presetThumbs.has(p.id)) continue;
+      // Not while the video plays (or a seek or an export runs): the preview comes first.
+      while (player && (player.playing || player.busy || exporter || (mosh && mosh.busy))) await sleep(250);
       const img = await presetThumb(p);
       if (!img) continue;
       presetThumbs.set(p.id, img);
@@ -1049,6 +1066,7 @@ async function presetThumb(p) {
   g.addColorStop(1, '#5c5700');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 160, 90);
+  if (s.mode === 'datamosh') return moshThumb(ctx, s.mosh);
   if (s.mode === 'timemap') {
     for (let i = 5; i >= 0; i--) {
       ctx.fillStyle = `rgba(255,255,255,${1 - i / 6})`;
@@ -1058,19 +1076,130 @@ async function presetThumb(p) {
     }
     return ctx.getImageData(0, 0, 160, 90);
   }
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 2;
-  const sl = s.slitscan;
-  const a = ((sl.source === 'edge' || s.cutout.mode === 'scan' ? sl.edgeAngle : sl.angle - 90) * Math.PI) / 180;
-  ctx.beginPath();
-  ctx.moveTo(80, 45);
-  ctx.lineTo(80 + Math.cos(a) * 50, 45 + Math.sin(a) * 30);
-  ctx.stroke();
-  if (sl.source === 'edge' || s.cutout.mode === 'scan') {
+  return slitThumb(ctx, s);
+}
+
+// A Slit Scan preset: the trail as lines of equal age (new: bright, old: faint, in the tint colours),
+// bent by the rate and the trail shape (twist, drift, spread, wave) as the shader bends it.
+function slitThumb(ctx, s) {
+  const W = 160, H = 90;
+  ctx.fillStyle = '#121316';
+  ctx.fillRect(0, 0, W, H);
+  const sl = s.slitscan, wp = sl.warp || {};
+  const edge = sl.source === 'edge' || s.cutout.mode === 'scan';
+  // The source point and the scan direction d (the line is along e).
+  const L = edge ? [W / 2, H / 2] : [sl.x * W, sl.y * H];
+  const a = ((edge ? sl.edgeAngle : sl.angle - 90) * Math.PI) / 180;
+  let d = [Math.cos(a), Math.sin(a)];
+  if (sl.flip && !edge) d = [-d[0], -d[1]];
+  const e = [-d[1], d[0]];
+  const colors = s.look.tint && s.look.tintColors && s.look.tintColors.length >= 2 ? s.look.tintColors : ['#ffffff', '#eee100'];
+  const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const ramp = (u) => {
+    const k = Math.min(colors.length - 1.001, u * (colors.length - 1));
+    const i = Math.floor(k), f = k - i;
+    const c0 = rgb(colors[i]), c1 = rgb(colors[i + 1]);
+    return c0.map((v, j) => Math.round(v + (c1[j] - v) * f));
+  };
+  const diag = Math.hypot(W, H);
+  // The rate: the distance between the lines of equal age.
+  const S = [0];
+  const M = 24;
+  for (let i = 1; i <= M; i++) {
+    const u = i / M;
+    const r0 = sl.rate, r1 = sl.rateEnd;
+    const r = sl.rateType === 'accelerate' ? r0 + (r1 - r0) * u * u : sl.rateType === 'decelerate' ? r0 + (r1 - r0) * (1 - (1 - u) * (1 - u)) : sl.rateType === 'exponential' ? r0 * (r1 / r0) ** u : sl.rateType === 'curve' ? (r0 + r1) / 2 : r0;
+    S.push(S[i - 1] + Math.max(0.1, r));
+  }
+  const scale = 75 / S[M];
+  const at = (dist, v) => {
+    // The inverse of the shader warp: the place of the sample v (along the line) at distance dist.
+    const sp = Math.max(1 + (wp.spread || 0) * (dist / diag), 0.05);
+    const u = v * sp + (wp.drift || 0) * dist + (wp.wave || 0) * 0.35 * Math.sin((2 * Math.PI * dist) / Math.max(8, (wp.waveLength || 120) * 0.35));
+    let q = [d[0] * dist + e[0] * u, d[1] * dist + e[1] * u];
+    const th = ((wp.twist || 0) * Math.PI / 180) * (Math.hypot(q[0], q[1]) / diag);
+    q = [Math.cos(th) * q[0] - Math.sin(th) * q[1], Math.sin(th) * q[0] + Math.cos(th) * q[1]];
+    return [L[0] + q[0], L[1] + q[1]];
+  };
+  // The lines of equal age (faint), then the path of each source sample along the trail (the
+  // streaks: drift slants them, the wave bends them, twist turns them, spread fans them out).
+  const span = edge ? 14 : 100;
+  const steps = sl.time ? M : 10;
+  const distOf = (i) => (sl.time ? S[i] * scale : i * 7.5);
+  ctx.lineWidth = 1;
+  for (let i = steps; i >= 1; i--) {
+    const c = ramp(sl.time ? i / steps : 0);
+    ctx.strokeStyle = `rgba(${c[0]},${c[1]},${c[2]},0.18)`;
+    ctx.beginPath();
+    for (let v = -span; v <= span; v += 4) {
+      const [x, y] = at(distOf(i), v);
+      if (v === -span) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.lineWidth = 1.5;
+  for (let v = -span; v <= span; v += edge ? 5 : 9) {
+    for (let i = 0; i < steps * 2; i++) {
+      const u0 = i / (steps * 2), u1 = (i + 1) / (steps * 2);
+      const d0 = sl.time ? distOf(Math.floor(u0 * steps)) + (distOf(Math.min(steps, Math.floor(u0 * steps) + 1)) - distOf(Math.floor(u0 * steps))) * ((u0 * steps) % 1) : u0 * 75;
+      const d1 = sl.time ? distOf(Math.floor(u1 * steps)) + (distOf(Math.min(steps, Math.floor(u1 * steps) + 1)) - distOf(Math.floor(u1 * steps))) * ((u1 * steps) % 1) : u1 * 75;
+      const c = ramp(sl.time ? u0 : 0);
+      ctx.strokeStyle = `rgba(${c[0]},${c[1]},${c[2]},${sl.time ? 1 - 0.8 * u0 : 0.85})`;
+      ctx.beginPath();
+      ctx.moveTo(...at(d0, v));
+      ctx.lineTo(...at(d1, v));
+      ctx.stroke();
+    }
+  }
+  if (edge) {
     ctx.fillStyle = '#fff';
     ctx.beginPath();
-    ctx.arc(80, 45, 12, 0, 2 * Math.PI);
+    ctx.arc(L[0], L[1], 12, 0, 2 * Math.PI);
     ctx.fill();
+  } else {
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(L[0] - e[0] * 120, L[1] - e[1] * 120);
+    ctx.lineTo(L[0] + e[0] * 120, L[1] + e[1] * 120);
+    ctx.stroke();
+  }
+  return ctx.getImageData(0, 0, W, H);
+}
+
+// A Datamosh preset: blocks of an old picture pulled along by the motion. The block size comes from
+// the motion precision, the smear length from the search range and the skip bias, the coarseness
+// from the QP; the same look always gives the same picture.
+function moshThumb(ctx, m) {
+  const block = { full: 16, half: 10, quarter: 6 }[m.precision] || 8;
+  const len = 6 + (m.searchRange / 64) * 40 + (m.skipBias / 100) * 30;
+  const coarse = (m.qp - 16) / 28; // 0 .. 1
+  let seed = (m.qp * 7919 + m.searchRange * 31 + m.skipBias * 17 + block) >>> 0;
+  const r = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const colors = ['#ff2d55', '#eee100', '#00e5ff', '#5b2bff', '#ffffff', '#3dff7a'];
+  // The old picture: bands of colour.
+  for (let x = 0; x < 160; x += 20) {
+    ctx.fillStyle = colors[(x / 20) % colors.length];
+    ctx.globalAlpha = 0.55;
+    ctx.fillRect(x, 0, 20, 90);
+  }
+  ctx.globalAlpha = 1;
+  // The smears: blocks copied along a direction.
+  for (let k = 0; k < 18; k++) {
+    const x = Math.floor(r() * 10) * 16, y = Math.floor(r() * 6) * 16;
+    const dx = (r() - 0.3) * 2, dy = (r() - 0.5) * 0.6;
+    ctx.fillStyle = colors[Math.floor(r() * colors.length)];
+    for (let i = 0; i < len; i += block / 2) {
+      ctx.globalAlpha = 0.25 + 0.5 * coarse;
+      ctx.fillRect(Math.round(x + dx * i), Math.round(y + dy * i), block, block);
+    }
+  }
+  ctx.globalAlpha = 1;
+  if (m.heal !== 'off') {
+    // Heal: some clean blocks.
+    ctx.fillStyle = 'rgba(0,0,0,.35)';
+    for (let k = 0; k < (m.heal === 'high' ? 10 : 5); k++) ctx.fillRect(Math.floor(r() * 10) * 16, Math.floor(r() * 6) * 16, 16, 16);
   }
   return ctx.getImageData(0, 0, 160, 90);
 }

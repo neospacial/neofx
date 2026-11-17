@@ -154,6 +154,7 @@ a.button{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;b
 /* The Presets section: Randomize all, Reset, the looks, Save and Load. */
 .presetActions{display:flex;flex-wrap:wrap;gap:6px;padding:4px 0 8px}
 .presetActions .primary{background:var(--accent);color:#000}
+.presetGroup{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);padding:6px 0 4px}
 .presetGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;padding:0 0 8px}
 .presetFiles{display:flex;gap:6px;padding:0 0 4px}
 .presetCard{display:grid;gap:4px;padding:6px;background:var(--bg);border:1px solid transparent;border-radius:8px;text-align:left;min-height:0}
