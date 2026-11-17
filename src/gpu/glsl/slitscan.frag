@@ -29,6 +29,7 @@ uniform vec2 u_ed, u_ee;
 // The trail shape (plan §8.6). u_warp: twist (radians at the distance of the frame diagonal), drift
 // (px along the line for each px of distance), spread (the trail gets wider with the distance),
 // 1 / diagonal. u_wave: amount (px), 2 pi / length, phase.
+uniform ivec2 u_loop; // Loop pixels: (a, L), L = 0 off: a source frame before a is from the loop end
 uniform vec4 u_warp;
 uniform vec3 u_wave;
 in vec2 v_uv;
@@ -61,8 +62,22 @@ float ageOf(float s) {
   return float(lo) + (s - S(lo)) / (S(lo + 1) - S(lo));
 }
 
+// Loop pixels: a frame before the loop start is the frame of the loop end (k + n L).
+int wrapF(int k) {
+  if (u_loop.y <= 0) return k;
+  if (k >= u_loop.x + u_loop.y) return k - u_loop.y; // (Blend: the frame after the loop end is its start)
+  if (k >= u_loop.x) return k;
+  return u_loop.x + ((k - u_loop.x) % u_loop.y + u_loop.y) % u_loop.y;
+}
+float wrapSrc(float s) {
+  if (u_loop.y <= 0 || s >= float(u_loop.x) - 1e-3) return s;
+  float L = float(u_loop.y);
+  return float(u_loop.x) + mod(s - float(u_loop.x), L);
+}
+
 // The history of frame k at column x (texture units); a = 0 when the row is not there.
 vec4 row(int k, float x) {
+  k = wrapF(k);
   if (k < 0) return vec4(0.0);
   int r = k % u_H;
   if (texelFetch(u_rows, ivec2(r, 0), 0).r != k) return vec4(0.0);
@@ -128,7 +143,7 @@ void main() {
   } else {
     if (s > S(u_M)) { o = vec4(u_view == 2 ? base * 0.3 : subjectOver(base, base, uv), 1.0); return; } // older than Max age
     a = ageOf(s);
-    float src = float(u_t) - a;
+    float src = wrapSrc(float(u_t) - a);
     if (u_view == 2) { o = vec4(src < -1e-3 ? vec3(0.0) : heat(a / float(max(u_M, 1))), 1.0); return; }
     if (src < -1e-3) { o = vec4(subjectOver(u_comp == 0 ? vec3(0.0) : base, base, uv), 1.0); return; } // not online
     src = max(src, 0.0);

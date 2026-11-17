@@ -176,8 +176,8 @@ export class Inspector {
         this.app.change('timemap.steps', f);
       } }));
       add(time, toggle({ key: 'timemap.blend', label: 'Frame blend', value: T.blend, onChange: on('timemap.blend') }));
-      add(time, toggle({ key: 'timemap.perfectLoop', label: 'Perfect loop', value: !!T.perfectLoop, onChange: on('timemap.perfectLoop') }));
-      time.append(el('p', 'note', 'Perfect loop: the delayed pixels at the start take their frames from the end of the video, so the result loops without a cut (no black start). The Max delay is at most the loop length − 1.'));
+      add(time, toggle({ key: 'loopPixels', label: 'Loop pixels', value: !!S.loopPixels, onChange: on('loopPixels') }));
+      time.append(el('p', 'note', 'Loop pixels: the delayed pixels at the start take their frames from the end of the video (or of In – Out), not black, so the result loops without a cut. The Max delay is at most the loop length − 1.'));
     } else {
       // Mode 2, Slit Scan (§8.5).
       const SL = S.slitscan;
@@ -212,6 +212,8 @@ export class Inspector {
           num(time, 'slitscan.maxAge', 'Max age', 1, limits.maxAge, 1, Math.min(600, limits.maxAge), 'f');
           add(time, segmented({ key: 'slitscan.sampling', label: 'Sampling', options: [['sharp', 'Sharp'], ['blend', 'Blend']], value: SL.sampling, onChange: on('slitscan.sampling') }));
         }
+        add(time, toggle({ key: 'loopPixels', label: 'Loop pixels', value: !!S.loopPixels, onChange: on('loopPixels') }));
+        time.append(el('p', 'note', 'Loop pixels: the trail pixels at the start take their frames from the end of the video (or of In – Out), not black, so the result loops without a cut.'));
       }
       // The trail shape: move, distort and twist the trail (render only: no new analysis).
       const wp = sec('warp', 'Trail shape', false);

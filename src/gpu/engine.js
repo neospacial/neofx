@@ -86,7 +86,8 @@ export class Engine {
     this.layerFrame = null; // the frame index in each layer, -1 = empty
     this.last = { index: -1, delay: undefined };
     this.lost = false;
-    this.depthCap = Infinity; // perfect loop: the loop length − 1
+    this.depthCap = Infinity; // Loop pixels (Time Map): the loop length − 1
+    this.loop = null; // Loop pixels (Slit Scan): { a, L }
     this.one = new Int32Array(1); // scratch arrays (no new array for each frame)
     this.tintFlat = new Float32Array(12);
     this.mapJson = { map: null, text: '' };
@@ -165,6 +166,9 @@ export class Engine {
       // Perfect loop on / off (m.cap: the largest delay, the loop length − 1). forget: the store
       // indices change meaning: the store is empty for the shaders.
       this.depthCap = m.cap ?? Infinity;
+      // Slit Scan: the loop [a, a + L − 1] (Loop pixels), or null.
+      this.loop = m.loop && m.loop[1] > 0 ? { a: m.loop[0], L: m.loop[1] } : null;
+      if (this.n && this.last.index >= 0 && !m.forget) this.render(this.last.index, this.last.delay);
       if (m.forget && this.layerFrame) {
         this.layerFrame.fill(-1);
         const gl = this.gl;

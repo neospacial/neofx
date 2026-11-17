@@ -155,7 +155,10 @@ export class Exporter {
       // frame index + L. The delay is at most L − 1.
       const wrapL = A.wrap && A.wrap() ? total : 0;
       const depth = wrapL ? Math.min(A.depth(), wrapL - 1) : A.depth();
-      await A.gpu.call({ cmd: 'wrap', cap: wrapL ? wrapL - 1 : null, forget: true });
+      // Loop pixels, Slit Scan: the source frames of the trail wrap into the range (the analysis pass
+      // fills the history of every frame).
+      const slitLoop = A.slitLoop && A.slitLoop() ? [a, total] : null;
+      await A.gpu.call({ cmd: 'wrap', cap: wrapL ? wrapL - 1 : null, forget: true, loop: slitLoop });
       if (depth > conf.n - 1) throw new Error(`The Max delay (${depth} frames) is more than the buffer at ${Math.min(width, height)}p (${conf.n} frames). Choose a lower resolution.`);
       if (A.settings.mode === 'slitscan') {
         onProgress({ done: 0, total, fps: 0, eta: 0, phase: 'analysis' });

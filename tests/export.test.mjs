@@ -240,7 +240,7 @@ export const tests = [
     timeout: 240000,
     async fn() {
       await withApp('code_aac.mp4', async (page, src) => {
-        await set(page, { 'timemap.maxDelay': 30, 'timemap.blend': false, 'timemap.perfectLoop': true });
+        await set(page, { 'timemap.maxDelay': 30, 'timemap.blend': false, 'loopPixels': true });
         const r = await doExport(page, { width: 320, height: 240, range: [0, 89] }, 'export_loop.mp4');
         assert(!r.error, r.error);
         assert(r.frames === 90, JSON.stringify(r));
@@ -260,6 +260,33 @@ export const tests = [
           return window.neofx.player.vcur;
         });
         assert(rows >= 90, `the preview store index after the export: ${rows}`);
+      });
+    },
+  },
+  {
+    name: 'export, Loop pixels (Slit Scan): the trail of the first frames shows the end of the range, not black',
+    timeout: 240000,
+    async fn() {
+      await withApp('code_aac.mp4', async (page, src) => {
+        await set(page, { mode: 'slitscan', 'slitscan.x': 164.5 / 320, 'slitscan.y': 0.5, 'slitscan.angle': 90, 'slitscan.rate': 1, 'slitscan.maxAge': 90, loopPixels: true });
+        const r = await doExport(page, { width: 320, height: 240, range: [0, 89] }, 'export_slitloop.mp4');
+        assert(!r.error, r.error);
+        const codes = groundTruth(src).codes;
+        const d = decodeGray(r.file);
+        const lum = (k, x, y) => 255 * ((codes[k] >> ((Math.floor(x / 8) + 3 * Math.floor(y / 8)) % 16)) & 1);
+        let bad = 0, n = 0;
+        for (const t of [2, 10, 45]) {
+          const f = d.frame(t);
+          for (let s = 4; s <= 88; s += 4) { // the trail: up to the Max age (90 px)
+            for (let cy = 0; cy < 30; cy++) {
+              const y = cy * 8 + 4;
+              const k = ((t - s) % 90 + 90) % 90;
+              n++;
+              if (Math.abs(f[y * 320 + 164 + s] - lum(k, 164, y)) > 60) bad++;
+            }
+          }
+        }
+        assert(bad <= n * 0.02, `${bad} of ${n} trail samples are wrong`);
       });
     },
   },

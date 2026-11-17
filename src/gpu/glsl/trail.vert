@@ -11,10 +11,15 @@ uniform highp sampler2D u_S;       // the distance table, 1024 wide
 uniform int u_t, u_H, u_K, u_M;
 uniform float u_D;
 uniform float u_join;
+uniform ivec2 u_loop;              // Loop pixels: (a, L), L = 0 off: a frame before a is from the loop end
 flat out vec4 v_col;
 flat out float v_age;
 
 float S(int i) { return texelFetch(u_S, ivec2(i % 1024, i / 1024), 0).r; }
+int wrapF(int f) {
+  if (u_loop.y <= 0 || f >= u_loop.x) return f;
+  return u_loop.x + ((f - u_loop.x) % u_loop.y + u_loop.y) % u_loop.y;
+}
 // The x' of emitter k of frame f in row r, or −1e6.
 float xe(int r, int f, int k) {
   if (f < 0) return -1e6;
@@ -28,14 +33,14 @@ void main() {
   int a = id % u_M;
   int k = (id / u_M) % u_K;
   int r = id / (u_M * u_K);
-  int f = u_t - a;
+  int f = wrapF(u_t - a);
   float x0 = xe(r, f, k);
   gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside: nothing
   v_col = vec4(0.0);
   v_age = float(a);
   if (x0 < -1e5) return;
   float X0 = x0 + S(a), X1 = X0;
-  float x1 = xe(r, f - 1, k);
+  float x1 = xe(r, wrapF(u_t - a - 1), k);
   if (x1 > -1e5 && abs(x1 - x0) < u_join) X1 = x1 + S(a + 1);
   float lo = min(X0, X1) - 0.5 + 0.5 * u_D, hi = max(X0, X1) + 0.5 + 0.5 * u_D;
   int v = gl_VertexID;

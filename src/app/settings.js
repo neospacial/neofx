@@ -9,11 +9,14 @@ export const DEFAULTS = {
   mosh: { ...MOSH_DEFAULTS },
   view: 'result', // 'result' | 'original' | 'split' | 'map' | 'mask'
   splitPos: 0.5, // the Split view divider (0..1 of the picture)
+  // Loop pixels (Time Map and Slit Scan): a pixel that needs a frame before the start of the loop (the
+  // video, or In – Out) shows the frame from the end of the loop, not black: the result loops without
+  // a cut. (Was timemap.perfectLoop.)
+  loopPixels: false,
   timemap: {
     maxDelay: 30, // frames (white); the store limits it to N - 1
     steps: 0, // 0 = smooth, else 2..64
     blend: true, // frame blend
-    perfectLoop: false, // the frames before the loop start come from its end (a seamless loop)
   },
   map: {
     source: 'builtin', // 'builtin' | 'image' | 'video'
@@ -88,6 +91,15 @@ export const DEFAULTS = {
 };
 
 export const clone = (o) => JSON.parse(JSON.stringify(o));
+
+// Older settings (saved in the browser, preset files): timemap.perfectLoop is now loopPixels.
+export function migrateSettings(s) {
+  if (s && s.timemap && 'perfectLoop' in s.timemap) {
+    if (s.loopPixels === undefined || s.timemap.perfectLoop) s.loopPixels = !!s.timemap.perfectLoop;
+    delete s.timemap.perfectLoop;
+  }
+  return s;
+}
 
 // Read and write a value by a path such as 'timemap.maxDelay'.
 export function getPath(o, path) {

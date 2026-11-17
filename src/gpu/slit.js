@@ -210,6 +210,8 @@ export class Slit {
     const wl = Math.max(1, wp.waveLength || 1);
     gl.uniform4f(p.u.u_warp, ((wp.twist || 0) * Math.PI) / 180, wp.drift || 0, wp.spread || 0, 1 / diag);
     gl.uniform3f(p.u.u_wave, wp.wave || 0, (2 * Math.PI) / wl, (-2 * Math.PI * (wp.waveSpeed || 0) * index) / wl);
+    const lp = e.loop && index >= e.loop.a && index < e.loop.a + e.loop.L ? e.loop : null;
+    gl.uniform2i(p.u.u_loop, lp ? lp.a : 0, lp ? lp.L : 0);
     gl.uniform1i(p.u.u_timeOn, sl.time ? 1 : 0);
     gl.uniform1i(p.u.u_sharp, sl.sampling === 'blend' ? 0 : 1);
     gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);

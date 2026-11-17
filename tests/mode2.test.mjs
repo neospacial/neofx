@@ -364,4 +364,59 @@ export const tests = [
       });
     },
   },
+  {
+    name: 'Loop pixels (Slit Scan): before frame 0 the trail shows the end of the video (Sharp and Blend), in an In – Out range the end of the range; off: black again',
+    timeout: 240000,
+    async fn() {
+      await withMode2(async (page, codes) => {
+        const n = codes.length;
+        const base = { ...clone(DEFAULTS).slitscan, x: LX, y: 0.5, angle: 90, maxAge: 90, rate: 1 };
+        const wrapOf = (k, a, L) => (k >= a ? k : a + ((((k - a) % L) + L) % L));
+        // Expected: the frame t − s, wrapped into [a, a + L − 1].
+        const check = (name, got, t, a, L, sl) => {
+          let bad = 0, first = null;
+          for (let cy = 0; cy < 30; cy++) for (let cx = 0; cx < 40; cx++) {
+            const x = cx * 8 + 4, y = cy * 8 + 4;
+            let want;
+            if (x < 164) want = lumaOf(codes, t, x, y);
+            else {
+              const s = x - 164;
+              if (s > sl.maxAge) want = lumaOf(codes, t, x, y);
+              else want = lumaOf(codes, wrapOf(t - s, a, L), 164, y);
+            }
+            if (Math.abs(got[y * W + x] - want) > 40) {
+              bad++;
+              if (!first) first = [x, y, got[y * W + x], want];
+            }
+          }
+          assert(bad === 0, `${name}: ${bad} block centres differ, first at (x, y, got, want) = ${first}`);
+        };
+        await page.evaluate(() => window.neofx.change('loopPixels', true));
+        assert(await page.evaluate(() => !!document.querySelector('#inspector [data-key="loopPixels"]')), 'the toggle is in the Slit Scan inspector');
+        for (const t of [5, 20]) check(`full video, t ${t}`, await view(page, base, t), t, 0, n, base);
+        // Blend sampling: the half frames wrap too (no black seam).
+        const bl = await view(page, { ...base, sampling: 'blend' }, 10);
+        let black = 0;
+        for (let x = 164; x < 164 + 90 && x < W; x++) if (bl[124 * W + x] === 0 && bl[116 * W + x] === 0 && bl[132 * W + x] === 0) black++;
+        assert(black < 20, `blend: ${black} black columns`);
+        // An In – Out range [30, 69]: before 30 the frames of the end of the range.
+        await page.evaluate(async () => {
+          const P = window.neofx.player;
+          P.inPoint = 30;
+          P.outPoint = 69;
+          await window.neofx.applySettings();
+        });
+        check('In – Out, t 35', await view(page, base, 35), 35, 30, 40, base);
+        // Off: black before frame 0 again.
+        await page.evaluate(async () => {
+          const P = window.neofx.player;
+          P.inPoint = P.outPoint = null;
+          window.neofx.change('loopPixels', false);
+          await window.neofx.applySettings();
+        });
+        const off = await view(page, base, 5);
+        assert(off[124 * W + 164 + 30] === 0 && off[124 * W + 164 + 60] === 0, 'off: black');
+      });
+    },
+  },
 ];

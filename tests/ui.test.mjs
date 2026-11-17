@@ -75,6 +75,10 @@ export const tests = [
       // Every Time Map preset names its map (a preset with map options too keeps its map type).
       const badMaps = PRESETS.filter((p) => p.s.mode === 'timemap' && !(p.s.map && p.s.map.type && applyPreset(clone(DEFAULTS), p).map.type === p.s.map.type)).map((p) => p.id);
       assert(!badMaps.length && new Set(PRESETS.map((p) => p.id)).size === PRESETS.length, `preset maps / ids: ${badMaps}`);
+      // The old Perfect loop setting (saved settings, preset files) is Loop pixels now.
+      const old = parsePresetFile(JSON.stringify({ app: 'neofx', settings: { mode: 'timemap', timemap: { maxDelay: 9, perfectLoop: true } } })).settings;
+      assert(old.loopPixels === true && !('perfectLoop' in old.timemap) && old.timemap.maxDelay === 9, `migrated ${JSON.stringify(old.timemap)} ${old.loopPixels}`);
+      assert(applyPreset({ ...clone(DEFAULTS), loopPixels: true }, PRESETS[0]).loopPixels === true, 'a preset keeps Loop pixels');
       // Each preset is in a group of the gallery; each preset is a different look.
       assert(PRESETS.every((p) => PRESET_GROUPS.some(([g]) => g === p.s.mode)) && PRESET_GROUPS.every(([g]) => PRESETS.filter((p) => p.s.mode === g).length >= 8), 'groups: at least 8 presets in each mode');
       const looks = PRESETS.map((p) => JSON.stringify(applyPreset(clone(DEFAULTS), p)));
