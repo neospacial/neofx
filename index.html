@@ -249,6 +249,14 @@ body[data-mosh="recording"] #transport,body[data-mosh="blooming"] #transport{poi
 .moshScrubRow input{flex:1;min-width:0}
 .moshCuts{display:grid;gap:8px;max-height:30vh;overflow:auto}
 #moshDialog .note{font-size:12px;color:var(--dim);margin:0}
+/* The mute button (top bar). */
+#muteBtn{min-width:36px;padding:0 8px;display:inline-flex;align-items:center;justify-content:center}
+#muteBtn svg{width:20px;height:20px;fill:currentColor}
+#muteBtn .off{display:none}
+#muteBtn[aria-pressed="true"] .on{display:none}
+#muteBtn[aria-pressed="true"] .off{display:inline}
+#muteBtn[aria-pressed="true"]{color:var(--warn)}
+#muteBtn:disabled{opacity:.35}
 </style>
 </head>
 <body data-state="start">
@@ -261,6 +269,7 @@ body[data-mosh="recording"] #transport,body[data-mosh="blooming"] #transport{poi
     <button id="redoBtn" class="wide" type="button" disabled aria-label="Redo" title="Redo (Shift+Ctrl+Z)">↷</button>
     <span class="spacer"></span>
     <span id="status" aria-live="polite"></span>
+    <button id="muteBtn" type="button" aria-label="Mute" aria-pressed="false" title="Sound on (touch to mute)" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path class="spk" d="M4 9h4l5-4v14l-5-4H4z"/><path class="on" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path class="off" d="M16.5 9.5l5 5M21.5 9.5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
     <button id="menuBtn" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false">⋯</button>
     <button id="exportBtn" type="button" disabled>Export</button>
     <div id="menu" role="menu" hidden>
@@ -3644,6 +3653,263 @@ class Engine {
 return { Engine };
 })();
 
+// ---- app/audio.js
+const { PreviewAudio } = (() => {
+// The sound of the preview: the audio track of the open file (AAC or Opus), decoded with the
+// WebCodecs AudioDecoder while the video plays, and played with Web Audio. The video clock leads:
+// the file time us plays at the wall time clock.wall + (us − clock.us) / 1000 (the clock of the
+// player), so the sound and the pictures stay together. Only in playback at normal speed: a seek,
+// a step, or the reverse play has no sound. The packets are read and decoded about 1.5 s ahead.
+
+
+
+
+const AHEAD_US = 1500000; // decode this far ahead of the playhead
+const BATCH_US = 1000000; // read the packets of about this much time at once
+const PRIME = 3; // packets decoded before the start (AAC needs the one before to start clean)
+
+const audioConfig = (a) => ({ codec: a.codec, sampleRate: a.sampleRate, numberOfChannels: a.channels, ...(a.description ? { description: a.description } : {}) });
+
+class PreviewAudio {
+  constructor() {
+    this.track = null; // the audio track of the open file, or null
+    this.file = null;
+    this.ctx = null;
+    this.gain = null;
+    this.muted = false;
+    this.gen = 0; // a start or a stop changes it
+    this.run = null; // the playback that runs: { us, wall, dec, next, sources, timer }
+    this.reason = ''; // why there is no sound (the mute button tells it)
+    this.stats = { scheduled: 0, late: 0, trimmed: 0 };
+  }
+
+  get available() {
+    return !!this.track;
+  }
+
+  // A new file: its audio track, when this browser can decode it.
+  async open(file) {
+    this.stop();
+    this.track = null;
+    this.file = file;
+    this.reason = '';
+    if (typeof AudioDecoder !== 'function' || typeof AudioContext !== 'function') {
+      this.reason = 'This browser cannot decode the sound.';
+      return false;
+    }
+    let d = null;
+    try {
+      d = await demuxMp4(file);
+    } catch {
+      d = null;
+    }
+    if (this.file !== file) return false; // another file came
+    const a = d && d.audio;
+    if (!a || !a.samples.length) {
+      this.reason = 'This video has no sound.';
+      return false;
+    }
+    try {
+      if (!(await AudioDecoder.isConfigSupported(audioConfig(a))).supported) throw new Error();
+    } catch {
+      this.reason = `This browser cannot decode the sound (${a.codec}).`;
+      return false;
+    }
+    if (this.file !== file) return false;
+    this.track = a;
+    return true;
+  }
+
+  close() {
+    this.stop();
+    this.track = null;
+    this.file = null;
+  }
+
+  setMuted(m) {
+    this.muted = !!m;
+    if (this.gain) this.gain.gain.value = this.muted ? 0 : 1;
+    if (this.muted) this.stop();
+  }
+
+  ensureContext() {
+    if (!this.ctx) {
+      this.ctx = new AudioContext({ latencyHint: 'interactive' });
+      this.gain = this.ctx.createGain();
+      this.gain.gain.value = this.muted ? 0 : 1;
+      this.gain.connect(this.ctx.destination);
+    }
+    // (A play from a key or a touch is a user gesture: the browser lets the context run.)
+    if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    return this.ctx;
+  }
+
+  // A playback from file time us is about to start: read and decode its first packets now, so that
+  // they are ready when the clock starts (no sound lost at the start).
+  prepare(us) {
+    this.start(us, null);
+  }
+
+  // The playback clock started (or started again): the file time us is shown at the wall time
+  // wall (performance.now() ms). wall null: not yet (prepare).
+  start(us, wall) {
+    const r = this.run;
+    if (wall !== null && r && r.wall === null && Math.abs(r.from - us) < 100000) {
+      // The prepared run: the clock is known now; the decoded packets that wait are scheduled.
+      Object.assign(r, { us, wall, from: us });
+      this.sync(r);
+      for (const d of r.queue.splice(0)) this.schedule(r, this.gen, d);
+      return;
+    }
+    this.stop();
+    if (!this.track || this.muted) return;
+    const ctx = this.ensureContext();
+    const gen = ++this.gen;
+    const S = this.track.samples;
+    // The first packet that ends after us, and some before it for the decoder to start.
+    let i = 0;
+    while (i < S.length && S[i].us + (S[i].duration * 1e6) / this.track.timescale <= us) i++;
+    const run = { us, wall, from: us, next: Math.max(0, i - PRIME), sources: new Set(), queue: [], timer: 0, dec: null, offset: 0, busy: false };
+    this.run = run;
+    if (wall !== null) this.sync(run);
+    run.dec = new AudioDecoder({
+      output: (data) => this.schedule(run, gen, data),
+      error: () => this.stop(),
+    });
+    try {
+      run.dec.configure(audioConfig(this.track));
+    } catch {
+      this.stop();
+      return;
+    }
+    const pump = () => {
+      if (gen !== this.gen) return;
+      this.pump(run, gen).finally(() => {
+        if (gen === this.gen) run.timer = setTimeout(pump, 200);
+      });
+    };
+    pump();
+    void ctx;
+  }
+
+  stop() {
+    this.gen++;
+    const run = this.run;
+    this.run = null;
+    if (!run) return;
+    clearTimeout(run.timer);
+    for (const s of run.sources) {
+      try {
+        s.stop();
+      } catch { /* not started */ }
+      s.disconnect();
+    }
+    run.sources.clear();
+    for (const d of run.queue) d.close();
+    run.queue.length = 0;
+    if (run.dec && run.dec.state !== 'closed') {
+      try {
+        run.dec.close();
+      } catch { /* closed */ }
+    }
+  }
+
+  // The map from the wall clock to the audio clock (context seconds = wall ms / 1000 + offset), less
+  // the output latency of the device, so the sound comes out at the time of its picture. It is
+  // measured again for each packet and moves only when it changed by more than 20 ms (no clicks).
+  sync(run) {
+    const ctx = this.ctx;
+    const lat = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
+    const off = ctx.currentTime - performance.now() / 1000 - lat;
+    if (!run.synced || Math.abs(off - run.offset) > 0.02) {
+      run.offset = off;
+      run.synced = true;
+    }
+  }
+
+  ctxTime(run, us) {
+    return (run.wall + (us - run.us) / 1000) / 1000 + run.offset;
+  }
+
+  // Read and decode the packets up to AHEAD_US after the playhead.
+  async pump(run, gen) {
+    if (run.busy) return;
+    run.busy = true;
+    try {
+      const S = this.track.samples;
+      const now = run.wall === null ? run.from : run.us + (performance.now() - run.wall) * 1000;
+      while (gen === this.gen && run.next < S.length && S[run.next].us < now + AHEAD_US) {
+        const list = [];
+        const t0 = S[run.next].us;
+        while (run.next + list.length < S.length && S[run.next + list.length].us < t0 + BATCH_US) list.push(S[run.next + list.length]);
+        const data = await readPackets(this.file, list);
+        if (gen !== this.gen) return;
+        let o = 0;
+        for (const s of list) {
+          run.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: s.us, duration: Math.round((s.duration * 1e6) / this.track.timescale), data: data.subarray(o, o + s.size) }));
+          o += s.size;
+        }
+        run.next += list.length;
+      }
+    } catch {
+      if (gen === this.gen) this.stop();
+    } finally {
+      run.busy = false;
+    }
+  }
+
+  // A decoded packet: an AudioBuffer, started at the time of its file time (the part before the
+  // start of the playback, or that is already late, is cut off).
+  schedule(run, gen, data) {
+    if (gen === this.gen && run.wall === null) {
+      run.queue.push(data); // the clock is not there yet
+      return;
+    }
+    try {
+      if (gen !== this.gen) return;
+      const ctx = this.ctx;
+      const n = data.numberOfFrames, ch = data.numberOfChannels, rate = data.sampleRate;
+      if (!n) return;
+      const buf = ctx.createBuffer(ch, n, rate);
+      for (let c = 0; c < ch; c++) {
+        const plane = new Float32Array(n);
+        data.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
+        buf.copyToChannel(plane, c);
+      }
+      this.sync(run);
+      let at = this.ctxTime(run, data.timestamp);
+      let skip = Math.max(0, (run.from - data.timestamp) / 1e6); // before the start of the playback
+      const now = ctx.currentTime + 0.005;
+      if (at + skip < now) skip = now - at; // late: the rest of it
+      if (skip >= buf.duration) {
+        // Not late: the packets before the start; and the first ones that the output latency of the
+        // device cuts off (the first picture shows at once; its sound comes out that much later).
+        const lat = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
+        if (data.timestamp + buf.duration * 1e6 <= run.from) return;
+        if (data.timestamp < run.from + (lat + 0.03) * 1e6) this.stats.trimmed++;
+        else this.stats.late++;
+        return;
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this.gain);
+      src.onended = () => {
+        run.sources.delete(src);
+        src.disconnect();
+      };
+      src.start(at + skip, skip);
+      if (this.log) this.log.push({ us: data.timestamp, at: at + skip, now: ctx.currentTime }); // (tests)
+      run.sources.add(src);
+      this.stats.scheduled++;
+    } finally {
+      data.close();
+    }
+  }
+}
+
+return { PreviewAudio };
+})();
+
 // ---- app/mosh.js
 const { MOSH_SIZES, MOSH_RATES, MOSH_LOOK, MOSH_DEFAULTS, moshSize, Mosh } = (() => {
 // Mode 3, Datamosh (from neomosh, file source only): the page side. The codec runs in the mosh
@@ -4335,7 +4601,9 @@ function makeWorker(src) {
 //   consume(index, frame, show) -> Promise: put the frame into the store (show: also render it).
 //     It must send the frame on at once (the order of the calls is the store order).
 //   render(index) -> Promise: render a frame that is in the store.
-//   onState(player), onThumb(i, index, bitmap), onError(message), onProgress(fraction | null) }
+//   onState(player), onThumb(i, index, bitmap), onError(message), onProgress(fraction | null),
+//   onPlay(us) (a playback from file time us starts: the sound decodes ahead),
+//   onClock({ wall, us }) (the playback clock started: the sound starts), onStop() (it ended) }
 class Player {
   constructor(workerSrc, opts) {
     this.src = workerSrc;
@@ -4592,6 +4860,7 @@ class Player {
     this.stats = { ...this.stats, shown: 0, dropped: 0, t0: performance.now(), fps: 0 };
     this.playTo = b;
     this.stats.decodeJobs++;
+    if (this.opts.onPlay) this.opts.onPlay(this.info.times[from]);
     this.wk.postMessage({ cmd: 'play', job: ++this.job, from: Math.min(start, from), to: b });
     this.raf = requestAnimationFrame((now) => this.tick(now));
     this.state();
@@ -4600,6 +4869,7 @@ class Player {
   pause() {
     if (!this.playing) return;
     this.playing = false;
+    if (this.opts.onStop) this.opts.onStop();
     cancelAnimationFrame(this.raf);
     if (this.wk) this.wk.postMessage({ cmd: 'stop' });
     this.job++;
@@ -4689,7 +4959,10 @@ class Player {
     }
     if (this.queue.length) {
       const head = this.queue[0];
-      if (!this.clock) this.clock = { wall: now, us: T[head.index] };
+      if (!this.clock) {
+        this.clock = { wall: now, us: T[head.index] };
+        if (this.opts.onClock) this.opts.onClock(this.clock);
+      }
       const fileUs = this.clock.us + (now - this.clock.wall) * 1000;
       let k = -1;
       for (let i = 0; i < this.queue.length && T[this.queue[i].index] <= fileUs + 4000; i++) k = i;
@@ -4711,6 +4984,7 @@ class Player {
     if ((this.current >= this.playTo || this.decodeDone) && !this.queue.length) {
       if (this.loop) {
         this.playing = false;
+        if (this.opts.onStop) this.opts.onStop(); // the next pass starts its own sound
         this.current = -1;
         if (this.wrap) this.pass++; // the next pass: its history is the end of this one
         this.play();
@@ -7551,6 +7825,7 @@ const {  } = (() => {
 
 
 
+
 const $ = (id) => document.getElementById(id);
 const VERSION = '0.1.0';
 const DECODE_WORKER = "// ---- io/demux.js\nconst { demuxMp4, turnedCrop } = (() => {\n// MP4 / MOV reader (plan §3, §6.1). From neomosh src/mux/demux.js, with the audio track added.\n// It gives the video decoder configuration and each sample (offset, size, display time, sync flag),\n// so a VideoDecoder can decode every frame of the file, and the audio track for the pass-through\n// copy into the export (D16). Not fragmented. It returns null for other files.\n\nconst MAX_MOOV = 64 * 1048576;\n\nconst str4 = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);\nconst hex2 = (v) => v.toString(16).padStart(2, '0');\n\n// The boxes in b[from..to): [{ type, head (box start), start (content), end }].\nfunction boxes(b, from, to) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const out = [];\n  let o = from;\n  while (o + 8 <= to) {\n    let size = dv.getUint32(o);\n    const type = str4(b, o + 4);\n    let head = 8;\n    if (size === 1) {\n      size = Number(dv.getBigUint64(o + 8));\n      head = 16;\n    } else if (size === 0) size = to - o;\n    if (size < head || o + size > to) break;\n    out.push({ type, head: o, start: o + head, end: o + size });\n    o += size;\n  }\n  return out;\n}\n\nconst child = (b, box, type) => boxes(b, box.start, box.end).find((x) => x.type === type);\nconst path = (b, box, ...types) => types.reduce((x, t) => (x ? child(b, x, t) : null), box);\n\n// The top-level boxes of the file, read from their headers only.\nasync function topBoxes(blob) {\n  const out = [];\n  let o = 0;\n  while (o + 8 <= blob.size) {\n    const h = new Uint8Array(await blob.slice(o, Math.min(blob.size, o + 16)).arrayBuffer());\n    const dv = new DataView(h.buffer);\n    let size = dv.getUint32(0);\n    let head = 8;\n    if (size === 1 && h.length >= 16) {\n      size = Number(dv.getBigUint64(8));\n      head = 16;\n    } else if (size === 0) size = blob.size - o;\n    if (size < head) break;\n    out.push({ type: str4(h, 4), start: o + head, end: Math.min(blob.size, o + size) });\n    o += size;\n  }\n  return out;\n}\n\n// The codec string and the description for the VideoDecoder, from the sample entry.\nfunction videoCodecOf(b, entry) {\n  const t = entry.type;\n  const kids = boxes(b, entry.start + 78, entry.end); // after the VisualSampleEntry fields\n  const k = (type) => kids.find((x) => x.type === type);\n  if (t === 'avc1' || t === 'avc3') {\n    const c = k('avcC');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    return { codec: `avc1.${hex2(d[1])}${hex2(d[2])}${hex2(d[3])}`, description: d };\n  }\n  if (t === 'hvc1' || t === 'hev1') {\n    const c = k('hvcC');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    const space = ['', 'A', 'B', 'C'][d[1] >> 6];\n    const tier = (d[1] >> 5) & 1 ? 'H' : 'L';\n    let compat = ((d[2] << 24) | (d[3] << 16) | (d[4] << 8) | d[5]) >>> 0;\n    let rev = 0;\n    for (let i = 0; i < 32; i++, compat >>>= 1) rev = ((rev << 1) | (compat & 1)) >>> 0;\n    const cons = Array.from(d.subarray(6, 12));\n    while (cons.length && cons[cons.length - 1] === 0) cons.pop();\n    const parts = [`${t}.${space}${d[1] & 31}`, rev.toString(16), `${tier}${d[12]}`, ...cons.map((x) => x.toString(16).toUpperCase())];\n    return { codec: parts.join('.'), description: d };\n  }\n  if (t === 'vp09') {\n    const c = k('vpcC');\n    if (!c) return null;\n    const d = b.subarray(c.start + 4, c.end); // after version and flags\n    return { codec: `vp09.${String(d[0]).padStart(2, '0')}.${String(d[1]).padStart(2, '0')}.${String(d[2] >> 4).padStart(2, '0')}`, description: null };\n  }\n  if (t === 'av01') {\n    const c = k('av1C');\n    if (!c) return null;\n    const d = b.slice(c.start, c.end);\n    const profile = d[1] >> 5, level = d[1] & 31, tier = d[2] >> 7 ? 'H' : 'M';\n    const depth = (d[2] >> 6) & 1 ? ((d[2] >> 5) & 1 ? 12 : 10) : 8;\n    return { codec: `av01.${profile}.${String(level).padStart(2, '0')}${tier}.${String(depth).padStart(2, '0')}`, description: d };\n  }\n  return null;\n}\n\n// MPEG-4 descriptor (ISO/IEC 14496-1): tag, size (1-4 bytes of 7 bits), content start.\nfunction descriptor(b, o, end) {\n  if (o + 2 > end) return null;\n  const tag = b[o++];\n  let size = 0;\n  for (let i = 0; i < 4 && o < end; i++) {\n    const v = b[o++];\n    size = (size << 7) | (v & 127);\n    if (!(v & 128)) break;\n  }\n  return { tag, start: o, end: Math.min(end, o + size) };\n}\n\n// esds -> { oti (objectTypeIndication), asc (AudioSpecificConfig bytes or null) }.\nfunction parseEsds(b, esds) {\n  const es = descriptor(b, esds.start + 4, esds.end); // after version and flags\n  if (!es || es.tag !== 3) return null;\n  const flags = b[es.start + 2];\n  let o = es.start + 3;\n  if (flags & 0x80) o += 2; // dependsOn_ES_ID\n  if (flags & 0x40) o += 1 + b[o]; // URL\n  if (flags & 0x20) o += 2; // OCR_ES_Id\n  const dc = descriptor(b, o, es.end);\n  if (!dc || dc.tag !== 4) return null;\n  const oti = b[dc.start];\n  const dsi = descriptor(b, dc.start + 13, dc.end);\n  return { oti, asc: dsi && dsi.tag === 5 ? b.slice(dsi.start, dsi.end) : null };\n}\n\n// The audio sample entry: { type, codec, channels, sampleSize, sampleRate, config, description }.\n// config: the raw codec box (esds or dOps, with its header), for the muxer to copy (plan §3).\nfunction audioCodecOf(b, entry) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const t = entry.type;\n  const version = dv.getUint16(entry.start + 8); // QuickTime sound description version (MOV)\n  const channels = dv.getUint16(entry.start + 16);\n  const sampleSize = dv.getUint16(entry.start + 18);\n  let sampleRate = dv.getUint32(entry.start + 24) >>> 16;\n  let kidsFrom = entry.start + 28;\n  if (version === 1) kidsFrom += 16;\n  else if (version === 2) {\n    kidsFrom += 36;\n    sampleRate = Math.round(dv.getFloat64(entry.start + 32));\n  }\n  let kids = boxes(b, kidsFrom, entry.end);\n  const wave = kids.find((x) => x.type === 'wave'); // MOV: the codec box can be in a 'wave' box\n  if (wave) kids = kids.concat(boxes(b, wave.start, wave.end));\n  const k = (type) => kids.find((x) => x.type === type);\n  if (t === 'mp4a') {\n    const esds = k('esds');\n    if (!esds) return null;\n    const e = parseEsds(b, esds);\n    if (!e) return null;\n    let codec = `mp4a.${hex2(e.oti)}`;\n    if (e.oti === 0x40 && e.asc && e.asc.length) {\n      let aot = e.asc[0] >> 3;\n      if (aot === 31 && e.asc.length > 1) aot = 32 + (((e.asc[0] & 7) << 3) | (e.asc[1] >> 5));\n      codec += `.${aot}`;\n    }\n    return { type: t, codec, channels, sampleSize, sampleRate, config: b.slice(esds.head, esds.end), description: e.asc };\n  }\n  if (t === 'Opus') {\n    const dops = k('dOps');\n    if (!dops) return null;\n    return { type: t, codec: 'opus', channels, sampleSize, sampleRate: 48000, config: b.slice(dops.head, dops.end), description: null };\n  }\n  return null;\n}\n\n// tkhd matrix -> 0, 90, 180, or 270 (clockwise, the way a player turns the picture).\nfunction rotationOf(b, tkhd) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const m = tkhd.start + (b[tkhd.start] === 1 ? 52 : 40);\n  const a = dv.getInt32(m), bb = dv.getInt32(m + 4);\n  if (a === 0 && bb > 0) return 90;\n  if (a < 0 && bb === 0) return 180;\n  if (a === 0 && bb < 0) return 270;\n  return 0;\n}\n\n// The sample table of a track: { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift }\n// or null. shift: the media time where the presentation starts (edit list).\nfunction sampleTable(b, trak) {\n  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);\n  const mdhd = path(b, trak, 'mdia', 'mdhd');\n  const stbl = path(b, trak, 'mdia', 'minf', 'stbl');\n  if (!mdhd || !stbl) return null;\n  const timescale = dv.getUint32(mdhd.start + (b[mdhd.start] === 1 ? 20 : 12));\n  const stsd = child(b, stbl, 'stsd');\n  const entry = stsd && boxes(b, stsd.start + 8, stsd.end)[0];\n  if (!entry || !timescale) return null;\n\n  // Sample sizes.\n  const stsz = child(b, stbl, 'stsz');\n  if (!stsz) return null;\n  const fixed = dv.getUint32(stsz.start + 4), count = dv.getUint32(stsz.start + 8);\n  const sizes = new Array(count);\n  for (let i = 0; i < count; i++) sizes[i] = fixed || dv.getUint32(stsz.start + 12 + 4 * i);\n  // Chunk offsets and samples per chunk -> sample offsets.\n  const stco = child(b, stbl, 'stco'), co64 = child(b, stbl, 'co64'), stsc = child(b, stbl, 'stsc');\n  if ((!stco && !co64) || !stsc) return null;\n  const co = stco || co64;\n  const nChunks = dv.getUint32(co.start + 4);\n  const chunkOff = (i) => (stco ? dv.getUint32(co.start + 8 + 4 * i) : Number(dv.getBigUint64(co.start + 8 + 8 * i)));\n  const scN = dv.getUint32(stsc.start + 4);\n  const offsets = new Array(count);\n  let s = 0;\n  for (let e = 0; e < scN && s < count; e++) {\n    const first = dv.getUint32(stsc.start + 8 + 12 * e) - 1;\n    const per = dv.getUint32(stsc.start + 12 + 12 * e);\n    const last = e + 1 < scN ? dv.getUint32(stsc.start + 8 + 12 * (e + 1)) - 1 : nChunks;\n    for (let c = first; c < last && s < count; c++) {\n      let o = chunkOff(c);\n      for (let j = 0; j < per && s < count; j++, s++) {\n        offsets[s] = o;\n        o += sizes[s];\n      }\n    }\n  }\n  if (s < count) return null;\n  // Decode times and durations, composition offsets, the edit list start.\n  const stts = child(b, stbl, 'stts'), ctts = child(b, stbl, 'ctts'), stss = child(b, stbl, 'stss');\n  if (!stts) return null;\n  const dts = new Array(count);\n  const durations = new Array(count);\n  let t = 0, k = 0, d = 0;\n  for (let e = 0, n = dv.getUint32(stts.start + 4); e < n; e++) {\n    const c = dv.getUint32(stts.start + 8 + 8 * e);\n    d = dv.getUint32(stts.start + 12 + 8 * e);\n    for (let j = 0; j < c && k < count; j++, k++, t += d) {\n      dts[k] = t;\n      durations[k] = d;\n    }\n  }\n  for (; k < count; k++, t += d) {\n    dts[k] = t;\n    durations[k] = d;\n  }\n  const cto = new Array(count).fill(0);\n  if (ctts) {\n    k = 0;\n    for (let e = 0, n = dv.getUint32(ctts.start + 4); e < n; e++) {\n      const c = dv.getUint32(ctts.start + 8 + 8 * e), o = dv.getInt32(ctts.start + 12 + 8 * e);\n      for (let j = 0; j < c && k < count; j++, k++) cto[k] = o;\n    }\n  }\n  let shift = 0;\n  const elst = path(b, trak, 'edts', 'elst');\n  if (elst) {\n    const v1 = b[elst.start] === 1;\n    const n = dv.getUint32(elst.start + 4);\n    for (let e = 0; e < n; e++) {\n      const o = elst.start + 8 + e * (v1 ? 20 : 12);\n      const mt = v1 ? Number(dv.getBigInt64(o + 8)) : dv.getInt32(o + 4);\n      if (mt >= 0) {\n        shift = mt;\n        break;\n      }\n    }\n  }\n  const sync = stss ? new Set(Array.from({ length: dv.getUint32(stss.start + 4) }, (_, i) => dv.getUint32(stss.start + 8 + 4 * i) - 1)) : null;\n  return { timescale, entry, offsets, sizes, dts, cto, durations, sync, shift, count };\n}\n\nconst handlerOf = (b, trak) => {\n  const hdlr = path(b, trak, 'mdia', 'hdlr');\n  return hdlr ? str4(b, hdlr.start + 8) : '';\n};\n\n// blob: the file. Returns null, or:\n// { codec, description, codedWidth, codedHeight, rotation, timescale, mediaTime, samples, durationUs, audio }\n// samples (decode order): [{ offset, size, us (display time, microseconds), key, dts, duration, cto }].\n// dts, duration, cto: in timescale units. mediaTime: the edit list start.\n// audio: null, or { type, codec, channels, sampleSize, sampleRate, config, description, timescale,\n//   mediaTime (edit list start, in timescale units), samples: [{ offset, size, dts, duration, us }],\n//   durationUs }. us: the presentation time (dts - mediaTime) in microseconds.\nasync function demuxMp4(blob) {\n  let tops;\n  try {\n    tops = await topBoxes(blob);\n  } catch {\n    return null;\n  }\n  const moovTop = tops.find((x) => x.type === 'moov');\n  if (!moovTop || moovTop.end - moovTop.start > MAX_MOOV) return null;\n  if (tops.some((x) => x.type === 'moof')) return null; // fragmented: not supported\n  const b = new Uint8Array(await blob.slice(moovTop.start, moovTop.end).arrayBuffer());\n  const dv = new DataView(b.buffer);\n  const traks = boxes(b, 0, b.length).filter((x) => x.type === 'trak');\n\n  let video = null;\n  for (const trak of traks) {\n    if (handlerOf(b, trak) !== 'vide') continue;\n    const tkhd = child(b, trak, 'tkhd');\n    const st = tkhd && sampleTable(b, trak);\n    if (!st) continue;\n    const { entry, count, timescale } = st;\n    const codec = videoCodecOf(b, entry);\n    if (!codec) return null;\n    const codedWidth = dv.getUint16(entry.start + 24), codedHeight = dv.getUint16(entry.start + 26);\n    const samples = new Array(count);\n    let maxUs = 0;\n    for (let i = 0; i < count; i++) {\n      const us = Math.round(((st.dts[i] + st.cto[i] - st.shift) * 1e6) / timescale);\n      samples[i] = { offset: st.offsets[i], size: st.sizes[i], us, key: st.sync ? st.sync.has(i) : true, dts: st.dts[i], duration: st.durations[i], cto: st.cto[i] };\n      maxUs = Math.max(maxUs, us);\n    }\n    if (!count || !samples[0].key) return null;\n    video = { ...codec, codedWidth, codedHeight, rotation: rotationOf(b, tkhd), timescale, mediaTime: st.shift, samples, durationUs: maxUs };\n    break;\n  }\n  if (!video) return null;\n\n  let audio = null;\n  for (const trak of traks) {\n    if (handlerOf(b, trak) !== 'soun') continue;\n    const st = sampleTable(b, trak);\n    const a = st && st.count && audioCodecOf(b, st.entry);\n    if (!a) continue;\n    const ts = st.timescale;\n    const samples = new Array(st.count);\n    for (let i = 0; i < st.count; i++) {\n      samples[i] = { offset: st.offsets[i], size: st.sizes[i], dts: st.dts[i], duration: st.durations[i], us: Math.round(((st.dts[i] - st.shift) * 1e6) / ts) };\n    }\n    const end = st.dts[st.count - 1] + st.durations[st.count - 1] - st.shift;\n    audio = { ...a, timescale: ts, mediaTime: st.shift, samples, durationUs: Math.round((end * 1e6) / ts) };\n    break;\n  }\n  video.audio = audio;\n  return video;\n}\n\n// The source rectangle (frame coordinates) and the drawing transform for a crop in display\n// coordinates of a frame that is shown turned by 'rotation' degrees (clockwise). fw, fh: the frame\n// size (not turned). c: { sx, sy, sw, sh } in display coordinates. w, h: the output size.\n// Returns { sx, sy, sw, sh, m: [a, b, c, d, e, f], dw, dh } for setTransform(...m) and drawImage(frame,\n// sx, sy, sw, sh, 0, 0, dw, dh).\nfunction turnedCrop(rotation, fw, fh, c, w, h) {\n  switch (rotation) {\n    case 90:\n      return { sx: c.sy, sy: fh - c.sx - c.sw, sw: c.sh, sh: c.sw, m: [0, 1, -1, 0, w, 0], dw: h, dh: w };\n    case 180:\n      return { sx: fw - c.sx - c.sw, sy: fh - c.sy - c.sh, sw: c.sw, sh: c.sh, m: [-1, 0, 0, -1, w, h], dw: w, dh: h };\n    case 270:\n      return { sx: fw - c.sy - c.sh, sy: c.sx, sw: c.sh, sh: c.sw, m: [0, -1, 1, 0, 0, h], dw: h, dh: w };\n    default:\n      return { sx: c.sx, sy: c.sy, sw: c.sw, sh: c.sh, m: [1, 0, 0, 1, 0, 0], dw: w, dh: h };\n  }\n}\n\nreturn { demuxMp4, turnedCrop };\n})();\n\n// ---- io/timeline.js\nconst { decoderConfig, displaySize, buildTimeline, keyBefore, planSegments, frameAtUs, thumbIndices, isCleanStart } = (() => {\n// The frame timeline of a file (plan §5.2, §6.1, §6.2). No browser APIs, so Node tests can use it.\n// Frame t is the t-th presented frame in display order. Samples before the edit list start (us < 0)\n// are decoded as references, but they are not frames of the timeline.\n\n// The decoder configuration for a demuxMp4 result.\nfunction decoderConfig(d) {\n  return { codec: d.codec, codedWidth: d.codedWidth, codedHeight: d.codedHeight, ...(d.description ? { description: d.description } : {}) };\n}\n\n// The display size (after the tkhd rotation).\nfunction displaySize(d) {\n  return d.rotation % 180 ? { width: d.codedHeight, height: d.codedWidth } : { width: d.codedWidth, height: d.codedHeight };\n}\n\nconst median = (a) => {\n  if (!a.length) return 0;\n  const s = a.slice().sort((x, y) => x - y);\n  return s[s.length >> 1];\n};\n\n// Returns { frames: [{ us, dur, sample }], fps, durationUs, keys, indexOfUs: Map }.\n// sample: the decode index of the frame's sample. dur: microseconds to the next frame.\nfunction buildTimeline(d) {\n  const S = d.samples;\n  const order = [];\n  for (let i = 0; i < S.length; i++) if (S[i].us >= 0) order.push(i);\n  order.sort((a, b) => S[a].us - S[b].us);\n  const frames = order.map((i) => ({ us: S[i].us, dur: 0, sample: i }));\n  for (let t = 0; t + 1 < frames.length; t++) frames[t].dur = frames[t + 1].us - frames[t].us;\n  const med = median(frames.slice(0, -1).map((f) => f.dur).filter((x) => x > 0));\n  if (frames.length) {\n    const last = frames[frames.length - 1];\n    const s = S[last.sample];\n    last.dur = s.duration && d.timescale ? Math.round((s.duration * 1e6) / d.timescale) : med || 33333;\n  }\n  const fps = med ? 1e6 / med : frames.length ? 1e6 / frames[0].dur : 30;\n  const keys = [];\n  for (let i = 0; i < S.length; i++) if (S[i].key) keys.push(i);\n  const indexOfUs = new Map(frames.map((f, t) => [f.us, t]));\n  const end = frames.length ? frames[frames.length - 1].us + frames[frames.length - 1].dur : 0;\n  return { frames, fps, durationUs: end, keys, indexOfUs, samples: S };\n}\n\n// The decode index of the sync sample to start from, to show frame t: the last sync sample at or\n// before the frame's sample (decode order), with a display time at or before the frame.\nfunction keyBefore(tl, t) {\n  const f = tl.frames[t];\n  const K = tl.keys;\n  let lo = 0, hi = K.length - 1, k = 0;\n  while (lo <= hi) {\n    const m = (lo + hi) >> 1;\n    if (K[m] <= f.sample) {\n      k = m;\n      lo = m + 1;\n    } else hi = m - 1;\n  }\n  while (k > 0 && tl.samples[K[k]].us > f.us) k--;\n  return K[k];\n}\n\n// The decode work for a sorted list of frame indices: [{ start, end, frames }]. Each segment decodes\n// the samples start..end (decode order, inclusive) from a sync sample, then flushes. A frame joins the\n// current segment when the decode of that segment gets to its sync sample without a jump.\nfunction planSegments(tl, indices) {\n  const out = [];\n  let cur = null;\n  for (const t of indices) {\n    const k = keyBefore(tl, t);\n    const e = tl.frames[t].sample;\n    if (cur && k >= cur.start && k <= cur.end + 1) {\n      cur.end = Math.max(cur.end, e);\n      cur.frames.push(t);\n    } else {\n      cur = { start: k, end: e, frames: [t] };\n      out.push(cur);\n    }\n  }\n  return out;\n}\n\n// The frame index at a time (microseconds): the last frame that starts at or before it.\nfunction frameAtUs(tl, us) {\n  const F = tl.frames;\n  let lo = 0, hi = F.length - 1, r = 0;\n  while (lo <= hi) {\n    const m = (lo + hi) >> 1;\n    if (F[m].us <= us) {\n      r = m;\n      lo = m + 1;\n    } else hi = m - 1;\n  }\n  return r;\n}\n\n// Evenly spaced frame indices for the timeline thumbnails (one for each 2 %: count 50).\nfunction thumbIndices(n, count = 50) {\n  const out = [];\n  for (let i = 0; i < count && n; i++) {\n    const t = Math.min(n - 1, Math.floor(((i + 0.5) * n) / count));\n    if (!out.length || out[out.length - 1] !== t) out.push(t);\n  }\n  return out;\n}\n\n// Is this sync sample a clean start for a decoder (H.264 IDR; HEVC IDR or BLA)? An open-GOP I-frame\n// (H.264 recovery point, HEVC CRA) is a sync sample in the file, but Chrome's decoder does not start\n// there. data: the first bytes of the sample (length-prefixed NAL units). Other codecs: true.\nfunction isCleanStart(d, data) {\n  const avc = /^avc[13]\\./.test(d.codec), hevc = /^(hvc1|hev1)\\./.test(d.codec);\n  if (!(avc || hevc) || !d.description) return true;\n  const len = avc ? (d.description[4] & 3) + 1 : (d.description[21] & 3) + 1;\n  for (let o = 0; o + len < data.length;) {\n    let n = 0;\n    for (let i = 0; i < len; i++) n = n * 256 + data[o + i];\n    const h = data[o + len];\n    if (avc) {\n      const t = h & 31;\n      if (t === 5) return true;\n      if (t === 1) return false;\n    } else {\n      const t = (h >> 1) & 63;\n      if (t >= 16 && t <= 20) return true;\n      if (t < 16 || t === 21) return false;\n    }\n    o += len + n;\n  }\n  return false;\n}\n\nreturn { decoderConfig, displaySize, buildTimeline, keyBefore, planSegments, frameAtUs, thumbIndices, isCleanStart };\n})();\n\n// ---- io/decode-worker.js\nconst {  } = (() => {\n// Decode worker (plan §5.1, §6.2). Frame-exact decode of an MP4/MOV file with a VideoDecoder, not in\n// real time. Patterns from neomosh src/app/worker.js (file source): read runs of samples, feed the\n// decoder a few samples ahead, back-pressure on the frames that the page has not given back.\n//\n// Messages in:\n//   { cmd: 'open', file, keys }                 -> 'info' or 'error'. keys (optional): the clean sync\n//                                                  samples from the 'info' of another worker for the\n//                                                  same file (then the file is not scanned again)\n//   { cmd: 'seek', job, t, from }               -> 'frame' for each frame from .. t, then 'done'\n//   { cmd: 'play', job, from, to }              -> 'frame' for each frame from .. to, then 'done'\n//   { cmd: 'thumbs', job, count, width }        -> 'thumb' { i, index, bitmap } for each, then 'done'\n//   { cmd: 'list', job, indices }               -> 'frame' for each frame of the list, then 'done'\n//   { cmd: 'stop' }                             cancel the job in progress\n//   { cmd: 'ack' }                              the page closed one frame\n// 'frame': { job, index, frame (VideoFrame, transferred), warm (true: before t) }.\n\n\n\n\nconst MAX_IN_FLIGHT = 4; // frames at the page, not given back yet\nconst MAX_QUEUE = 6; // samples in the decoder queue\n\nconst W = {\n  file: null,\n  d: null,\n  tl: null,\n  job: 0, // the job that runs; a new job or 'stop' changes it\n  inFlight: 0,\n  wake: null,\n};\n\nconst poke = () => {\n  if (W.wake) {\n    const f = W.wake;\n    W.wake = null;\n    f();\n  }\n};\nconst wait = () => new Promise((r) => (W.wake = r));\nconst post = (m, tr) => self.postMessage(m, tr || []);\n\n// Read the samples in runs of up to 4 MB that are next to each other in the file.\nclass SampleReader {\n  constructor(file, samples) {\n    this.file = file;\n    this.S = samples;\n    this.buf = null;\n    this.from = 0;\n    this.to = 0;\n  }\n\n  async read(i) {\n    const s = this.S[i];\n    if (!this.buf || s.offset < this.from || s.offset + s.size > this.to) {\n      let to = s.offset + s.size;\n      for (let j = i + 1; j < this.S.length && this.S[j].offset === to && to - s.offset < 4194304; j++) to += this.S[j].size;\n      this.buf = new Uint8Array(await this.file.slice(s.offset, to).arrayBuffer());\n      this.from = s.offset;\n      this.to = to;\n    }\n    return this.buf.subarray(s.offset - this.from, s.offset - this.from + s.size);\n  }\n}\n\n// Decode the segments of a job. want(index) -> true for a frame to give to deliver(index, frame).\n// deliver can wait (back-pressure). Returns false when the job was cancelled.\nasync function decodeSegments(job, segments, want, deliver) {\n  const S = W.tl.samples;\n  const reader = new SampleReader(W.file, S);\n  const out = [];\n  let failure = null;\n  const dec = new VideoDecoder({\n    output: (f) => {\n      out.push(f);\n      poke();\n    },\n    error: (e) => {\n      failure = e;\n      poke();\n    },\n  });\n  dec.addEventListener('dequeue', poke);\n  const live = () => job === W.job;\n  // Give or close the decoded frames.\n  const drain = async () => {\n    while (out.length) {\n      const f = out.shift();\n      const t = W.tl.indexOfUs.get(f.timestamp);\n      if (t === undefined || !want(t) || !live()) {\n        f.close();\n        continue;\n      }\n      await deliver(t, f);\n    }\n  };\n  try {\n    for (const seg of segments) {\n      if (!live()) return false;\n      if (dec.state !== 'configured') dec.configure(decoderConfig(W.d));\n      for (let i = seg.start; i <= seg.end; i++) {\n        while (live() && !failure && (dec.decodeQueueSize >= MAX_QUEUE || out.length)) {\n          if (out.length) await drain();\n          else await wait();\n        }\n        if (failure) throw failure;\n        if (!live()) return false;\n        const s = S[i];\n        dec.decode(new EncodedVideoChunk({ type: i === seg.start ? 'key' : 'delta', timestamp: s.us, data: await reader.read(i) }));\n      }\n      // The flush gives the last frames (in display order); then the next segment starts at a sync sample.\n      const flushed = dec.flush().then(() => 'ok', (e) => e);\n      let done = false;\n      flushed.then(() => {\n        done = true;\n        poke();\n      });\n      while (!done && live() && !failure) {\n        if (out.length) await drain();\n        else await wait();\n      }\n      if (!live()) return false;\n      const r = await flushed;\n      if (r !== 'ok') throw r;\n      await drain();\n      if (failure) throw failure;\n    }\n    return live();\n  } finally {\n    for (const f of out) f.close();\n    try {\n      dec.close();\n    } catch { /* closed */ }\n  }\n}\n\n// Wait until the page has fewer than MAX_IN_FLIGHT frames, then send the frame.\nasync function sendFrame(job, t, frame, warm) {\n  while (W.inFlight >= MAX_IN_FLIGHT && job === W.job) await wait();\n  if (job !== W.job) {\n    frame.close();\n    return;\n  }\n  W.inFlight++;\n  post({ cmd: 'frame', job, index: t, warm, frame }, [frame]);\n}\n\n// The clean sync samples (IDR): seeks start only there. The first sample is always one. The head of\n// each sync sample is read (H.264 / HEVC only), some reads at a time: one read after the other is\n// slow for a long file, most of all through the content provider of a picked file on Android.\nasync function cleanKeys(file, d, keys) {\n  if (!/^(avc[13]|hvc1|hev1)\\./.test(d.codec) || !d.description) return keys.slice();\n  const clean = [];\n  const BATCH = 16;\n  for (let i = 0; i < keys.length; i += BATCH) {\n    const part = keys.slice(i, i + BATCH);\n    const heads = await Promise.all(part.map((k) => {\n      const s = d.samples[k];\n      return file.slice(s.offset, s.offset + Math.min(s.size, 4096)).arrayBuffer();\n    }));\n    heads.forEach((h, j) => {\n      if (!clean.length || isCleanStart(d, new Uint8Array(h))) clean.push(part[j]);\n    });\n  }\n  return clean;\n}\n\nasync function open(file, hint) {\n  const d = await demuxMp4(file);\n  if (!d) return post({ cmd: 'error', message: 'Only MP4 and MOV files are supported.' });\n  let ok = false;\n  try {\n    ok = typeof VideoDecoder === 'function' && (await VideoDecoder.isConfigSupported(decoderConfig(d))).supported;\n  } catch {\n    ok = false;\n  }\n  if (!ok) return post({ cmd: 'error', message: `This browser cannot decode this file (codec: ${d.codec}).` });\n  const tl = buildTimeline(d);\n  if (!tl.frames.length) return post({ cmd: 'error', message: 'This file has no video frames.' });\n  // A hint from another worker of the same file is used when it fits this file (sync samples only).\n  const isKey = new Set(tl.keys);\n  const hinted = Array.isArray(hint) && hint.length && hint[0] === tl.keys[0] && hint.every((k) => isKey.has(k));\n  const clean = hinted ? hint.slice() : await cleanKeys(file, d, tl.keys);\n  tl.keys = clean;\n  const cleanSet = new Set(clean);\n  Object.assign(W, { file, d, tl });\n  const a = d.audio;\n  post({\n    cmd: 'info',\n    name: file.name,\n    codec: d.codec,\n    rotation: d.rotation,\n    codedWidth: d.codedWidth,\n    codedHeight: d.codedHeight,\n    ...displaySize(d),\n    fps: tl.fps,\n    durationUs: tl.durationUs,\n    times: tl.frames.map((f) => f.us),\n    frameSamples: tl.frames.map((f) => f.sample),\n    keyFrames: tl.frames.map((f, t) => (cleanSet.has(f.sample) ? t : -1)).filter((t) => t >= 0),\n    cleanKeys: clean,\n    audio: a ? { codec: a.codec, channels: a.channels, sampleRate: a.sampleRate, durationUs: a.durationUs } : null,\n  });\n}\n\nasync function seek(m) {\n  const n = W.tl.frames.length;\n  const t = Math.max(0, Math.min(n - 1, m.t));\n  // ranges (perfect loop): [[a, b], ...] of frames to decode (else from .. t). allWarm: no frame\n  // is the one to show (the page renders it after 'done').\n  const ranges = m.ranges || [[Math.max(0, Math.min(t, m.from ?? t - (m.depth || 0))), t]];\n  const set = new Set();\n  for (const [a, b] of ranges) for (let i = Math.max(0, a); i <= Math.min(n - 1, b); i++) set.add(i);\n  const list = [...set].sort((x, y) => x - y);\n  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (i) => set.has(i), (i, f) => sendFrame(m.job, i, f, m.allWarm || i !== t));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\nasync function play(m) {\n  const n = W.tl.frames.length;\n  const from = Math.max(0, Math.min(n - 1, m.from));\n  const to = Math.max(from, Math.min(n - 1, m.to ?? n - 1));\n  // One segment: from the sync sample of 'from' to the last sample that 'to' needs.\n  const seg = planSegments(W.tl, [from])[0];\n  let end = seg.end;\n  for (let i = from; i <= to; i++) end = Math.max(end, W.tl.frames[i].sample);\n  seg.end = end;\n  const ok = await decodeSegments(m.job, [seg], (i) => i >= from && i <= to, (i, f) => sendFrame(m.job, i, f, false));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\nasync function thumbs(m) {\n  if (typeof OffscreenCanvas === 'undefined') return post({ cmd: 'done', job: m.job });\n  const list = thumbIndices(W.tl.frames.length, m.count || 50);\n  const { width: dw, height: dh } = displaySize(W.d);\n  const w = m.width || 160;\n  const h = Math.max(1, Math.round((w * dh) / dw));\n  const canvas = new OffscreenCanvas(w, h);\n  const ctx = canvas.getContext('2d');\n  const pos = new Map(list.map((t, i) => [t, i]));\n  const ok = await decodeSegments(m.job, planSegments(W.tl, list), (t) => pos.has(t), async (t, f) => {\n    const c = turnedCrop(W.d.rotation, f.displayWidth, f.displayHeight, { sx: 0, sy: 0, sw: W.d.rotation % 180 ? f.displayHeight : f.displayWidth, sh: W.d.rotation % 180 ? f.displayWidth : f.displayHeight }, w, h);\n    ctx.setTransform(...c.m);\n    ctx.drawImage(f, c.sx, c.sy, c.sw, c.sh, 0, 0, c.dw, c.dh);\n    f.close();\n    const bitmap = canvas.transferToImageBitmap();\n    post({ cmd: 'thumb', job: m.job, i: pos.get(t), index: t, bitmap }, [bitmap]);\n  });\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\n// Some frames (any order of indices): 'frame' for each one (for the clean plate).\nasync function list(m) {\n  const n = W.tl.frames.length;\n  const want = [...new Set(m.indices)].filter((t) => t >= 0 && t < n).sort((a, b) => a - b);\n  const set = new Set(want);\n  const ok = await decodeSegments(m.job, planSegments(W.tl, want), (t) => set.has(t), (t, f) => sendFrame(m.job, t, f, false));\n  if (ok) post({ cmd: 'done', job: m.job });\n}\n\n// The jobs run one at a time. A new job cancels the one in progress (plan §6.2).\nlet chain = Promise.resolve();\nconst runJob = (fn, m) => {\n  W.job = m.job;\n  poke();\n  chain = chain.then(() => (m.job === W.job ? fn(m) : null)).catch((e) => {\n    if (m.job === W.job) post({ cmd: 'error', job: m.job, message: String(e && e.message ? e.message : e) });\n  });\n};\n\nself.onmessage = (e) => {\n  const m = e.data;\n  if (m.cmd === 'ack') {\n    W.inFlight = Math.max(0, W.inFlight - 1);\n    poke();\n  } else if (m.cmd === 'stop') {\n    W.job = -1;\n    poke();\n  } else if (m.cmd === 'open') {\n    W.job = -1;\n    poke();\n    chain = chain.then(() => open(m.file, m.keys)).catch((err) => post({ cmd: 'error', message: String(err && err.message ? err.message : err) }));\n  } else if (m.cmd === 'seek') runJob(seek, m);\n  else if (m.cmd === 'play') runJob(play, m);\n  else if (m.cmd === 'thumbs') runJob(thumbs, m);\n  else if (m.cmd === 'list') runJob(list, m);\n};\n\nreturn {  };\n})();\n";
@@ -7563,6 +7838,8 @@ const MOSH_WORKER = "// ---- mosh/codec/bitio.js\nconst { BitWriter, extractBits
 let player, preview, timeline, gpu, inspector, analysis, handles, tools, exportDialog, gpuCaps, platform;
 let exporter = null; // the export that runs
 let mosh = null; // Mode 3, Datamosh
+const sound = new PreviewAudio(); // the sound of the preview playback
+const MUTE_KEY = 'neofx.muted';
 let layout = null;
 const history = new History();
 const locks = new Set(); // the sections that Randomize keeps
@@ -7593,6 +7870,30 @@ const quiet = (p) => {
 // known from the player's worker, so the new worker does not scan the file again.
 const fileKeys = (file) => (file === currentFile && player && player.info ? player.info.cleanKeys : undefined);
 const openMsg = (file) => ({ cmd: 'open', file, keys: fileKeys(file) });
+
+// The mute button: on / off, and why there is no sound (no audio track, no decoder).
+function muteButton() {
+  const b = $('muteBtn');
+  const has = sound.available;
+  b.disabled = !has;
+  const off = sound.muted || !has;
+  b.setAttribute('aria-pressed', String(off));
+  b.setAttribute('aria-label', has ? (sound.muted ? 'Unmute' : 'Mute') : 'No sound');
+  b.title = has ? (sound.muted ? 'Sound off (touch to turn it on)' : 'Sound on (touch to mute)') : sound.reason || 'No sound';
+}
+
+function setMuted(m) {
+  sound.setMuted(m);
+  try {
+    localStorage.setItem(MUTE_KEY, m ? '1' : '0');
+  } catch { /* no storage */ }
+  // Unmuted while the video plays: the sound starts at the playhead.
+  if (!m && player && player.playing && player.clock) {
+    const now = performance.now();
+    sound.start(player.clock.us + (now - player.clock.wall) * 1000, now);
+  }
+  muteButton();
+}
 
 // The state of the page ('start', 'open', 'unsupported'). The example animations of the start
 // screen run only there.
@@ -8172,6 +8473,8 @@ async function openFile(file) {
     gpuState.maskFile = gpuState.plateFile = null;
     currentFile = file;
     let info;
+    sound.close();
+    muteButton();
     try {
       info = await player.open(file);
     } catch (e) {
@@ -8181,6 +8484,8 @@ async function openFile(file) {
       return;
     }
     setLoading(`Preparing ${file.name}…`);
+    // The sound: its track is read in the background (the picture does not wait for it).
+    sound.open(file).then(() => file === currentFile && muteButton());
     setState('open');
     $('view').hidden = false;
     modeChanged();
@@ -9012,6 +9317,9 @@ async function start() {
     onThumb: (i, index, bitmap) => timeline.addThumb(i, index, bitmap),
     onError: (msg) => showMessage(msg),
     onProgress: setProgress,
+    onPlay: (us) => sound.prepare(us),
+    onClock: (c) => sound.start(c.us, c.wall),
+    onStop: () => sound.stop(),
   });
   timeline = new Timeline($('transport'), player);
   mosh = new Mosh({
@@ -9142,6 +9450,17 @@ async function start() {
     cancel: () => exporter && exporter.cancel(),
   });
   $('exportBtn').addEventListener('click', openExport);
+  try {
+    sound.setMuted(localStorage.getItem(MUTE_KEY) === '1');
+  } catch { /* no storage */ }
+  $('muteBtn').addEventListener('click', () => setMuted(!sound.muted));
+  // The audio context starts in a user gesture (iOS Safari plays no sound from one made later).
+  const unlock = () => {
+    if (sound.available && !sound.muted) sound.ensureContext();
+  };
+  document.addEventListener('pointerdown', unlock, true);
+  document.addEventListener('keydown', unlock, true);
+  muteButton();
   modeChanged();
   $('benchClose').addEventListener('click', () => $('benchDialog').close());
   $('benchCopy').addEventListener('click', () => {
@@ -9167,7 +9486,7 @@ async function start() {
       $('benchClose').disabled = false;
     }
   });
-  Object.assign(window.neofx, { mosh, toggleOverlay, undoStroke, cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  Object.assign(window.neofx, { sound, setMuted, mosh, toggleOverlay, undoStroke, cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   for (const id of ['fileInput', 'maskFileInput', 'mapFileInput']) watchPicker($(id));
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));

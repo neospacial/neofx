@@ -19,6 +19,7 @@
     <button id="redoBtn" class="wide" type="button" disabled aria-label="Redo" title="Redo (Shift+Ctrl+Z)">↷</button>
     <span class="spacer"></span>
     <span id="status" aria-live="polite"></span>
+    <button id="muteBtn" type="button" aria-label="Mute" aria-pressed="false" title="Sound on (touch to mute)" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path class="spk" d="M4 9h4l5-4v14l-5-4H4z"/><path class="on" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path class="off" d="M16.5 9.5l5 5M21.5 9.5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
     <button id="menuBtn" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false">⋯</button>
     <button id="exportBtn" type="button" disabled>Export</button>
     <div id="menu" role="menu" hidden>
@@ -107,6 +108,6 @@
   <input id="maskFileInput" type="file" accept="video/*" multiple hidden>
   <input id="fileInput" type="file" accept="video/*" multiple hidden>
 </div>
-<!--@modules:io/demux.js,io/mp4.js,io/encoder-config.js,maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/mosh.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/curve.js,app/random.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/export.js,app/ui/exportdialog.js,app/history.js,app/presets.js,app/ui/layout.js,app/ui/startscreen.js,app/bench.js,app/main.js-->
+<!--@modules:io/demux.js,io/mp4.js,io/encoder-config.js,maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/audio.js,app/mosh.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/curve.js,app/random.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/export.js,app/ui/exportdialog.js,app/history.js,app/presets.js,app/ui/layout.js,app/ui/startscreen.js,app/bench.js,app/main.js-->
 </body>
 </html>
