@@ -86,7 +86,10 @@ export class Player {
           reject(new Error(m.message));
         }
       };
-      this.wk.onerror = (e) => reject(new Error(e.message || 'Decode worker failed.'));
+      this.wk.onerror = (e) => {
+        this.close();
+        reject(new Error(e.message || 'Decode worker failed.'));
+      };
       this.wk.postMessage({ cmd: 'open', file });
     });
   }
@@ -116,17 +119,21 @@ export class Player {
   }
 
   startThumbs(file) {
-    this.thumbWk = makeWorker(this.src);
-    this.thumbWk.onmessage = (e) => {
+    const wk = (this.thumbWk = makeWorker(this.src));
+    wk.onmessage = (e) => {
       const m = e.data;
-      if (m.cmd === 'info') this.thumbWk.postMessage({ cmd: 'thumbs', job: 1, count: 50, width: 160 });
-      else if (m.cmd === 'thumb' && this.opts.onThumb) this.opts.onThumb(m.i, m.index, m.bitmap);
-      else if (m.cmd === 'done' || m.cmd === 'error') {
-        this.thumbWk.terminate();
+      if (wk !== this.thumbWk) return m.bitmap && m.bitmap.close(); // an old file
+      if (m.cmd === 'info') wk.postMessage({ cmd: 'thumbs', job: 1, count: 50, width: 160 });
+      else if (m.cmd === 'thumb') {
+        if (this.opts.onThumb) this.opts.onThumb(m.i, m.index, m.bitmap);
+        else m.bitmap.close();
+      } else if (m.cmd === 'done' || m.cmd === 'error') {
+        wk.terminate();
         this.thumbWk = null;
       }
     };
-    this.thumbWk.postMessage({ cmd: 'open', file });
+    // The clean sync samples are known from the first worker: no second scan of the file.
+    wk.postMessage({ cmd: 'open', file, keys: this.info.cleanKeys });
   }
 
   range() {
@@ -186,7 +193,7 @@ export class Player {
         this.current = p.t;
         this.vcur = v;
         this.finishSeek();
-      }, (e) => this.fail(e.message));
+      }, (e) => this.seekFailed(job, e));
       return;
     }
     this.warm = { from, total: v - from + 1, done: 0 };
@@ -204,6 +211,13 @@ export class Player {
     this.jobPass = () => pass;
     this.renderAfter = null;
     this.wk.postMessage({ cmd: 'seek', job: ++this.job, t: p.t, from: from - (W ? pass * W.L : 0) });
+  }
+
+  // The render of a seek failed (the GPU was reset): the seek ends, so the next one can run (a
+  // seek that stays busy would block every later seek, also the one that restores the preview).
+  seekFailed(job, e) {
+    this.fail(e.message);
+    if (job === this.job) this.finishSeek();
   }
 
   finishSeek() {
@@ -253,6 +267,7 @@ export class Player {
     this.clock = null;
     this.log = [];
     this.showFrom = from;
+    this.decodeDone = false;
     this.stats = { ...this.stats, shown: 0, dropped: 0, t0: performance.now(), fps: 0 };
     this.playTo = b;
     this.stats.decodeJobs++;
@@ -315,7 +330,10 @@ export class Player {
       this.deliver(m.index, m.frame, true);
       this.state();
     } else if (m.cmd === 'done') {
-      if (m.job !== this.job || this.playing) return;
+      if (m.job !== this.job) return;
+      // Playback: the decoder gave all that it has. The tick ends the playback when the queue is
+      // empty, also when the last frames did not come (a damaged end of the file).
+      if (this.playing) return void (this.decodeDone = true);
       const ra = this.renderAfter;
       if (ra) {
         // A perfect-loop seek: all the frames are in the store; now frame t.
@@ -326,7 +344,7 @@ export class Player {
           this.current = ra.t;
           this.vcur = ra.v;
           this.finishSeek();
-        }, (e) => this.fail(e.message));
+        }, (e) => this.seekFailed(job, e));
         return;
       }
       this.finishSeek();
@@ -369,7 +387,7 @@ export class Player {
         this.state();
       }
     }
-    if (this.current >= this.playTo && !this.queue.length) {
+    if ((this.current >= this.playTo || this.decodeDone) && !this.queue.length) {
       if (this.loop) {
         this.playing = false;
         this.current = -1;

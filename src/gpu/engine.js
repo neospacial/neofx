@@ -85,6 +85,9 @@ export class Engine {
     this.last = { index: -1, delay: undefined };
     this.lost = false;
     this.depthCap = Infinity; // perfect loop: the loop length − 1
+    this.one = new Int32Array(1); // scratch arrays (no new array for each frame)
+    this.tintFlat = new Float32Array(12);
+    this.mapJson = { map: null, text: '' };
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
@@ -110,7 +113,6 @@ export class Engine {
       return { cmd: 'rendered', index: m.index };
     }
     if (m.cmd === 'settings') {
-      const old = this.settings;
       this.settings = m.settings;
       if (this.n && this.last.index >= 0) this.render(this.last.index, this.last.delay);
       return { cmd: 'rendered', index: this.last.index };
@@ -331,7 +333,8 @@ export class Engine {
     this.layerFrame[layer] = index;
     if (this.settings && isDynamic(this.settings.map)) this.mapKey = ''; // self / motion read the store
     gl.bindTexture(gl.TEXTURE_2D, this.layersTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));
+    this.one[0] = index;
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, layer, 0, 1, 1, gl.RED_INTEGER, gl.INT, this.one);
     if (this.edgeActive()) {
       this.edge.update();
       this.edge.addFrame(index, { Y: this.storeY, C: this.storeC, layer });
@@ -426,7 +429,13 @@ export class Engine {
   updateMap(t) {
     if (!this.settings) return;
     const map = this.settings.map;
-    const key = JSON.stringify(map) + (isDynamic(map) ? `@${t}` : '') + (usesMask(map) ? this.mask.key : '');
+    // The text of the map settings is made once for each settings object (not for each frame).
+    const mj = this.mapJson;
+    if (mj.map !== map) {
+      mj.map = map;
+      mj.text = JSON.stringify(map);
+    }
+    const key = mj.text + (isDynamic(map) ? `@${t}` : '') + (usesMask(map) ? this.mask.key : '');
     if (key === this.mapKey) return;
     this.mapgen.run(map, t, this.mapTex, this.w, this.h);
     this.mapKey = key;
@@ -545,7 +554,7 @@ export class Engine {
     const tint = L.tintColors.slice(0, 4);
     gl.uniform1i(p.u.u_tintOn, L.tint && tint.length >= 2 ? 1 : 0);
     gl.uniform1i(p.u.u_tintN, Math.max(2, tint.length));
-    const flat = new Float32Array(12);
+    const flat = this.tintFlat.fill(0);
     tint.forEach((h, i) => flat.set(hexRgb(h), i * 3));
     gl.uniform3fv(p.u['u_tint[0]'], flat);
     gl.uniform1f(p.u.u_tintAmount, L.tintAmount);

@@ -278,6 +278,7 @@ export class Mask {
   beginImport(w, h, count) {
     const gl = this.gl;
     this.clearImport();
+    count = Math.max(1, Math.min(count, this.e.caps.maxLayers)); // the frames after it use the last layer
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
     gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.R8, w, h, count);
@@ -287,6 +288,7 @@ export class Mask {
   }
 
   importFrame(i, frame, rotation) {
+    if (!this.imp || i >= this.imp.layers) return;
     this.e.lumaInto(this.imp.tex, i, this.imp.w, this.imp.h, frame, rotation);
     this.imp.count = Math.max(this.imp.count, i + 1);
     this.version++;
@@ -351,7 +353,13 @@ export class Mask {
   update(t, src) {
     const s = this.e.settings;
     const C = s.cutout, Sb = s.subject;
-    const base = JSON.stringify([C, Sb, this.version, this.e.w, this.e.h]);
+    // The text of the settings is made again only when they (or the plate, matte, import, size)
+    // change, not for each frame. (The Split view keeps the cutout and subject objects.)
+    const bm = this.baseMemo || (this.baseMemo = {});
+    if (bm.C !== C || bm.Sb !== Sb || bm.version !== this.version || bm.w !== this.e.w || bm.h !== this.e.h) {
+      Object.assign(bm, { C, Sb, version: this.version, w: this.e.w, h: this.e.h, text: JSON.stringify([C, Sb, this.version, this.e.w, this.e.h]) });
+    }
+    const base = bm.text;
     const key = `${base}@${t}${src ? 'A' : ''}`;
     if (key === this.key) return false;
     const gl = this.gl;

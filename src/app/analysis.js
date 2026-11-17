@@ -5,7 +5,8 @@
 import { makeWorker } from './player.js';
 
 export class Analysis {
-  // opts: { onProgress(fraction | null), onRows() (some rows are new), onDone(key) }
+  // opts: { onProgress(fraction | null), onRows() (some rows are new), onDone(key),
+  //         onError(message) (optional: the pass stopped) }
   constructor(workerSrc, gpu, opts) {
     this.src = workerSrc;
     this.gpu = gpu;
@@ -27,13 +28,21 @@ export class Analysis {
     this.opts.onProgress(null);
   }
 
-  start(file, count, key) {
+  // keys (optional): the clean sync samples of the file (the 'info' of the player's worker).
+  start(file, count, key, keys) {
     this.stop();
     this.key = key;
     this.doneKey = '';
     this.progress = 0;
     const wk = (this.wk = makeWorker(this.src));
     let done = 0, last = 0;
+    // The pass failed: stop it (only when it is still the pass that runs).
+    const fail = (message) => {
+      if (wk !== this.wk) return;
+      this.stop();
+      if (this.opts.onError) this.opts.onError(message);
+    };
+    wk.onerror = (e) => fail(e.message || 'Decode worker failed.');
     wk.onmessage = async (e) => {
       const m = e.data;
       if (wk !== this.wk) return m.frame && m.frame.close();
@@ -41,8 +50,8 @@ export class Analysis {
       else if (m.cmd === 'frame') {
         try {
           await this.gpu.call({ cmd: 'slitFrame', index: m.index, frame: m.frame }, [m.frame]);
-        } catch {
-          return this.stop();
+        } catch (err) {
+          return fail(err.message);
         }
         if (wk !== this.wk) return;
         wk.postMessage({ cmd: 'ack' });
@@ -54,7 +63,11 @@ export class Analysis {
           this.opts.onRows();
         }
       } else if (m.cmd === 'done') {
-        await this.gpu.call({ cmd: 'slitStatus' }); // the replies come in order: all rows are in
+        try {
+          await this.gpu.call({ cmd: 'slitStatus' }); // the replies come in order: all rows are in
+        } catch (err) {
+          return fail(err.message);
+        }
         if (wk !== this.wk) return;
         wk.terminate();
         this.wk = null;
@@ -63,8 +76,8 @@ export class Analysis {
         this.opts.onProgress(null);
         this.opts.onRows();
         this.opts.onDone(key);
-      } else if (m.cmd === 'error') this.stop();
+      } else if (m.cmd === 'error') fail(m.message);
     };
-    wk.postMessage({ cmd: 'open', file });
+    wk.postMessage({ cmd: 'open', file, keys });
   }
 }

@@ -131,7 +131,8 @@ export class Slit {
     this.rowFrame[row] = index;
     if (upload) {
       gl.bindTexture(gl.TEXTURE_2D, this.rowsTex);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, row, 0, 1, 1, gl.RED_INTEGER, gl.INT, new Int32Array([index]));
+      e.one[0] = index;
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, row, 0, 1, 1, gl.RED_INTEGER, gl.INT, e.one);
     }
   }
 

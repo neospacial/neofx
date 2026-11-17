@@ -52,6 +52,7 @@ export async function runBench(app, opts = {}) {
     const r = await app.exportVideo({ width: w, height: h, quality: 'high', keyint: 2, range: [0, frames - 1], audio: false, hardware: 'hardware', name: 'bench.mp4' }, (p) => {
       if (p.phase === 'encode' && p.done === 1) first = performance.now();
     });
+    if (r.release) r.release(); // the file is not kept
     const sec = (performance.now() - (first || t0)) / 1000;
     res.export = { width: r.width, height: r.height, frames: r.frames, fps: (r.frames - 1) / Math.max(sec, 1e-3), codec: r.config.codec, hardware: r.config.hardwareAcceleration };
   } finally {

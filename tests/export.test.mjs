@@ -30,6 +30,11 @@ async function doExport(page, opts, name) {
     try {
       const r = await window.neofx.exportVideo({ quality: 'veryhigh', keyint: 2, audio: true, hardware: 'hardware', name: 'x.mp4', ...opts });
       const buf = new Uint8Array(await r.blob.arrayBuffer());
+      // The file in the browser storage (OPFS) is given back, as the export dialog does on close.
+      if (r.release) {
+        r.release();
+        await new Promise((res) => setTimeout(res, 150));
+      }
       let s = '';
       for (let i = 0; i < buf.length; i += 32768) s += String.fromCharCode(...buf.subarray(i, i + 32768));
       return { b64: s, info: { size: r.size, frames: r.frames, codec: r.config.codec, width: r.width, height: r.height, opfs: r.opfs, audio: r.audio, type: r.blob.type, name: r.blob.name } };
@@ -358,6 +363,37 @@ export const tests = [
         assert(!small.error, small.error);
         assert(small.opfs, 'the file came from the OPFS');
         checkFile('160x120 (OPFS)', small.file, src, 0, 29, 160, 120, { audio: true });
+        // Old export files: removed, but not one that is in use (its lock is held).
+        const st = await page.evaluate(async () => {
+          const dir = await navigator.storage.getDirectory();
+          const put = async (name) => {
+            const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
+            await w.write(new Uint8Array(1000));
+            await w.close();
+          };
+          await put('neofx-export.mp4');
+          await put('neofx-export-old1.mp4');
+          await put('neofx-export-used.mp4');
+          await put('other.bin');
+          let free;
+          const held = new Promise((res) => (free = res));
+          await new Promise((got) => navigator.locks.request('neofx-export-used.mp4', () => (got(), held)));
+          await window.neofx.cleanExportStorage();
+          const names = async () => {
+            const out = [];
+            for await (const n of dir.keys()) out.push(n);
+            return out.sort();
+          };
+          const a = await names();
+          free();
+          await new Promise((res) => setTimeout(res, 50));
+          await window.neofx.cleanExportStorage();
+          const b = await names();
+          await dir.removeEntry('other.bin');
+          return { a, b };
+        });
+        assert(st.a.join() === 'neofx-export-used.mp4,other.bin', `old files removed, the used one stays: ${st.a}`);
+        assert(st.b.join() === 'other.bin', `then it is removed too: ${st.b}`);
         // Cancel after some frames: the export stops, the preview works again.
         const c = await page.evaluate(async () => {
           const N = window.neofx;

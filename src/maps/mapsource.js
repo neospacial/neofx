@@ -25,6 +25,15 @@ export function videoMapSize(w, h, n, short, maxLayers, budget = VIDEO_MAP_BUDGE
   return { width, height, count };
 }
 
+// The size and frame count for an imported mask video of n frames at the working size w x h: all
+// the frames (up to the texture layer limit) in the budget. A long video gets a smaller mask (a
+// mask is soft; the GPU scales it), not fewer frames.
+export function maskVideoSize(w, h, n, maxLayers, budget = VIDEO_MAP_BUDGET) {
+  const count = Math.max(1, Math.min(n, maxLayers));
+  const s = Math.min(1, Math.sqrt(budget / (w * h * count)));
+  return { width: Math.max(2, Math.round(w * s)), height: Math.max(2, Math.round(h * s)), count };
+}
+
 // opts: { workerSrc, short, maxLayers, onProgress(fraction) }. Resolves with { count, width, height, frames }.
 export function loadVideoMap(file, gpu, opts) {
   const wk = makeWorker(opts.workerSrc);
@@ -43,7 +52,11 @@ export function loadVideoMap(file, gpu, opts) {
         size = videoMapSize(m.width, m.height, m.times.length, opts.short, opts.maxLayers);
         size.frames = m.times.length;
         size.rotation = m.rotation;
-        await gpu.call({ cmd: 'mapVideoBegin', width: size.width, height: size.height, count: size.count });
+        try {
+          await gpu.call({ cmd: 'mapVideoBegin', width: size.width, height: size.height, count: size.count });
+        } catch (err) {
+          return fail(err.message);
+        }
         wk.postMessage({ cmd: 'play', job: 1, from: 0, to: size.count - 1 });
       } else if (m.cmd === 'frame') {
         try {
@@ -56,7 +69,11 @@ export function loadVideoMap(file, gpu, opts) {
         if (opts.onProgress) opts.onProgress(done / size.count);
       } else if (m.cmd === 'done') {
         wk.terminate();
-        await gpu.call({ cmd: 'caps' }); // the replies come in order: all frames are in
+        try {
+          await gpu.call({ cmd: 'caps' }); // the replies come in order: all frames are in
+        } catch (err) {
+          return reject(err);
+        }
         resolve(size);
       }
     };

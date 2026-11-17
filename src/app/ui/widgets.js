@@ -55,9 +55,11 @@ export function slider(opts) {
       row.classList.remove('fine');
       range.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
     };
     range.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   });
   range.addEventListener('input', () => {
     if (fine && fine.px !== undefined) {
