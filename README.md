@@ -81,7 +81,7 @@ Drag the line on the preview: the centre point moves it, the round handle turns 
 | Spread | −0.9 … 4: the trail gets wider (or narrower) with the distance | 0 |
 | Wave | 0 … 300 px, with a Wave length (px) and a Wave speed (px/frame: the wave moves away from the line) | 0 |
 
-With the Subject edge source, the same settings bend the trails about the frame centre (the subject on top does not move). The presets **Twister** and **Wavy ribbon** use them.
+With the Subject edge source, the same settings bend the trails about the frame centre (the subject on top does not move). The presets **Twisted scan** and **Wavy ribbon** use them.
 
 **Subject edge source** (needs the cutout): all the edge pixels of the subject are the source, so the source moves with the subject. Set the **Edge direction** (0° = to the right) with the round handle on the preview. In each row of the direction, the places where the subject ends (up to 4) emit a trail with the colour of the last subject pixel; the trail of one frame joins to the trail of the frame before when their edges are nearer than the **Join limit** (default 8 px). Where trails cross, the youngest pixel wins. Time Off: the edge colour repeats to the end of the row. The Max age of the edge source (default 120 frames, at most 512) is also limited by the GPU time of the trail (target 20 ms at the preview resolution); the inspector shows the limit.
 

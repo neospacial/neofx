@@ -35,7 +35,7 @@ export const PRESETS = [
   { id: 'accel', name: 'Accelerated scan', s: m2({ source: 'line', time: true, rateType: 'accelerate', rate: 0.5, rateEnd: 6, angle: 0, y: 0.6 }, { look: { tint: true, tintColors: ['#ffffff', '#3060ff'] } }) },
   { id: 'trail', name: 'Subject trail', s: m2({ source: 'edge', edgeAngle: 180, rate: 2, maxAgeEdge: 90 }, { cutout: { mode: 'scan' }, composite: { decay: 'linear' } }) },
   { id: 'afterimage', name: 'Afterimage', s: m2({ source: 'edge', edgeAngle: 90, rate: 1, maxAgeEdge: 60 }, { cutout: { mode: 'overlay' }, look: { tint: true, tintColors: ['#ff60c0', '#4020ff'] } }) },
-  { id: 'twister', name: 'Twister', s: m2({ source: 'line', time: true, rate: 2, angle: 90, x: 0.5, y: 0.5, warp: { twist: 140, drift: 0, spread: 0, wave: 0 } }) },
+  { id: 'twistscan', name: 'Twisted scan', s: m2({ source: 'line', time: true, rate: 2, angle: 90, x: 0.5, y: 0.5, warp: { twist: 140, drift: 0, spread: 0, wave: 0 } }) },
   { id: 'ribbon', name: 'Wavy ribbon', s: m2({ source: 'line', time: true, rate: 1.5, angle: 90, x: 0.25, warp: { twist: 0, drift: 0, spread: 0.6, wave: 36, waveLength: 220, waveSpeed: 3 } }) },
   // More looks.
   { id: 'kaleido', name: 'Kaleidoscope', s: m1('mirrored', { angle: 45 }, { maxDelay: 36 }, { map: { adjust: { tileX: 3, tileY: 3, mirrorTile: true } } }) },
