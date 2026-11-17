@@ -14,7 +14,9 @@ export function makeWorker(src) {
 //   consume(index, frame, show) -> Promise: put the frame into the store (show: also render it).
 //     It must send the frame on at once (the order of the calls is the store order).
 //   render(index) -> Promise: render a frame that is in the store.
-//   onState(player), onThumb(i, index, bitmap), onError(message), onProgress(fraction | null) }
+//   onState(player), onThumb(i, index, bitmap), onError(message), onProgress(fraction | null),
+//   onPlay(us) (a playback from file time us starts: the sound decodes ahead),
+//   onClock({ wall, us }) (the playback clock started: the sound starts), onStop() (it ended) }
 export class Player {
   constructor(workerSrc, opts) {
     this.src = workerSrc;
@@ -271,6 +273,7 @@ export class Player {
     this.stats = { ...this.stats, shown: 0, dropped: 0, t0: performance.now(), fps: 0 };
     this.playTo = b;
     this.stats.decodeJobs++;
+    if (this.opts.onPlay) this.opts.onPlay(this.info.times[from]);
     this.wk.postMessage({ cmd: 'play', job: ++this.job, from: Math.min(start, from), to: b });
     this.raf = requestAnimationFrame((now) => this.tick(now));
     this.state();
@@ -279,6 +282,7 @@ export class Player {
   pause() {
     if (!this.playing) return;
     this.playing = false;
+    if (this.opts.onStop) this.opts.onStop();
     cancelAnimationFrame(this.raf);
     if (this.wk) this.wk.postMessage({ cmd: 'stop' });
     this.job++;
@@ -368,7 +372,10 @@ export class Player {
     }
     if (this.queue.length) {
       const head = this.queue[0];
-      if (!this.clock) this.clock = { wall: now, us: T[head.index] };
+      if (!this.clock) {
+        this.clock = { wall: now, us: T[head.index] };
+        if (this.opts.onClock) this.opts.onClock(this.clock);
+      }
       const fileUs = this.clock.us + (now - this.clock.wall) * 1000;
       let k = -1;
       for (let i = 0; i < this.queue.length && T[this.queue[i].index] <= fileUs + 4000; i++) k = i;
@@ -390,6 +397,7 @@ export class Player {
     if ((this.current >= this.playTo || this.decodeDone) && !this.queue.length) {
       if (this.loop) {
         this.playing = false;
+        if (this.opts.onStop) this.opts.onStop(); // the next pass starts its own sound
         this.current = -1;
         if (this.wrap) this.pass++; // the next pass: its history is the end of this one
         this.play();

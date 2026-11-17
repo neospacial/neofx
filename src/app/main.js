@@ -28,6 +28,7 @@ import { initLayout } from './ui/layout.js';
 import { startDemos } from './ui/startscreen.js';
 import { runBench } from './bench.js';
 import { Mosh, MOSH_LOOK } from './mosh.js';
+import { PreviewAudio } from './audio.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
@@ -41,6 +42,8 @@ const MOSH_WORKER = "@WORKER:mosh/codec/bitio.js,mosh/codec/tables.js,mosh/codec
 let player, preview, timeline, gpu, inspector, analysis, handles, tools, exportDialog, gpuCaps, platform;
 let exporter = null; // the export that runs
 let mosh = null; // Mode 3, Datamosh
+const sound = new PreviewAudio(); // the sound of the preview playback
+const MUTE_KEY = 'neofx.muted';
 let layout = null;
 const history = new History();
 const locks = new Set(); // the sections that Randomize keeps
@@ -71,6 +74,30 @@ const quiet = (p) => {
 // known from the player's worker, so the new worker does not scan the file again.
 const fileKeys = (file) => (file === currentFile && player && player.info ? player.info.cleanKeys : undefined);
 const openMsg = (file) => ({ cmd: 'open', file, keys: fileKeys(file) });
+
+// The mute button: on / off, and why there is no sound (no audio track, no decoder).
+function muteButton() {
+  const b = $('muteBtn');
+  const has = sound.available;
+  b.disabled = !has;
+  const off = sound.muted || !has;
+  b.setAttribute('aria-pressed', String(off));
+  b.setAttribute('aria-label', has ? (sound.muted ? 'Unmute' : 'Mute') : 'No sound');
+  b.title = has ? (sound.muted ? 'Sound off (touch to turn it on)' : 'Sound on (touch to mute)') : sound.reason || 'No sound';
+}
+
+function setMuted(m) {
+  sound.setMuted(m);
+  try {
+    localStorage.setItem(MUTE_KEY, m ? '1' : '0');
+  } catch { /* no storage */ }
+  // Unmuted while the video plays: the sound starts at the playhead.
+  if (!m && player && player.playing && player.clock) {
+    const now = performance.now();
+    sound.start(player.clock.us + (now - player.clock.wall) * 1000, now);
+  }
+  muteButton();
+}
 
 // The state of the page ('start', 'open', 'unsupported'). The example animations of the start
 // screen run only there.
@@ -650,6 +677,8 @@ async function openFile(file) {
     gpuState.maskFile = gpuState.plateFile = null;
     currentFile = file;
     let info;
+    sound.close();
+    muteButton();
     try {
       info = await player.open(file);
     } catch (e) {
@@ -659,6 +688,8 @@ async function openFile(file) {
       return;
     }
     setLoading(`Preparing ${file.name}…`);
+    // The sound: its track is read in the background (the picture does not wait for it).
+    sound.open(file).then(() => file === currentFile && muteButton());
     setState('open');
     $('view').hidden = false;
     modeChanged();
@@ -1490,6 +1521,9 @@ async function start() {
     onThumb: (i, index, bitmap) => timeline.addThumb(i, index, bitmap),
     onError: (msg) => showMessage(msg),
     onProgress: setProgress,
+    onPlay: (us) => sound.prepare(us),
+    onClock: (c) => sound.start(c.us, c.wall),
+    onStop: () => sound.stop(),
   });
   timeline = new Timeline($('transport'), player);
   mosh = new Mosh({
@@ -1620,6 +1654,17 @@ async function start() {
     cancel: () => exporter && exporter.cancel(),
   });
   $('exportBtn').addEventListener('click', openExport);
+  try {
+    sound.setMuted(localStorage.getItem(MUTE_KEY) === '1');
+  } catch { /* no storage */ }
+  $('muteBtn').addEventListener('click', () => setMuted(!sound.muted));
+  // The audio context starts in a user gesture (iOS Safari plays no sound from one made later).
+  const unlock = () => {
+    if (sound.available && !sound.muted) sound.ensureContext();
+  };
+  document.addEventListener('pointerdown', unlock, true);
+  document.addEventListener('keydown', unlock, true);
+  muteButton();
   modeChanged();
   $('benchClose').addEventListener('click', () => $('benchDialog').close());
   $('benchCopy').addEventListener('click', () => {
@@ -1645,7 +1690,7 @@ async function start() {
       $('benchClose').disabled = false;
     }
   });
-  Object.assign(window.neofx, { mosh, toggleOverlay, undoStroke, cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  Object.assign(window.neofx, { sound, setMuted, mosh, toggleOverlay, undoStroke, cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   for (const id of ['fileInput', 'maskFileInput', 'mapFileInput']) watchPicker($(id));
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));

@@ -239,3 +239,11 @@ body[data-mosh="recording"] #transport,body[data-mosh="blooming"] #transport{poi
 .moshScrubRow input{flex:1;min-width:0}
 .moshCuts{display:grid;gap:8px;max-height:30vh;overflow:auto}
 #moshDialog .note{font-size:12px;color:var(--dim);margin:0}
+/* The mute button (top bar). */
+#muteBtn{min-width:36px;padding:0 8px;display:inline-flex;align-items:center;justify-content:center}
+#muteBtn svg{width:20px;height:20px;fill:currentColor}
+#muteBtn .off{display:none}
+#muteBtn[aria-pressed="true"] .on{display:none}
+#muteBtn[aria-pressed="true"] .off{display:inline}
+#muteBtn[aria-pressed="true"]{color:var(--warn)}
+#muteBtn:disabled{opacity:.35}
