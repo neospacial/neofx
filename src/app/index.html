@@ -55,6 +55,12 @@
       </div>
       <div id="splitLine" hidden><span></span></div>
       <canvas id="view" hidden></canvas>
+      <canvas id="moshView" hidden aria-label="Datamosh picture"></canvas>
+      <div id="moshBar">
+        <button type="button" data-act="rec" aria-label="Record"><span></span></button>
+        <button type="button" data-act="bloom" title="Hold: the last motion repeats (B)">BLOOM</button>
+        <span class="moshInfo"></span>
+      </div>
       <div id="progress" hidden></div>
       <div id="loading" role="status" aria-live="polite" hidden><div class="spinner"></div><p id="loadingText"></p><div class="loadBar"><span></span></div><button type="button" id="loadingCancel" hidden>Cancel</button></div>
       <div id="message" hidden></div>
@@ -81,6 +87,7 @@
     <canvas class="strip" aria-label="Timeline"></canvas>
   </footer>
   <dialog id="exportDialog" aria-label="Export"></dialog>
+  <dialog id="moshDialog" aria-label="Export (Datamosh)"></dialog>
   <dialog id="benchDialog" aria-label="Performance test">
     <form method="dialog" class="exportForm">
       <h2>Performance test</h2>
@@ -100,6 +107,6 @@
   <input id="maskFileInput" type="file" accept="video/*" multiple hidden>
   <input id="fileInput" type="file" accept="video/*" multiple hidden>
 </div>
-<!--@modules:io/demux.js,io/mp4.js,io/encoder-config.js,maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/curve.js,app/random.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/export.js,app/ui/exportdialog.js,app/history.js,app/presets.js,app/ui/layout.js,app/ui/startscreen.js,app/bench.js,app/main.js-->
+<!--@modules:io/demux.js,io/mp4.js,io/encoder-config.js,maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,analysis/cleanplate.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,app/mosh.js,app/settings.js,app/platform.js,app/player.js,maps/mapsource.js,app/gpu-client.js,app/preview.js,app/ui/timeline.js,app/ui/widgets.js,app/ui/curve.js,app/random.js,app/ui/inspector.js,app/analysis.js,app/ui/handles.js,app/ui/tools.js,app/export.js,app/ui/exportdialog.js,app/history.js,app/presets.js,app/ui/layout.js,app/ui/startscreen.js,app/bench.js,app/main.js-->
 </body>
 </html>

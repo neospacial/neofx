@@ -4,8 +4,9 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 - **Time Map** — a greyscale map gives each pixel a delay in frames. Black = the current frame, white = the maximum delay.
 - **Slit Scan** — a 1 px source line (or the edge of the subject) repeats in one direction. Pixels get older as their distance from the line increases.
+- **Datamosh** — a true datamosh, with the H.264 encoder and decoder of [neomosh](https://github.com/neospacial/neomosh): record clips from the video; each new clip has no keyframe, so its motion moves the pixels of the last picture of the clip before.
 
-The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
+The app uses only browser APIs (WebCodecs, WebGL2, Workers, WebAssembly). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
 > Status: v0.1.0, **all 12 phases done** (see `neofx-plan-v0.1.0.md` §14): the build, the MP4/MOV reader and muxer, frame-exact seek and playback, the GPU frame store, **Time Map** with the full map library and the perfect loop, the **compositor**, **Slit Scan** (line and subject edge), the **cutout**, the **export**, the **UI** (desktop and phone layouts, presets, undo, randomize, the curve editor, the keyboard), and the **performance test** with the device results below (phase 12). The device rows of the results table are filled in from the in-app test on each device.
 
@@ -27,7 +28,7 @@ The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries
 
 **Curves** (Map adjust curve, Slit Scan rate curve, decay curve): drag a point; click on the line to add one; double-click (or long press) a point to remove it; or use a preset (Linear, Ease in, Ease out, S-curve, Step).
 
-Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out (the loop and export range; the transport has no In / Out buttons); J play backward, K stop, L play; hold \ to show the original; M the Mask view; [ / ] the brush size; Ctrl/Cmd+Z undo, Shift+Ctrl/Cmd+Z redo; Ctrl/Cmd+E export.
+Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out (the loop and export range; the transport has no In / Out buttons); J play backward, K stop, L play; hold \ to show the original; M the Mask view; [ / ] the brush size; Datamosh: R record / pause, B (hold) bloom; Ctrl/Cmd+Z undo, Shift+Ctrl/Cmd+Z redo; Ctrl/Cmd+E export.
 
 While a slider moves, the preview shows the newest value: settings changes that come faster than the GPU renders are joined (the ones between are not rendered).
 
@@ -86,6 +87,33 @@ With the Subject edge source, the same settings bend the trails about the frame 
 **Subject edge source** (needs the cutout): all the edge pixels of the subject are the source, so the source moves with the subject. Set the **Edge direction** (0° = to the right) with the round handle on the preview. In each row of the direction, the places where the subject ends (up to 4) emit a trail with the colour of the last subject pixel; the trail of one frame joins to the trail of the frame before when their edges are nearer than the **Join limit** (default 8 px). Where trails cross, the youngest pixel wins. Time Off: the edge colour repeats to the end of the row. The Max age of the edge source (default 120 frames, at most 512) is also limited by the GPU time of the trail (target 20 ms at the preview resolution); the inspector shows the limit.
 
 The age at a distance s is A(s), the inverse of S(a) = ∫ rate. When the line changes, an **analysis pass** decodes the full video in the background and fills the slit history (one row for each frame, up to 4096 frames); the status bar shows "Analysis N %". Until it ends, the trail uses the rows that are there (the frames in the frame store at once); the other rows are black. The **Map** view shows the age as heat colours.
+
+## Mode 3 — Datamosh
+
+The datamosh of [neomosh](https://github.com/neospacial/neomosh), with a video file as the source (no camera). It has its own H.264 encoder and decoder (Constrained Baseline, WebAssembly with SIMD; JavaScript without it, about 10 times slower). You record a video from clips. The first frame of each new clip is a hidden I-frame: the encoder uses it, the file does not show it. So the P-frames of the new clip move the last picture of the clip before. The exported file is a valid H.264 stream: each player shows the same moshed pictures.
+
+1. Select **Datamosh** in **Mode**. The preview shows the video; the record bar is at its bottom.
+2. Move the playhead to the start of a shot. Touch the red button (or **R**) to record: the clip starts at the playhead and runs at the speed of the video (each frame of the file at the session frame rate, no dropped frames). The preview shows the decoded output of the encoder.
+3. Touch the button again to pause (the recording also pauses at the end of the video). The last picture shows over the video at the **Guide** opacity, to align the next shot.
+4. Move the playhead to another place, or **Open** another video (the recorded video stays; the new file is cropped to its shape), and record again. This is the datamosh. It needs movement: if nothing moves, the old picture stays.
+5. **BLOOM** (hold the button, or **B**, while paused): the motion at the end of the last recorded clip repeats, one frame for each frame time, so the picture keeps flowing in that direction. It is a clip of its own, with a pause point.
+6. **History** (inspector): **Play** and the slider show the recorded video; each pause point has a card. **Revert** deletes all clips after that point, and the next clip continues from it. **New video** (two touches) deletes the video.
+7. **Export**: for each cut, **Mosh** (the hidden I-frame is not in the file) or **Clean** (it shows: a normal cut). **Original** copies the recorded frames into the MP4 file (fast, lossless: a true datamosh stream). **Upscale** scales to 1080 on the short side (**Sharp** keeps the blocks, **Smooth** blurs them) and encodes with the H.264 encoder of the browser; it shows only when the browser has one.
+
+| Setting | Values | Default | When it can change |
+|---|---|---|---|
+| Size (short side) | 360, 480, 720, 1080 (the shape of the first video; never above it) | 480 | Before the first recorded frame |
+| Frame rate | 15, 24, 30 | 30 | Before the first recorded frame |
+| Guide | 0 – 1: the opacity of the last picture while paused | 0.5 | At any time |
+| Mosh preview | On / Off (Off shows the source frames while recording) | On | At any time |
+| Quality (QP) | 16 – 44. High = coarse blocks; low = clean detail, larger file | 30 | While paused |
+| Search range | ±8, ±16, ±32, ±64. Larger = longer smears with fast motion, more CPU | ±32 | While paused |
+| Motion | Full, Half, Quarter. Full = blocky steps; Quarter = a smooth flowing smear | Quarter | While paused |
+| Skip bias | 0 – 100. High = more old pixels stay | 50 | While paused |
+| Heal | Off, Low, High. Low and High repair bad areas (a partial mosh) | Low | While paused |
+| Denoise | Off, Low, High. Removes noise before the encoder | Low | While paused |
+
+The encoder settings apply to the next clip; each clip keeps its own look. **Default look** sets them back. The Time Map, Slit Scan, cutout and composite settings do not apply in this mode (the source frames go to the encoder as they are). The recorded video stays in memory until the page closes (neomosh keeps it in the browser storage; neofx does not). The export has no audio: the clips come from different places.
 
 ## Cutout
 
@@ -167,6 +195,7 @@ The container row is a floor, not a target: it has no GPU, so every shader and t
 ## Known limits
 
 - Fragmented MP4 files are not supported.
+- Datamosh: no camera, no audio, and the recorded video is not kept when the page closes. An export has one sync frame (frame 0) unless a cut is Clean, so players seek slowly in a long file. Each Mosh cut makes the video one frame shorter (the hidden I-frame and its time slot are not in the file). The codec files in `src/mosh/codec` and `src/mosh/mux` are copies from neomosh: change them there.
 - An In – Out export starts the audio at the first whole audio packet at or after In (up to one packet, about 20 ms, later than the video).
 - HDR input (for example HLG from a phone) is shown and exported as SDR with the colour conversion of the browser.
 - Audio pass-through supports AAC (`mp4a`) and Opus.
@@ -213,6 +242,7 @@ The last command writes the test videos (plan §13.1) to `samples/`. The tests m
 | `src/analysis/` | `cleanplate.js` (median), `regions.js` (fill holes, keep largest), `analysis-worker.js` |
 | `src/modes/` | `slit.js` (Mode 2: rate types, S and A, line geometry) |
 | `src/maps/` | `builtin.js` (the map list and parameters), `curve.js` (monotone curves), `mapsource.js` (image and video maps) |
+| `src/mosh/` | Mode 3, Datamosh, from neomosh: `codec/` (the H.264 subset: encoder, decoder, the WebAssembly kernels as base64), `mux/` (MP4 muxer and the lossless remux with Mosh / Clean cuts), `capture.js` (frame gate), and `mosh-worker.js` (the file recorder: decode, encode, the session, bloom, revert, the export). `src/app/mosh.js` is the page side (the session state, the picture, the record bar, the export dialog) |
 | `src/io/` | `demux.js` (MP4/MOV reader), `mp4.js` (MP4 muxer), `timeline.js` (frame order, seek plan), `decode-worker.js`, `encode-worker.js`, `encoder-config.js` (H.264 level, codecs, export sizes) |
 | `tools/` | `build.mjs`, `make-fixtures.mjs` |
 | `tests/` | Node tests, FFmpeg checks, Playwright tests |

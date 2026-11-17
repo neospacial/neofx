@@ -369,6 +369,7 @@ export class Engine {
   // The cutout mask is needed: Cutout on, the Mask view, or a map that uses it.
   maskNeeded() {
     const s = this.settings;
+    if (s.mode === 'datamosh') return false; // the source frame only
     return s.cutout.mode !== 'off' || s.view === 'mask' || (s.mode === 'timemap' && usesMask(s.map));
   }
 
@@ -470,6 +471,17 @@ export class Engine {
   render(index, delay) {
     const gl = this.gl;
     // Split view (plan §12.2): the result, and the original on the left of the divider.
+    // Mode 3, Datamosh: the canvas shows the source frame (the mosh picture is drawn by the page).
+    if (delay === undefined && this.settings && this.settings.mode === 'datamosh') {
+      this.last = { index, delay };
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, this.w, this.h);
+      gl.useProgram(this.show.prog);
+      this.bindStore(this.show);
+      gl.uniform1f(this.show.u.u_layer, this.layerOf(index));
+      drawQuad(gl);
+      return;
+    }
     const overlay = !!this.refineView && !this.exporting && delay === undefined && !!this.settings;
     if (!overlay && delay === undefined && this.settings && this.settings.view === 'split') {
       const saved = this.settings;

@@ -1,9 +1,12 @@
 // The settings (plan §7.2 – §7.6). One plain object, so presets and undo (phase 11) can copy it.
 
 import { defaultParams } from '../maps/builtin.js';
+import { MOSH_DEFAULTS } from './mosh.js';
 
 export const DEFAULTS = {
-  mode: 'timemap', // 'timemap' | 'slitscan' (phase 7)
+  mode: 'timemap', // 'timemap' | 'slitscan' | 'datamosh' (Mode 3, from neomosh)
+  // Datamosh: the session size (short side) and frame rate, the encoder look, the Guide opacity.
+  mosh: { ...MOSH_DEFAULTS },
   view: 'result', // 'result' | 'original' | 'split' | 'map' | 'mask'
   splitPos: 0.5, // the Split view divider (0..1 of the picture)
   timemap: {
