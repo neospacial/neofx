@@ -2,7 +2,7 @@
 // File: { app: 'neofx', version, settings, assets: { mapImage, matte } } (PNG data URLs). A video
 // map is stored by its file name only: at load, the app asks for the file.
 
-import { DEFAULTS, clone } from './settings.js';
+import { DEFAULTS, clone, migrateSettings } from './settings.js';
 
 // Deep merge of plain objects (arrays are values).
 export function merge(base, over) {
@@ -96,7 +96,7 @@ export const PRESETS = [
 export function applyPreset(current, preset) {
   const s = merge(DEFAULTS, preset.s);
   s.view = current.view;
-  s.timemap.perfectLoop = !!(current.timemap && current.timemap.perfectLoop); // an output choice, not a look
+  s.loopPixels = !!migrateSettings(clone(current)).loopPixels; // an output choice, not a look
   const keep = clone(current.cutout);
   s.cutout = { ...keep, mode: (preset.s.cutout && preset.s.cutout.mode) || 'off' };
   if (s.cutout.mode === 'scan' && s.mode !== 'slitscan') s.cutout.mode = 'overlay';
@@ -124,7 +124,7 @@ export function parsePresetFile(text) {
     throw new Error('This is not a neofx preset file.');
   }
   if (!o || o.app !== 'neofx' || !o.settings || typeof o.settings !== 'object') throw new Error('This is not a neofx preset file.');
-  return { settings: merge(DEFAULTS, o.settings), assets: o.assets || {}, version: o.version };
+  return { settings: merge(DEFAULTS, migrateSettings(o.settings)), assets: o.assets || {}, version: o.version };
 }
 
 // 'data:image/png;base64,...' -> Blob (no network: decode the base64 here).

@@ -208,6 +208,8 @@ export class Edge {
       gl.uniform1i(p.u.u_M, M);
       gl.uniform1f(p.u.u_D, this.D);
       gl.uniform1f(p.u.u_join, sl.joinLimit);
+      const lp = this.e.loop && t >= this.e.loop.a && t < this.e.loop.a + this.e.loop.L ? this.e.loop : null;
+      gl.uniform2i(p.u.u_loop, lp ? lp.a : 0, lp ? lp.L : 0);
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LESS);
       const t0 = performance.now();

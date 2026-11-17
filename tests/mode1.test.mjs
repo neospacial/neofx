@@ -119,7 +119,7 @@ export const tests = [
     async fn() {
       await withApp(async (page, codes) => {
         const L = codes.length;
-        await setAll(page, { 'timemap.maxDelay': 30, 'timemap.blend': false, 'timemap.steps': 0, 'timemap.perfectLoop': true });
+        await setAll(page, { 'timemap.maxDelay': 30, 'timemap.blend': false, 'timemap.steps': 0, 'loopPixels': true });
         for (const t of [0, 1, 7, 15, 29, 30, 45, L - 1, 3, 60, 0]) {
           const rows = await seekRows(page, t);
           const want = expectRows(codes, t, 30, 0, L);
@@ -156,7 +156,7 @@ export const tests = [
         for (const [i, rows] of r.shown) assert(same(rows, expectRows(codes, i % L, 30, 0, L)), `play, frame ${i % L} (store ${i}): ${rows}`);
         assert(r.jobs <= 3, `decode jobs ${r.jobs}`);
         // Off: black before frame 0 again.
-        await setAll(page, { 'timemap.perfectLoop': false });
+        await setAll(page, { 'loopPixels': false });
         for (const t of [5, 40]) {
           const rows = await seekRows(page, t);
           assert(same(rows, expectRows(codes, t, 30)), `off, t ${t}: ${rows}`);

@@ -8,7 +8,7 @@ import { Preview } from './preview.js';
 import { workingSize, defaultBudget, bufferText, isIOS } from '../gpu/store.js';
 import { Timeline } from './ui/timeline.js';
 import { Inspector } from './ui/inspector.js';
-import { DEFAULTS, clone, setPath } from './settings.js';
+import { DEFAULTS, clone, setPath, migrateSettings } from './settings.js';
 import { MAPS } from '../maps/builtin.js';
 import { loadImageMap, loadVideoMap, maskVideoSize } from '../maps/mapsource.js';
 import { THUMB_W, THUMB_H } from './ui/inspector.js';
@@ -526,15 +526,26 @@ async function applySettings() {
   await r;
 }
 
-// Perfect loop (Time Map): the frames before the start of the loop come from its end. On a change
+// Loop pixels. Time Map: the frames before the start of the loop come from its end. On a change
 // (on / off, the loop range), the store indices change meaning: the engine forgets the store, and
-// the frame on the preview is loaded again. force: send the delay cap again (after the export).
-const wrapOn = () => settings.mode === 'timemap' && !!settings.timemap.perfectLoop;
+// the frame on the preview is loaded again. Slit Scan: the slit history holds every frame by its real
+// index, so the shader wraps the source frame into the loop ([a, a + L − 1]); nothing is loaded
+// again. force: send the state again (after the export).
+const wrapOn = () => settings.mode === 'timemap' && !!settings.loopPixels;
+const slitLoopOn = () => settings.mode === 'slitscan' && !!settings.loopPixels;
+let sentLoop = '';
 async function syncWrap(force = false) {
   if (!player || !player.info) return;
   const changed = player.setWrap(wrapOn());
-  if (!changed && !force) return;
-  await gpu.call({ cmd: 'wrap', cap: player.wrap ? player.wrap.L - 1 : null, forget: changed });
+  let loop = null;
+  if (slitLoopOn()) {
+    const [a, b] = player.range();
+    loop = [a, b - a + 1];
+  }
+  const loopKey = JSON.stringify(loop);
+  if (!changed && !force && loopKey === sentLoop) return;
+  sentLoop = loopKey;
+  await gpu.call({ cmd: 'wrap', cap: player.wrap ? player.wrap.L - 1 : null, forget: changed, loop });
   if (changed && player.current >= 0) await player.seek(player.current);
 }
 
@@ -695,6 +706,7 @@ async function exportVideo(opts, onProgress = () => {}) {
     }),
     depth: () => effectDepth(),
     wrap: wrapOn,
+    slitLoop: slitLoopOn,
     keys: () => fileKeys(currentFile),
   });
   const ex = exporter;
@@ -898,7 +910,7 @@ function loadLocal() {
   try {
     const t = localStorage.getItem(LOCAL_KEY);
     if (!t) return null;
-    const s = merge(DEFAULTS, JSON.parse(t));
+    const s = merge(DEFAULTS, migrateSettings(JSON.parse(t)));
     // The files of custom maps and mask videos are not stored: back to the built-in map, no import.
     if (s.map.source !== 'builtin') s.map.source = 'builtin';
     s.cutout.import = { on: false, name: '' };

@@ -8,7 +8,7 @@ neofx is a video effect app in one standalone HTML file. It makes time distortio
 
 The app uses only browser APIs (WebCodecs, WebGL2, Workers, WebAssembly). It has no libraries and makes no network requests, so it works offline and from GitHub Pages. The export is an MP4 (H.264) file with the original audio copied.
 
-> Status: v0.1.0, **all 12 phases done** (see `neofx-plan-v0.1.0.md` §14): the build, the MP4/MOV reader and muxer, frame-exact seek and playback, the GPU frame store, **Time Map** with the full map library and the perfect loop, the **compositor**, **Slit Scan** (line and subject edge), the **cutout**, the **export**, the **UI** (desktop and phone layouts, presets, undo, randomize, the curve editor, the keyboard), and the **performance test** with the device results below (phase 12). The device rows of the results table are filled in from the in-app test on each device.
+> Status: v0.1.0, **all 12 phases done** (see `neofx-plan-v0.1.0.md` §14): the build, the MP4/MOV reader and muxer, frame-exact seek and playback, the GPU frame store, **Time Map** with the full map library and Loop pixels, the **compositor**, **Slit Scan** (line and subject edge), the **cutout**, the **export**, the **UI** (desktop and phone layouts, presets, undo, randomize, the curve editor, the keyboard), and the **performance test** with the device results below (phase 12). The device rows of the results table are filled in from the in-app test on each device.
 
 ## How to use
 
@@ -24,7 +24,7 @@ The app uses only browser APIs (WebCodecs, WebGL2, Workers, WebAssembly). It has
 
 **Randomize all** sets safe random values in the sections of the mode; the lock of a section keeps it, the dice of a section changes only that section. Each look has a number (its seed). **Reset to defaults** sets every setting back to its default (the view, an imported mask video, and the loaded map files stay); it is one undo step. **Undo** / **Redo** (↶ ↷, Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z) go back and forward through the setting changes; a slider drag is one change.
 
-**Perfect loop** (Time Map, in the Time section): the delayed pixels of the first frames take their frames from the end of the video (or of the In – Out range) instead of black, so the result loops without a cut: in the preview with **Loop** on, and in the export (the history of the first exported frames is decoded from the end of the range first). The Max delay is at most the loop length − 1. It does not apply to Slit Scan.
+**Loop pixels** (Time Map and Slit Scan, in the Time section; it was called Perfect loop): a pixel that needs a frame from before the start of the video (or of the In – Out range) shows the frame from the end of it instead of black, so the result loops without a cut. Time Map: the delayed pixels of the first frames; the Max delay is at most the loop length − 1. Slit Scan: the old part of the trail of the first frames (Sharp and Blend sampling; the history of the analysis pass holds every frame, up to 4096). With the Subject edge source, the edge history holds the last 512 frames of the analysis: in a longer video, the end of the loop can be missing there. It works in the preview with **Loop** on and in the export. It does not apply to Datamosh. Old saved settings and preset files with Perfect loop on get Loop pixels on.
 
 **Curves** (Map adjust curve, Slit Scan rate curve, decay curve): drag a point; click on the line to add one; double-click (or long press) a point to remove it; or use a preset (Linear, Ease in, Ease out, S-curve, Step).
 
