@@ -12,7 +12,8 @@ import { FIX_DIR } from './fixtures.test.mjs';
 import { launch, open } from './playback.test.mjs';
 import { History } from '../src/app/history.js';
 import { rng, randomizeSection, RANDOM_SECTIONS } from '../src/app/random.js';
-import { PRESETS, applyPreset, parsePresetFile, presetFile, merge } from '../src/app/presets.js';
+import { PRESETS, PRESET_GROUPS, applyPreset, parsePresetFile, presetFile, merge } from '../src/app/presets.js';
+import { MAPS } from '../src/maps/builtin.js';
 import { DEFAULTS, clone } from '../src/app/settings.js';
 import { monotoneCurve } from '../src/maps/curve.js';
 import { maskVideoSize } from '../src/maps/mapsource.js';
@@ -74,6 +75,26 @@ export const tests = [
       // Every Time Map preset names its map (a preset with map options too keeps its map type).
       const badMaps = PRESETS.filter((p) => p.s.mode === 'timemap' && !(p.s.map && p.s.map.type && applyPreset(clone(DEFAULTS), p).map.type === p.s.map.type)).map((p) => p.id);
       assert(!badMaps.length && new Set(PRESETS.map((p) => p.id)).size === PRESETS.length, `preset maps / ids: ${badMaps}`);
+      // Each preset is in a group of the gallery; each preset is a different look.
+      assert(PRESETS.every((p) => PRESET_GROUPS.some(([g]) => g === p.s.mode)) && PRESET_GROUPS.every(([g]) => PRESETS.filter((p) => p.s.mode === g).length >= 8), 'groups: at least 8 presets in each mode');
+      const looks = PRESETS.map((p) => JSON.stringify(applyPreset(clone(DEFAULTS), p)));
+      assert(new Set(looks).size === PRESETS.length, 'no two presets give the same settings');
+      // The values of the presets are in the ranges of the inspector (the map params of each type).
+      for (const p of PRESETS.filter((x) => x.s.mode === 'timemap')) {
+        const spec = MAPS.find((m) => m.id === p.s.map.type);
+        for (const [k, v] of Object.entries(p.s.map.params[p.s.map.type] || {})) {
+          const row = spec.params.find((x) => x[0] === k);
+          assert(row && v >= row[2] && v <= row[3], `${p.id}: map param ${k} = ${v}`);
+        }
+      }
+      // A Datamosh preset sets the encoder look, and keeps the session size, frame rate, Guide; the
+      // other presets keep the Datamosh settings.
+      const curM = clone(DEFAULTS);
+      Object.assign(curM.mosh, { size: 720, fps: 24, guide: 0.8, qp: 40 });
+      const dm = applyPreset(curM, PRESETS.find((x) => x.id === 'moshmelt'));
+      assert(dm.mode === 'datamosh' && dm.mosh.skipBias === 85 && dm.mosh.size === 720 && dm.mosh.fps === 24 && dm.mosh.guide === 0.8, `datamosh preset ${JSON.stringify(dm.mosh)}`);
+      const tm = applyPreset(curM, PRESETS.find((x) => x.id === 'wave'));
+      assert(tm.mosh.qp === 40 && tm.mosh.size === 720, 'a Time Map preset keeps the Datamosh settings');
       const cur = merge(DEFAULTS, { view: 'mask', cutout: { luma: { on: true } } });
       const s = applyPreset(cur, PRESETS.find((p) => p.id === 'trail'));
       assert(s.view === 'mask' && s.cutout.luma.on && s.cutout.mode === 'scan' && s.mode === 'slitscan', 'a preset keeps the view and the cutout method');
@@ -290,7 +311,17 @@ export const tests = [
         // The GPU thumbnails come one after the other.
         await page.waitForFunction(() => [...document.querySelectorAll('.presetCard canvas')].every((c) => c.getContext('2d').getImageData(0, 0, 160, 90).data.some((v, i) => i % 4 !== 3 && v > 0)), null, { timeout: 30000 }).catch(() => {});
         const g = await page.evaluate(() => [...document.querySelectorAll('.presetCard')].map((c) => ({ id: c.dataset.preset, drawn: c.querySelector('canvas').getContext('2d').getImageData(0, 0, 160, 90).data.some((v, i) => i % 4 !== 3 && v > 0) })));
-        assert(g.length === PRESETS.length && g.length >= 25 && g.every((x) => x.drawn), `gallery ${JSON.stringify(g)}`);
+        assert(g.length === PRESETS.length && g.length >= 55 && g.every((x) => x.drawn), `gallery ${JSON.stringify(g.filter((x) => !x.drawn))}`);
+        // The groups: the mode in use first, a heading with the count.
+        const heads = await page.evaluate(() => [...document.querySelectorAll('.presetGroup')].map((h) => h.dataset.group));
+        assert(heads.length === 3 && heads[0] === 'timemap', `groups ${heads}`);
+        // A Datamosh preset: the mode and the encoder look.
+        await page.click('.presetCard[data-preset="moshblocks"]');
+        const dm = await S(page);
+        assert(dm.mode === 'datamosh' && dm.mosh.precision === 'full' && dm.mosh.qp === 40, `datamosh preset ${JSON.stringify(dm.mosh)}`);
+        await page.click('#presetsBtn');
+        assert((await page.evaluate(() => document.querySelector('.presetGroup').dataset.group)) === 'datamosh', 'the group of the mode in use first');
+        await page.click('.presetCard[data-preset="wave"]');
         assert(await page.isVisible('#randomizeBtn') && await page.isVisible('#resetBtn'), 'Randomize all and Reset in the Presets section');
         // Reset to defaults: one undo step; the view stays.
         await page.evaluate(() => {
