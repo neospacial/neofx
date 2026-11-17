@@ -47,7 +47,14 @@ export class Timeline {
     const end = () => (drag = false);
     this.strip.addEventListener('pointerup', end);
     this.strip.addEventListener('pointercancel', end);
-    new ResizeObserver(() => this.draw()).observe(this.strip);
+    // The CSS size of the strip is kept: reading it for each shown frame would make a layout
+    // (the time text changes just before).
+    this.size = null;
+    new ResizeObserver((entries) => {
+      const r = entries[entries.length - 1].contentRect;
+      this.size = [r.width, r.height];
+      this.draw();
+    }).observe(this.strip);
   }
 
   setIn() {
@@ -87,18 +94,20 @@ export class Timeline {
     if (play.dataset.icon !== String(P.playing)) {
       play.dataset.icon = String(P.playing);
       play.innerHTML = P.playing ? ICON_PAUSE : ICON_PLAY;
+      play.setAttribute('aria-label', P.playing ? 'Pause' : 'Play');
     }
-    play.setAttribute('aria-label', P.playing ? 'Pause' : 'Play');
-    this.$('[data-act=loop]').classList.toggle('on', P.loop);
-    this.$('.time').textContent = info ? `${formatTime(info.times[t])} / ${formatTime(info.durationUs)}` : '00:00.00 / 00:00.00';
-    this.$('.frame').textContent = info ? `f ${t}` : 'f –';
+    const E = this.els || (this.els = { loop: this.$('[data-act=loop]'), time: this.$('.time'), frame: this.$('.frame') });
+    E.loop.classList.toggle('on', P.loop);
+    E.time.textContent = info ? `${formatTime(info.times[t])} / ${formatTime(info.durationUs)}` : '00:00.00 / 00:00.00';
+    E.frame.textContent = info ? `f ${t}` : 'f –';
     this.draw();
   }
 
   draw() {
     const c = this.strip;
     const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.round(c.clientWidth * dpr)), h = Math.max(1, Math.round(c.clientHeight * dpr));
+    const [cw, ch] = this.size || [c.clientWidth, c.clientHeight];
+    const w = Math.max(1, Math.round(cw * dpr)), h = Math.max(1, Math.round(ch * dpr));
     if (c.width !== w || c.height !== h) {
       c.width = w;
       c.height = h;

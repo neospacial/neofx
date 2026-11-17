@@ -28,19 +28,68 @@ export async function probeEncoder(w, h, fps, opts = {}) {
   return null;
 }
 
-// Save the parts of the file: a Blob, or (large, or opts.opfs) a file in the OPFS.
+const OPFS_PREFIX = 'neofx-export';
+const OPFS_FILE = /^neofx-export.*\.mp4$/;
+
+// Each export file in the OPFS has its own name, and a lock of that name while it is in use (Web
+// Locks; a lock ends with its page), so two tabs do not write the same file and a file that is
+// still open is not removed. Returns { name, unlock }.
+async function exportFileName() {
+  if (typeof navigator === 'undefined' || !navigator.locks) return { name: `${OPFS_PREFIX}.mp4`, unlock() {} };
+  const name = `${OPFS_PREFIX}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.mp4`;
+  const unlock = await new Promise((resolve) => {
+    navigator.locks.request(name, () => new Promise((release) => resolve(release))).catch(() => resolve(() => {}));
+  });
+  return { name, unlock };
+}
+
+// Remove the export files that an earlier visit left in the OPFS (the page was closed with the
+// finished export open: up to some GB would stay in the browser storage). A file that another tab
+// still uses (it holds the lock) stays.
+export async function cleanExportStorage() {
+  try {
+    if (typeof navigator === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) return;
+    const dir = await navigator.storage.getDirectory();
+    const names = [];
+    for await (const name of dir.keys()) if (OPFS_FILE.test(name)) names.push(name);
+    for (const name of names) {
+      const remove = () => dir.removeEntry(name).catch(() => {});
+      if (navigator.locks) await navigator.locks.request(name, { ifAvailable: true }, (lock) => (lock ? remove() : null));
+      else await remove();
+    }
+  } catch { /* no storage */ }
+}
+
+// Save the parts of the file: a Blob, or (large, or opts.opfs) a file in the OPFS. release() (OPFS
+// only): remove that file, when the result is not needed any more.
 export async function saveParts(parts, size, name, opts = {}) {
   const low = typeof navigator !== 'undefined' && navigator.deviceMemory && navigator.deviceMemory <= 4 && size > 256 * 1048576;
   if ((opts.opfs || size > OPFS_LIMIT || low) && navigator.storage && navigator.storage.getDirectory) {
+    const f = await exportFileName();
+    let dir = null;
     try {
-      const dir = await navigator.storage.getDirectory();
-      const fh = await dir.getFileHandle('neofx-export.mp4', { create: true });
+      dir = await navigator.storage.getDirectory();
+      const fh = await dir.getFileHandle(f.name, { create: true });
       const w = await fh.createWritable();
-      for (const p of parts) await w.write(p);
-      await w.close();
+      try {
+        for (const p of parts) await w.write(p);
+        await w.close();
+      } catch (e) {
+        await w.abort().catch(() => {});
+        throw e;
+      }
       const file = await fh.getFile();
-      return { blob: new File([file], name, { type: 'video/mp4' }), opfs: true };
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        dir.removeEntry(f.name).catch(() => {}).then(f.unlock);
+      };
+      return { blob: new File([file], name, { type: 'video/mp4' }), opfs: true, release };
     } catch {
+      // (Also a part of a file that did not fit.)
+      if (dir) await dir.removeEntry(f.name).catch(() => {});
+      f.unlock();
       if (opts.opfs) throw new Error('The browser storage (OPFS) cannot hold the file.');
     }
   }
@@ -191,9 +240,16 @@ export class Exporter {
                 frames.add(us, t);
                 const key = us - lastKey >= opts.keyint * 1e6;
                 if (key) lastKey = us;
-                await waitFor(() => queue <= MAX_ENCODE_QUEUE);
-                queue++;
-                enc.postMessage({ cmd: 'frame', frame: r.frame, key }, [r.frame]);
+                // The rendered frame is closed here when it does not get to the encoder (a cancel,
+                // an encoder error): a VideoFrame holds its memory until it is closed.
+                try {
+                  await waitFor(() => queue <= MAX_ENCODE_QUEUE);
+                  queue++;
+                  enc.postMessage({ cmd: 'frame', frame: r.frame, key }, [r.frame]);
+                } catch (err) {
+                  try { r.frame.close(); } catch { /* closed */ }
+                  throw err;
+                }
                 done++;
                 const sec = (performance.now() - t0) / 1000;
                 const fps = done / Math.max(sec, 1e-3);
@@ -205,7 +261,9 @@ export class Exporter {
             fail(err);
           }
         };
-        dec.postMessage({ cmd: 'open', file });
+        dec.onerror = (e) => fail(new Error(e.message || 'Decode worker failed.'));
+        enc.onerror = (e) => fail(new Error(e.message || 'Encode worker failed.'));
+        dec.postMessage({ cmd: 'open', file, keys: A.keys ? A.keys() : undefined });
       });
       this.check();
       this.flushed = false;

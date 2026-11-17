@@ -15,6 +15,7 @@ import { rng, randomizeSection, RANDOM_SECTIONS } from '../src/app/random.js';
 import { PRESETS, applyPreset, parsePresetFile, presetFile, merge } from '../src/app/presets.js';
 import { DEFAULTS, clone } from '../src/app/settings.js';
 import { monotoneCurve } from '../src/maps/curve.js';
+import { maskVideoSize } from '../src/maps/mapsource.js';
 
 let chromium = null;
 try {
@@ -636,6 +637,103 @@ export const tests = [
         assert(r[0][1] <= r[1][0] + 1 && r[1][2] < 60, `side by side ${JSON.stringify(r)}`);
         assert(await noOverflow(page), 'no horizontal scroll');
         assert(!(await page.isVisible('#sheetHandle')), 'no sheet handle');
+      });
+    },
+  },
+  {
+    name: 'robustness: settings messages join while one is at the GPU worker (the order stays); playback ends when the decoder has no more frames; the keyboard is off under a dialog; Esc cancels a running export; the start animations stop; the mask video size',
+    timeout: 180000,
+    async fn() {
+      const m = maskVideoSize(960, 540, 300, 2048, 256 * 1048576);
+      assert(m.width === 960 && m.height === 540 && m.count === 300, `a short mask video keeps the working size: ${JSON.stringify(m)}`);
+      const big = maskVideoSize(1920, 1080, 6000, 2048, 256 * 1048576);
+      assert(big.count === 2048 && big.width * big.height * big.count <= 256 * 1048576 * 1.01 && Math.abs(big.width / big.height - 16 / 9) < 0.02, `a long one is smaller and in the layer limit: ${JSON.stringify(big)}`);
+      await withApp(DESKTOP, async (page) => {
+        // 1. Many settings at once: fewer messages, the last one wins, and a call after them sees it.
+        const r = await page.evaluate(async () => {
+          const N = window.neofx;
+          const copy = () => JSON.parse(JSON.stringify(N.settings));
+          await N.change('view', 'result');
+          await N.applySettings();
+          const post = N.gpu.wk.postMessage.bind(N.gpu.wk);
+          let sent = 0;
+          N.gpu.wk.postMessage = (msg, tr) => {
+            if (msg.msg && msg.msg.cmd === 'settings') sent++;
+            post(msg, tr);
+          };
+          const ps = [];
+          for (let i = 0; i < 40; i++) {
+            const s = copy();
+            s.look.ageBrightness = 1;
+            s.view = i === 39 ? 'original' : 'result';
+            s.timemap.maxDelay = 0;
+            s.look.tint = true;
+            s.look.tintColors = ['#000000', '#000000'];
+            s.composite.opacity = i / 40;
+            ps.push(N.gpu.setSettings(s));
+          }
+          const last = await N.gpu.call({ cmd: 'read' }); // sent after the settings that wait
+          await Promise.all(ps);
+          N.gpu.wk.postMessage = post;
+          await N.gpu.setSettings({ ...copy(), view: 'original' });
+          const want = await N.gpu.call({ cmd: 'read' });
+          await N.applySettings();
+          let same = last.pixels.length === want.pixels.length;
+          for (let i = 0; same && i < want.pixels.length; i += 97) same = last.pixels[i] === want.pixels[i];
+          return { sent, same };
+        });
+        assert(r.sent >= 1 && r.sent <= 3, `40 settings changes made ${r.sent} messages`);
+        assert(r.same, 'the call after them sees the last settings');
+        // 2. The decoder ends before the last frame that playback waits for: playback stops.
+        const ended = await page.evaluate(async () => {
+          const P = window.neofx.player;
+          await P.seek(0);
+          P.play();
+          P.playTo = P.frameCount + 5; // frames that never come
+          const t0 = performance.now();
+          while (P.playing && performance.now() - t0 < 15000) await new Promise((res) => setTimeout(res, 50));
+          return { playing: P.playing, current: P.current, n: P.frameCount };
+        });
+        assert(!ended.playing && ended.current === ended.n - 1, `playback ended at the last frame: ${JSON.stringify(ended)}`);
+        // A render that fails (a GPU reset) ends its seek: the next seek runs.
+        const again = await page.evaluate(async () => {
+          const P = window.neofx.player;
+          await P.seek(4);
+          const render = P.opts.render;
+          P.opts.render = () => Promise.reject(new Error('The GPU context was lost.'));
+          await P.seek(3); // in the store: a render only
+          const busy = P.busy;
+          P.opts.render = render;
+          const ok = await Promise.race([P.seek(2).then(() => true), new Promise((res) => setTimeout(() => res(false), 5000))]);
+          document.getElementById('message').hidden = true;
+          return { busy, ok, current: P.current };
+        });
+        assert(!again.busy && again.ok && again.current === 2, `a failed render does not block the next seek: ${JSON.stringify(again)}`);
+        // 3. The start animations do not run while a video is open.
+        const snap = () => page.evaluate(() => Array.from(document.getElementById('demoTime').getContext('2d').getImageData(0, 0, 160, 90).data.filter((_, i) => i % 97 === 0)).join());
+        const d1 = await snap();
+        await page.waitForTimeout(400);
+        assert(d1 === (await snap()), 'the start animations stopped');
+        // 4. Under the export dialog, the keyboard does not move the playhead.
+        await page.evaluate(() => window.neofx.player.seek(3));
+        await page.click('#exportBtn');
+        await page.waitForSelector('#exportDialog[open] #exportGo');
+        await page.keyboard.press('ArrowRight');
+        await page.keyboard.press('End');
+        await page.waitForTimeout(200);
+        assert((await page.evaluate(() => window.neofx.player.current)) === 3, 'the keys are off under the dialog');
+        // 5. Esc while the export runs: it is cancelled, the dialog stays and tells it.
+        await page.click('#exportGo');
+        await page.waitForFunction(() => /frames ·/.test(document.querySelector('.exportText').textContent), null, { timeout: 60000 });
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => /cancel/i.test(document.querySelector('.exportText').textContent), null, { timeout: 30000 });
+        assert(await page.evaluate(() => document.getElementById('exportDialog').open), 'the dialog stays open');
+        await page.waitForFunction(() => !window.neofx.player.busy && window.neofx.store.height === 240, null, { timeout: 30000 });
+        await page.click('#exportCancel');
+        assert(!(await page.evaluate(() => document.getElementById('exportDialog').open)), 'Close closes it');
+        // The preview works again.
+        await page.evaluate(() => window.neofx.player.seek(5));
+        assert((await page.evaluate(() => window.neofx.player.current)) === 5, 'the preview is back');
       });
     },
   },

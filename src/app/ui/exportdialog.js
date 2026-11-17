@@ -18,15 +18,24 @@ export class ExportDialog {
     this.result = null;
     this.url = null;
     // The exported file stays in memory only while the dialog is open: then its URL is given back.
-    dialog.addEventListener('close', () => this.release());
+    this.running = false;
+    dialog.addEventListener('close', () => {
+      // Closed while the export runs (it must not go on behind the page): stop it.
+      if (this.running) this.app.cancel();
+      this.release();
+    });
+    // Esc while the export runs: Cancel (the dialog stays, with the result of the cancel).
+    dialog.addEventListener('cancel', (e) => {
+      if (!this.running) return;
+      e.preventDefault();
+      this.app.cancel();
+    });
   }
 
   release() {
     if (this.url) URL.revokeObjectURL(this.url);
     // A large export was written to the browser storage (OPFS): remove that file too.
-    if (this.result && this.result.opfs && navigator.storage && navigator.storage.getDirectory) {
-      navigator.storage.getDirectory().then((d) => d.removeEntry('neofx-export.mp4')).catch(() => {});
-    }
+    if (this.result && this.result.release) this.result.release();
     this.url = null;
     this.result = null;
   }
@@ -85,13 +94,13 @@ export class ExportDialog {
     d.append(form);
     res.addEventListener('change', check);
     check();
-    let running = false;
     cancel.addEventListener('click', () => {
-      if (running) this.app.cancel();
+      if (this.running) this.app.cancel();
       else d.close();
     });
     go.addEventListener('click', async () => {
-      running = true;
+      if (this.running) return;
+      this.running = true;
       go.disabled = true;
       for (const i of form.querySelectorAll('select, input')) i.disabled = true;
       prog.hidden = false;
@@ -119,6 +128,11 @@ export class ExportDialog {
             text.textContent = `${p.done} / ${p.total} frames · ${p.fps.toFixed(1)} fps · ${Math.ceil(p.eta)} s left`;
           }
         });
+        // (The dialog was closed or opened again while the export ended: the file is not needed.)
+        if (!d.open || !form.isConnected) {
+          if (r.release) r.release();
+          return;
+        }
         this.result = r;
         prog.classList.remove('busy');
         bar.style.width = '100%';
@@ -129,7 +143,7 @@ export class ExportDialog {
         text.textContent = e.message;
         cancel.textContent = 'Close';
       } finally {
-        running = false;
+        this.running = false;
       }
     });
     d.showModal();

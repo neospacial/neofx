@@ -348,4 +348,76 @@ export const tests = [
       });
     },
   },
+  {
+    name: 'refine: Edge refine pulls a mask that is too large back to the subject edge; manual mode (no method: the painted area); the cutout overlay while painting; Undo stroke; [ and ] set the brush size',
+    timeout: 180000,
+    async fn() {
+      await withApp('subject.mp4', async (page) => {
+        await set(page, { 'cutout.mode': 'overlay' });
+        await waitPlate(page);
+        const t = 20;
+        const good = iou(await maskAt(page, t), t);
+        await set(page, { 'cutout.grow': 5 });
+        const grown = iou(await maskAt(page, t), t);
+        await set(page, { 'cutout.refine': 12 });
+        const refined = iou(await maskAt(page, t), t);
+        console.log(`      | IoU: ${good.toFixed(3)}, grown by 5 px ${grown.toFixed(3)}, with Edge refine ${refined.toFixed(3)}`);
+        assert(refined > grown + 0.03, `Edge refine: ${grown.toFixed(3)} -> ${refined.toFixed(3)}`);
+        await set(page, { 'cutout.grow': 0 });
+        const kept = iou(await maskAt(page, t), t);
+        assert(kept > 0.9 && kept > good - 0.02, `Edge refine keeps a good mask: ${good.toFixed(3)} -> ${kept.toFixed(3)}`);
+        // Manual: no method. The mask is the painted area.
+        await set(page, { 'cutout.refine': 0, 'cutout.bgdiff.on': false });
+        let m = await maskAt(page, t);
+        assert(m.every((v) => v === 0), 'no method, no matte: an empty mask');
+        assert(await page.evaluate(() => !!document.querySelector('#inspector .manualNote')), 'the inspector says Manual');
+        const box = await page.locator('#view').boundingBox();
+        const at = (x, y) => [box.x + (x / W) * box.width, box.y + (y / H) * box.height];
+        const px = () => page.evaluate(async () => {
+          const r = await window.neofx.gpu.call({ cmd: 'read' });
+          const i = ((r.height - 1 - 200) * r.width + 300) * 4; // a background pixel at (300, 200)
+          return r.pixels[i + 2] - r.pixels[i + 1]; // blue − green: the overlay makes the background violet
+        });
+        await set(page, { view: 'original' });
+        const plain = await px();
+        await page.evaluate(() => {
+          window.neofx.toolState.brush.size = 40;
+          window.neofx.toolState.brush.hardness = 1;
+          window.neofx.tools.setTool('always');
+        });
+        const dim = await px();
+        assert(Math.abs(plain) < 12 && dim > 30, `the overlay shows while a brush is the tool: ${plain} -> ${dim}`);
+        await page.mouse.click(...at(80, 60));
+        await page.waitForTimeout(100);
+        await page.mouse.click(...at(200, 150));
+        await page.waitForTimeout(100);
+        m = await maskAt(page, t);
+        const v = (x, y) => m[y * W + x];
+        assert(v(80, 60) > 200 && v(200, 150) > 200 && v(140, 100) === 0, `painted: ${v(80, 60)}, ${v(200, 150)}, between ${v(140, 100)}`);
+        // Undo stroke (Ctrl+Z while a brush is the tool; then the button).
+        await page.keyboard.press('Control+z');
+        await page.waitForFunction(() => window.neofx.toolState.undoCount === 1);
+        m = await maskAt(page, t);
+        assert(v(80, 60) > 200 && v(200, 150) === 0, `undo: the last stroke is gone (${v(200, 150)}), the first stays (${v(80, 60)})`);
+        await page.evaluate(() => document.querySelector('#inspector button[data-act="undoStroke"]').click());
+        await page.waitForFunction(() => window.neofx.toolState.undoCount === 0);
+        m = await maskAt(page, t);
+        assert(m.every((x) => x === 0) && (await page.evaluate(() => document.querySelector('#inspector button[data-act="undoStroke"]').disabled)), 'undo again: the matte is empty, the button is off');
+        // [ and ]: the brush size.
+        await page.keyboard.press(']');
+        const bigger = await page.evaluate(() => window.neofx.toolState.brush.size);
+        await page.keyboard.press('[');
+        await page.keyboard.press('[');
+        const smaller = await page.evaluate(() => window.neofx.toolState.brush.size);
+        assert(bigger > 40 && smaller < 40, `brush size keys: ${bigger}, ${smaller}`);
+        // The tool off: the plain picture again; Show cutout turns the overlay on without a brush.
+        await page.evaluate(() => window.neofx.tools.setTool(null));
+        assert(Math.abs((await px()) - plain) < 6, 'no tool: no overlay');
+        await page.evaluate(() => window.neofx.toggleOverlay());
+        assert((await px()) > 30, 'Show cutout: the overlay');
+        await page.evaluate(() => window.neofx.toggleOverlay());
+        assert(Math.abs((await px()) - plain) < 6, 'Show cutout off');
+      });
+    },
+  },
 ];

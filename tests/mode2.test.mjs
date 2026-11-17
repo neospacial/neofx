@@ -322,4 +322,46 @@ export const tests = [
       });
     },
   },
+  {
+    name: 'trail shape: Drift and Wave move the trail along the line by drift × distance and by the wave; Twist turns it about the source point; zero values change nothing',
+    timeout: 180000,
+    async fn() {
+      await withMode2(async (page) => {
+        const base = { source: 'line', x: LX, y: LY, angle: 90, flip: false, width: 1, time: false, 'warp.twist': 0, 'warp.drift': 0, 'warp.spread': 0, 'warp.wave': 0, 'warp.waveLength': 80, 'warp.waveSpeed': 0 };
+        const t = 20;
+        const A = await view(page, base, t);
+        const at = (img, x, y) => img[y * W + x];
+        // Time Off: column 164 + s shows the source line at the same y. Drift 0.5: at y − 0.5 s.
+        const B = await view(page, { ...base, 'warp.drift': 0.5 }, t);
+        let bad = 0, n = 0;
+        for (const s of [16, 32, 48]) {
+          for (let y = 60; y < 200; y += 3) {
+            n++;
+            if (Math.abs(at(B, 164 + s, y) - at(A, 164 + s, y - 0.5 * s)) > 8) bad++;
+          }
+        }
+        assert(bad <= n * 0.05, `drift: ${bad} of ${n} samples are wrong`);
+        // Wave 12 px, length 80 px: at s = 20 the sine is 1 (a shift of 12 px), at s = 40 it is 0.
+        const C = await view(page, { ...base, 'warp.wave': 12 }, t);
+        bad = 0;
+        n = 0;
+        for (let y = 60; y < 200; y += 3) {
+          n += 2;
+          if (Math.abs(at(C, 164 + 20, y) - at(A, 164 + 20, y - 12)) > 8) bad++;
+          if (Math.abs(at(C, 164 + 40, y) - at(A, 164 + 40, y)) > 8) bad++;
+        }
+        assert(bad <= n * 0.08, `wave: ${bad} of ${n} samples are wrong`);
+        // Twist: the picture changes on both sides of the straight line (the trail turns into the
+        // other half), but not at the source point.
+        const D = await view(page, { ...base, 'warp.twist': 180 }, t);
+        let diff = 0, near = 0;
+        for (let i = 0; i < A.length; i++) if (Math.abs(A[i] - D[i]) > 40) diff++;
+        for (let y = 122; y <= 126; y++) for (let x = 165; x <= 168; x++) if (Math.abs(at(A, x, y) - at(D, x, y)) > 40) near++;
+        assert(diff > A.length * 0.05 && near === 0, `twist: ${diff} pixels differ, ${near} next to the source point`);
+        // Back to zero: the same picture as before.
+        const E = await view(page, base, t);
+        assert(E.every((v, i) => v === A[i]), 'zero values: no change');
+      });
+    },
+  },
 ];

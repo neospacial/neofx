@@ -10,7 +10,7 @@ import { Timeline } from './ui/timeline.js';
 import { Inspector } from './ui/inspector.js';
 import { DEFAULTS, clone, setPath } from './settings.js';
 import { MAPS } from '../maps/builtin.js';
-import { loadImageMap, loadVideoMap } from '../maps/mapsource.js';
+import { loadImageMap, loadVideoMap, maskVideoSize } from '../maps/mapsource.js';
 import { THUMB_W, THUMB_H } from './ui/inspector.js';
 import { Analysis } from './analysis.js';
 import { LineHandles } from './ui/handles.js';
@@ -18,7 +18,7 @@ import { PreviewTools } from './ui/tools.js';
 import { plateIndices } from '../analysis/cleanplate.js';
 import { makeWorker } from './player.js';
 import { usesMask } from '../maps/builtin.js';
-import { Exporter } from './export.js';
+import { Exporter, cleanExportStorage } from './export.js';
 import { ExportDialog } from './ui/exportdialog.js';
 import { layerCount } from '../gpu/store.js';
 import { History } from './history.js';
@@ -43,7 +43,7 @@ const locks = new Set(); // the sections that Randomize keeps
 let lastSeed = 0;
 const LOCAL_KEY = 'neofx.settings';
 // The state of the preview tools and the clean plate (not part of the settings).
-const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false, matteVersion: 0 };
+const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false, matteVersion: 0, overlay: false, undoCount: 0 };
 let edgeStats = null; // the Subject edge source: the measured GPU time and the Max age limit
 let currentFile = null;
 const settings = clone(DEFAULTS);
@@ -55,6 +55,25 @@ function showMessage(text) {
   const m = $('message');
   m.textContent = text || '';
   m.hidden = !text;
+}
+
+// A call whose failure needs no message here (a GPU restart reports itself).
+const quiet = (p) => {
+  if (p && p.catch) p.catch(() => {});
+  return p;
+};
+
+// The 'open' message for a decode worker. For the video that is open, the clean sync samples are
+// known from the player's worker, so the new worker does not scan the file again.
+const fileKeys = (file) => (file === currentFile && player && player.info ? player.info.cleanKeys : undefined);
+const openMsg = (file) => ({ cmd: 'open', file, keys: fileKeys(file) });
+
+// The state of the page ('start', 'open', 'unsupported'). The example animations of the start
+// screen run only there.
+let demos = null;
+function setState(state) {
+  document.body.dataset.state = state;
+  if (demos) (state === 'start' ? demos.start : demos.stop)();
 }
 
 function status() {
@@ -106,7 +125,20 @@ function ensurePlate() {
 
 // The clean plate (plan §9.2). Auto: the median of 31 frames (decode worker + analysis worker).
 let plateJob = null;
-async function makePlate(kind) {
+let platePromise = null; // the Auto plate that is being made
+function makePlate(kind) {
+  const p = makePlateNow(kind);
+  if (kind !== 'frame' && kind !== 'image') {
+    platePromise = p;
+    const clear = () => {
+      if (platePromise === p) platePromise = null;
+    };
+    p.then(clear, clear);
+  }
+  return p;
+}
+
+async function makePlateNow(kind) {
   if (!player.info) return;
   settings.cutout.plate = kind;
   if (kind === 'frame') {
@@ -123,37 +155,80 @@ async function makePlate(kind) {
     const list = plateIndices(player.frameCount);
     toolState.plateText = 'Making the clean plate…';
     inspector.build(settings, limits());
+    // The working size of the plate. When the engine gets another size while the frames come (the
+    // Preview setting, an export), the plate is made again.
+    const w0 = store.width, h0 = store.height;
+    let resized = false;
     // Each frame as the store keeps it (Y, CbCr), from the GPU.
     const frames = await new Promise((resolve, reject) => {
       const Y = [], C = [];
+      // 'done' can come while the last frames are at the GPU: the end waits for them.
+      let pending = 0, ended = false;
+      const finish = () => {
+        if (!ended || pending) return;
+        // (A damaged file can give fewer frames: the median of the ones that came.)
+        if (Y.length) resolve({ Y, C });
+        else reject(new Error('The clean plate cannot be made: no frames.'));
+      };
+      wk.onerror = (e) => reject(new Error(e.message || 'Decode worker failed.'));
       wk.onmessage = async (e) => {
         const m = e.data;
-        if (m.cmd === 'info') wk.postMessage({ cmd: 'list', job: 1, indices: list });
-        else if (m.cmd === 'frame') {
-          const r = await gpu.call({ cmd: 'plateGrab', frame: m.frame }, [m.frame]);
-          wk.postMessage({ cmd: 'ack' });
-          Y.push(r.Y);
-          C.push(r.C);
-          setProgress((0.9 * Y.length) / list.length);
-          if (Y.length === list.length) resolve({ Y, C });
-        } else if (m.cmd === 'error') reject(new Error(m.message));
+        try {
+          if (m.cmd === 'info') wk.postMessage({ cmd: 'list', job: 1, indices: list });
+          else if (m.cmd === 'frame') {
+            pending++;
+            const r = await gpu.call({ cmd: 'plateGrab', frame: m.frame }, [m.frame]);
+            pending--;
+            if (r.Y.length !== w0 * h0) {
+              resized = true;
+              return resolve(null);
+            }
+            wk.postMessage({ cmd: 'ack' });
+            Y.push(r.Y);
+            C.push(r.C);
+            setProgress((0.9 * Y.length) / list.length);
+            if (Y.length === list.length) resolve({ Y, C });
+            else finish();
+          } else if (m.cmd === 'done') {
+            ended = true;
+            finish();
+          } else if (m.cmd === 'error') reject(new Error(m.message));
+        } catch (err) {
+          reject(err); // the GPU call failed (a GPU restart makes the plate again)
+        }
       };
-      wk.postMessage({ cmd: 'open', file: currentFile });
+      wk.postMessage(openMsg(currentFile));
     }).catch((e) => {
-      showMessage(e.message);
+      if (plateJob === wk && !restarting) showMessage(e.message);
       return null;
     });
     wk.terminate();
     if (plateJob !== wk) return;
     plateJob = null;
-    if (!frames) return setProgress(null);
+    if (!frames) {
+      setProgress(null);
+      toolState.plateText = '';
+      if (resized) ensurePlate();
+      else inspector.build(settings, limits());
+      return;
+    }
     const aw = makeWorker(ANALYSIS_WORKER);
     const med = await new Promise((resolve) => {
       aw.onmessage = (e) => resolve(e.data);
+      aw.onerror = () => resolve(null);
       aw.postMessage({ cmd: 'median', Y: frames.Y, C: frames.C }, [...frames.Y, ...frames.C].map((a) => a.buffer));
     });
     aw.terminate();
     setProgress(null);
+    if (!med || store.width !== w0 || store.height !== h0) {
+      toolState.plateText = '';
+      if (med) ensurePlate();
+      else {
+        showMessage('The clean plate cannot be made (not enough memory).');
+        inspector.build(settings, limits());
+      }
+      return;
+    }
     await gpu.call({ cmd: 'plateYuv', Y: med.Y, C: med.C }, [med.Y.buffer, med.C.buffer]);
     Object.assign(toolState, { plateOk: true, plateText: `Median of ${frames.Y.length} frames` });
     scheduleAnalysis();
@@ -184,30 +259,43 @@ function importMask() {
 async function loadMaskVideo(file) {
   if (!file || !player.info) return;
   const wk = makeWorker(DECODE_WORKER);
+  showMessage('');
   try {
-    await new Promise((resolve, reject) => {
-      let count = 0, rot = 0, done = 0;
+    const note = await new Promise((resolve, reject) => {
+      let count = 0, rot = 0, done = 0, short = 0;
+      wk.onerror = (e) => reject(new Error(e.message || 'Decode worker failed.'));
       wk.onmessage = async (e) => {
         const m = e.data;
-        if (m.cmd === 'error') return reject(new Error(m.message));
-        if (m.cmd === 'info') {
-          count = Math.min(m.times.length, player.frameCount);
-          rot = m.rotation;
-          await gpu.call({ cmd: 'maskImportBegin', width: store.width, height: store.height, count });
-          wk.postMessage({ cmd: 'play', job: 1, from: 0, to: count - 1 });
-        } else if (m.cmd === 'frame') {
-          await gpu.call({ cmd: 'maskImportFrame', i: m.index, frame: m.frame, rotation: rot }, [m.frame]);
-          wk.postMessage({ cmd: 'ack' });
-          setProgress(++done / count);
-        } else if (m.cmd === 'done') {
-          await gpu.call({ cmd: 'caps' }); // all frames are in
-          resolve();
+        try {
+          if (m.cmd === 'error') return reject(new Error(m.message));
+          if (m.cmd === 'info') {
+            const want = Math.min(m.times.length, player.frameCount);
+            // The mask frames stay on the GPU: all of them in a memory budget (a long video gets a
+            // smaller mask), and in the layer limit of the GPU.
+            const budget = Math.min(256 * 1048576, defaultBudget(navigator.userAgent, navigator.maxTouchPoints) / 2);
+            const size = maskVideoSize(store.width, store.height, want, gpuCaps.maxLayers, budget);
+            count = size.count;
+            short = want - count;
+            rot = m.rotation;
+            await gpu.call({ cmd: 'maskImportBegin', width: size.width, height: size.height, count });
+            wk.postMessage({ cmd: 'play', job: 1, from: 0, to: count - 1 });
+          } else if (m.cmd === 'frame') {
+            await gpu.call({ cmd: 'maskImportFrame', i: m.index, frame: m.frame, rotation: rot }, [m.frame]);
+            wk.postMessage({ cmd: 'ack' });
+            setProgress(++done / count);
+          } else if (m.cmd === 'done') {
+            await gpu.call({ cmd: 'caps' }); // all frames are in
+            resolve(short > 0 ? `The mask video is longer than the GPU can hold: the frames after frame ${count - 1} use its mask.` : '');
+          }
+        } catch (err) {
+          reject(err);
         }
       };
-      wk.postMessage({ cmd: 'open', file });
+      wk.postMessage(openMsg(file));
     });
     settings.cutout.import = { on: true, name: file.name };
     gpuState.maskFile = file;
+    if (note) showMessage(note);
   } catch (e) {
     showMessage(e.message);
   }
@@ -226,6 +314,58 @@ async function removeMask() {
 
 function setTool(tool) {
   tools.setTool(tool);
+}
+
+// The cutout overlay on the preview: while a brush is the tool, or with Show cutout.
+const BRUSHES = ['always', 'never', 'erase'];
+let overlaySent = false;
+function syncOverlay() {
+  const on = toolState.overlay || BRUSHES.includes(toolState.tool);
+  if (on === overlaySent) return;
+  overlaySent = on;
+  quiet(gpu.call({ cmd: 'refine', on }));
+}
+
+function toggleOverlay() {
+  toolState.overlay = !toolState.overlay;
+  syncOverlay();
+  inspector.build(settings, limits());
+}
+
+// Undo for the matte (the last strokes, a Clear): the matte before each one, read from the GPU.
+const MATTE_UNDO = 8;
+const matteUndo = []; // promises of { pixels, width, height }
+function matteCheckpoint() {
+  matteUndo.push(gpu.call({ cmd: 'matteGet' }).catch(() => null));
+  if (matteUndo.length > MATTE_UNDO) matteUndo.shift();
+  if (toolState.undoCount !== matteUndo.length) {
+    toolState.undoCount = matteUndo.length;
+    const b = document.querySelector('#inspector button[data-act="undoStroke"]');
+    if (b) b.disabled = false;
+  }
+}
+
+async function undoStroke() {
+  const p = matteUndo.pop();
+  toolState.undoCount = matteUndo.length;
+  const m = p && (await p);
+  if (m) {
+    const r = await gpu.call({ cmd: 'matteSetPixels', pixels: m.pixels, width: m.width, height: m.height }, [m.pixels.buffer]).catch(() => null);
+    if (r && r.ok) {
+      toolState.matteVersion++;
+      scheduleAnalysis();
+      snapMatte();
+    }
+  }
+  inspector.build(settings, limits());
+}
+
+// [ and ]: the brush size.
+function brushSize(k) {
+  const b = toolState.brush;
+  b.size = Math.round(Math.min(400, Math.max(2, b.size * k + (k > 1 ? 1 : -1))));
+  const row = inspector.rows['tools.brushSize'];
+  if (row) row.setValue(b.size);
 }
 
 async function pick(u, v) {
@@ -274,7 +414,7 @@ function scheduleAnalysis() {
   const key = slitKey();
   if (key === analysis.doneKey || key === analysis.key) return;
   analysisTimer = setTimeout(() => {
-    if (settings.mode === 'slitscan' && slitKey() === key) analysis.start(currentFile, player.frameCount, key);
+    if (settings.mode === 'slitscan' && slitKey() === key) analysis.start(currentFile, player.frameCount, key, fileKeys(currentFile));
   }, 300);
 }
 
@@ -318,13 +458,9 @@ async function loadMapFile(file, kind) {
     if (kind === 'image') {
       await loadImageMap(file, gpu);
       settings.map.image.name = file.name;
-      // Kept for a preset file (a data URL, read here: no network).
-      mapInfo.imageDataUrl = await new Promise((resolve) => {
-        const fr = new FileReader();
-        fr.onload = () => resolve(fr.result);
-        fr.onerror = () => resolve(null);
-        fr.readAsDataURL(file);
-      });
+      // Kept for a preset file and a GPU restart (the file itself: a data URL of it would stay in
+      // memory, a third larger; it is made when a preset is saved).
+      mapInfo.imageBlob = file;
     } else {
       const caps = await gpu.call({ cmd: 'caps' });
       const r = await loadVideoMap(file, gpu, { workerSrc: DECODE_WORKER, short: Math.min(store.height || 540, 540), maxLayers: caps.maxLayers, onProgress: setProgress });
@@ -345,7 +481,8 @@ async function loadMapFile(file, kind) {
 
 // Send the settings to the engine. When the effect needs more history, a seek decodes it.
 async function applySettings() {
-  const r = gpu.call({ cmd: 'settings', settings: clone(settings) });
+  const r = gpu.setSettings(clone(settings));
+  quiet(r); // (awaited below; a failure before that is not an unhandled one)
   await syncWrap();
   const depth = effectDepth();
   const more = depth > player.depth;
@@ -393,7 +530,7 @@ function change(path, value, final) {
   if (path === 'mode' || path.startsWith('slitscan.') || (edgeMode() && path.startsWith('cutout.'))) scheduleAnalysis();
   refreshEdgeStats();
   if (path === 'view' || path.startsWith('cutout.') || path.startsWith('map.')) ensurePlate();
-  applySettings();
+  quiet(applySettings());
 }
 
 function setProgress(f) {
@@ -454,7 +591,8 @@ async function openFile(file) {
     if (analysis) analysis.stop();
     if (plateJob) plateJob.terminate();
     plateJob = null;
-    Object.assign(toolState, { plateOk: false, plateText: '' });
+    Object.assign(toolState, { plateOk: false, plateText: '', undoCount: 0 });
+    matteUndo.length = 0;
     settings.cutout.import = { on: false, name: '' };
     gpuState.maskFile = gpuState.plateFile = null;
     currentFile = file;
@@ -462,13 +600,13 @@ async function openFile(file) {
     try {
       info = await player.open(file);
     } catch (e) {
-      document.body.dataset.state = 'start';
+      setState('start');
       $('view').hidden = true;
       showMessage(e.message);
       return;
     }
     setLoading(`Preparing ${file.name}…`);
-    document.body.dataset.state = 'open';
+    setState('open');
     $('view').hidden = false;
     $('exportBtn').disabled = !platform.encoder;
     $('exportBtn').title = platform.encoder ? '' : 'This browser has no video encoder.';
@@ -490,8 +628,12 @@ async function openFile(file) {
 async function exportVideo(opts, onProgress = () => {}) {
   if (!player.info || exporter) throw new Error('Nothing to export.');
   player.pause();
+  stopReverse();
   analysis.stop();
   clearTimeout(analysisTimer);
+  // An Auto clean plate that is being made: the export waits for it (the mask needs it).
+  if (platePromise) await platePromise.catch(() => {});
+  if (exporter) throw new Error('Nothing to export.');
   const view = settings.view;
   settings.view = 'result'; // the export is the result, whatever the preview shows
   let an = null, rejectAnalysis = null;
@@ -507,11 +649,12 @@ async function exportVideo(opts, onProgress = () => {}) {
     },
     analyse: (onP) => new Promise((resolve, reject) => {
       rejectAnalysis = reject;
-      an = new Analysis(DECODE_WORKER, gpu, { onProgress: (f) => f !== null && onP(f), onRows() {}, onDone: resolve });
-      an.start(currentFile, player.frameCount, 'export');
+      an = new Analysis(DECODE_WORKER, gpu, { onProgress: (f) => f !== null && onP(f), onRows() {}, onDone: resolve, onError: (msg) => reject(new Error(msg || 'The analysis failed.')) });
+      an.start(currentFile, player.frameCount, 'export', fileKeys(currentFile));
     }),
     depth: () => effectDepth(),
     wrap: wrapOn,
+    keys: () => fileKeys(currentFile),
   });
   const ex = exporter;
   const cancel = ex.cancel.bind(ex);
@@ -548,8 +691,12 @@ function exportCheck(w, h) {
   return depth > n - 1 ? `The Max delay (${depth} frames) is more than the buffer at ${Math.min(w, h)}p (${n} frames). Choose a lower resolution, or a smaller Max delay.` : '';
 }
 
+// The keyboard is off while an export runs or a dialog is open (a seek or playback would put frames
+// into the frame store of the export).
+const keysOff = () => !!exporter || !!document.querySelector('dialog[open]');
+
 function keys(e) {
-  if (!player.info || e.target.closest('input, select, textarea')) return;
+  if (!player.info || keysOff() || e.target.closest('input, select, textarea')) return;
   const P = player;
   const k = e.key;
   if (k === ' ') {
@@ -569,8 +716,11 @@ function keys(e) {
   }
   else if (k === 'm' || k === 'M') change('view', settings.view === 'mask' ? 'result' : 'mask');
   else if ((k === 'e' || k === 'E') && (e.ctrlKey || e.metaKey)) exportDialog.open();
+  else if ((k === 'z' || k === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey && BRUSHES.includes(toolState.tool) && matteUndo.length) undoStroke(); // while painting: the last stroke
   else if ((k === 'z' || k === 'Z') && (e.ctrlKey || e.metaKey)) (e.shiftKey ? redo() : undo());
   else if ((k === 'y' || k === 'Y') && (e.ctrlKey || e.metaKey)) redo();
+  else if (k === '[' && BRUSHES.includes(toolState.tool)) brushSize(0.8);
+  else if (k === ']' && BRUSHES.includes(toolState.tool)) brushSize(1.25);
   else if (k === 'j' || k === 'J') playReverse();
   else if (k === 'k' || k === 'K') stopAll();
   else if (k === 'l' || k === 'L') {
@@ -614,7 +764,7 @@ function stopAll() {
 
 let holdView = null;
 function keysUp(e) {
-  if (e.key === ' ' && player.info && !e.target.closest('input, select, textarea')) {
+  if (e.key === ' ' && player.info && !keysOff() && !e.target.closest('input, select, textarea')) {
     e.preventDefault();
     if (!preview.spacePanned) player.toggle();
     preview.spacePanned = false;
@@ -632,7 +782,7 @@ function setView(v) {
   settings.view = v;
   viewChanged();
   handles.update();
-  applySettings();
+  quiet(applySettings());
 }
 
 function viewChanged() {
@@ -836,7 +986,8 @@ async function presetThumb(p) {
       const r = await gpu.call({ cmd: 'thumbs', maps: [s.map], t: Math.max(0, player.vcur), width: 160, height: 90 });
       const y = r.images[0];
       const img = ctx.createImageData(160, 90);
-      for (let i = 0; i < y.length; i++) img.data.set([y[i], y[i], y[i], 255], i * 4);
+      const px = new Uint32Array(img.data.buffer); // little-endian RGBA: grey, alpha 255
+      for (let i = 0; i < y.length; i++) px[i] = 0xff000000 | (y[i] * 0x010101);
       return img;
     } catch {
       return null; // no thumbnail (yet): made again at the next build
@@ -875,7 +1026,15 @@ async function presetThumb(p) {
 
 async function savePreset() {
   const assets = {};
-  if (settings.map.source === 'image' && mapInfo.imageDataUrl) assets.mapImage = mapInfo.imageDataUrl;
+  if (settings.map.source === 'image' && mapInfo.imageBlob) {
+    const url = await new Promise((resolve) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => resolve(null);
+      fr.readAsDataURL(mapInfo.imageBlob);
+    });
+    if (url) assets.mapImage = url;
+  }
   if (player.info) {
     const m = await gpu.call({ cmd: 'matteGet' });
     if (!m.empty) {
@@ -922,8 +1081,9 @@ async function loadPreset(file) {
   await replaceSettings(s);
   if (p.assets.mapImage && settings.map.source === 'image') {
     try {
-      await loadImageMap(dataUrlBlob(p.assets.mapImage), gpu);
-      mapInfo.imageDataUrl = p.assets.mapImage;
+      const blob = dataUrlBlob(p.assets.mapImage);
+      await loadImageMap(blob, gpu);
+      mapInfo.imageBlob = blob;
       await applySettings();
     } catch {
       notes.push('The image map of the preset cannot be read.');
@@ -1017,11 +1177,15 @@ function restartGpu() {
       gpuCaps = await gpu.ready;
       analysis.gpu = gpu;
       window.neofx.gpu = gpu;
+      overlaySent = false;
+      matteUndo.length = 0; // (the matte of the new engine can have another size)
+      toolState.undoCount = 0;
+      syncOverlay();
       if (player.info) {
         await configureStore();
         player.setWrap(false);
         await syncWrap(true);
-        if (settings.map.source === 'image' && mapInfo.imageDataUrl) await loadImageMap(dataUrlBlob(mapInfo.imageDataUrl), gpu).catch(() => {});
+        if (settings.map.source === 'image' && mapInfo.imageBlob) await loadImageMap(mapInfo.imageBlob, gpu).catch(() => {});
         if (settings.map.source === 'video' && gpuState.mapVideoFile) await loadMapFile(gpuState.mapVideoFile, 'video');
         if (settings.cutout.import.on && gpuState.maskFile) await loadMaskVideo(gpuState.maskFile);
         if (settings.cutout.plate === 'image' && gpuState.plateFile) await plateImage(gpuState.plateFile);
@@ -1106,7 +1270,7 @@ async function start() {
   const p = (platform = await checkPlatform());
   window.neofx = { version: VERSION, platform: p };
   if (!p.ok) {
-    document.body.dataset.state = 'unsupported';
+    setState('unsupported');
     showMessage(p.fatal);
     return;
   }
@@ -1140,7 +1304,10 @@ async function start() {
     },
     // New rows: show them on a paused preview.
     onRows: () => {
-      if (!player.playing && !player.busy && player.vcur >= 0) gpu.call({ cmd: 'render', index: player.vcur });
+      if (!player.playing && !player.busy && player.vcur >= 0) quiet(gpu.call({ cmd: 'render', index: player.vcur }));
+    },
+    onError: (msg) => {
+      if (!restarting) showMessage(`The analysis stopped: ${msg}`);
     },
     onDone: () => {
       status();
@@ -1149,22 +1316,27 @@ async function start() {
   });
   tools = new PreviewTools($('preview'), $('view'), {
     pick,
+    strokeStart: matteCheckpoint,
     stroke: (points, mode) => {
       toolState.matteVersion++;
       scheduleAnalysis();
       snapMatte();
-      return gpu.call({ cmd: 'matteStroke', points, size: toolState.brush.size, hardness: toolState.brush.hardness, mode });
+      return quiet(gpu.call({ cmd: 'matteStroke', points, size: toolState.brush.size, hardness: toolState.brush.hardness, mode }));
     },
     brush: toolState.brush,
     onTool: (t) => {
       toolState.tool = t;
-      for (const b of document.querySelectorAll('#inspector .toolRow button[data-act]')) b.classList.toggle('on', b.dataset.act === t);
+      syncOverlay();
+      for (const b of document.querySelectorAll('#inspector .toolRow button[data-act]')) b.classList.toggle('on', b.dataset.act === t || (b.dataset.act === 'overlay' && toolState.overlay));
       handles.update();
     },
   });
   inspector = new Inspector($('inspector'), {
     change, openMap, info: () => mapInfo, tools: toolState, setTool, plate: makePlate, importMask, removeMask,
+    toggleOverlay,
+    undoStroke,
     clearMatte: () => {
+      matteCheckpoint();
       toolState.matteVersion++;
       clearTimeout(matteTimer);
       gpuState.matte = null;
@@ -1183,7 +1355,7 @@ async function start() {
     Object.assign(settings, saved);
   }
   inspector.build(settings, { maxDelay: 999, maxAge: 600, maxAgeEdge: 512 });
-  gpu.call({ cmd: 'settings', settings: clone(settings) });
+  quiet(gpu.setSettings(clone(settings)));
   for (const b of document.querySelectorAll('#viewBar button[data-view]')) b.addEventListener('click', () => setView(b.dataset.view));
   for (const b of document.querySelectorAll('#viewBar button[data-zoom]')) {
     b.addEventListener('click', () => {
@@ -1210,7 +1382,9 @@ async function start() {
   $('redoBtn').addEventListener('click', redo);
   $('presetFileInput').addEventListener('change', (e) => loadPreset(e.target.files[0]));
   document.addEventListener('keyup', keysUp);
-  startDemos($('demoTime'), $('demoSlit'));
+  demos = startDemos($('demoTime'), $('demoSlit'));
+  if (document.body.dataset.state !== 'start') demos.stop();
+  cleanExportStorage(); // a large export of an earlier visit that stayed in the browser storage
   undoButtons();
     exportDialog = new ExportDialog($('exportDialog'), {
     info: () => player.info,
@@ -1246,7 +1420,7 @@ async function start() {
       $('benchClose').disabled = false;
     }
   });
-  Object.assign(window.neofx, { restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  Object.assign(window.neofx, { toggleOverlay, undoStroke, cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   for (const id of ['fileInput', 'maskFileInput', 'mapFileInput']) watchPicker($(id));
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));

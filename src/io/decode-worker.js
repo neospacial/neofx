@@ -3,7 +3,9 @@
 // decoder a few samples ahead, back-pressure on the frames that the page has not given back.
 //
 // Messages in:
-//   { cmd: 'open', file }                       -> 'info' or 'error'
+//   { cmd: 'open', file, keys }                 -> 'info' or 'error'. keys (optional): the clean sync
+//                                                  samples from the 'info' of another worker for the
+//                                                  same file (then the file is not scanned again)
 //   { cmd: 'seek', job, t, from }               -> 'frame' for each frame from .. t, then 'done'
 //   { cmd: 'play', job, from, to }              -> 'frame' for each frame from .. to, then 'done'
 //   { cmd: 'thumbs', job, count, width }        -> 'thumb' { i, index, bitmap } for each, then 'done'
@@ -142,7 +144,27 @@ async function sendFrame(job, t, frame, warm) {
   post({ cmd: 'frame', job, index: t, warm, frame }, [frame]);
 }
 
-async function open(file) {
+// The clean sync samples (IDR): seeks start only there. The first sample is always one. The head of
+// each sync sample is read (H.264 / HEVC only), some reads at a time: one read after the other is
+// slow for a long file, most of all through the content provider of a picked file on Android.
+async function cleanKeys(file, d, keys) {
+  if (!/^(avc[13]|hvc1|hev1)\./.test(d.codec) || !d.description) return keys.slice();
+  const clean = [];
+  const BATCH = 16;
+  for (let i = 0; i < keys.length; i += BATCH) {
+    const part = keys.slice(i, i + BATCH);
+    const heads = await Promise.all(part.map((k) => {
+      const s = d.samples[k];
+      return file.slice(s.offset, s.offset + Math.min(s.size, 4096)).arrayBuffer();
+    }));
+    heads.forEach((h, j) => {
+      if (!clean.length || isCleanStart(d, new Uint8Array(h))) clean.push(part[j]);
+    });
+  }
+  return clean;
+}
+
+async function open(file, hint) {
   const d = await demuxMp4(file);
   if (!d) return post({ cmd: 'error', message: 'Only MP4 and MOV files are supported.' });
   let ok = false;
@@ -154,14 +176,12 @@ async function open(file) {
   if (!ok) return post({ cmd: 'error', message: `This browser cannot decode this file (codec: ${d.codec}).` });
   const tl = buildTimeline(d);
   if (!tl.frames.length) return post({ cmd: 'error', message: 'This file has no video frames.' });
-  // Seeks start only at clean sync samples (IDR). The first sample is always one.
-  const clean = [];
-  for (const k of tl.keys) {
-    const s = d.samples[k];
-    const head = new Uint8Array(await file.slice(s.offset, s.offset + Math.min(s.size, 4096)).arrayBuffer());
-    if (!clean.length || isCleanStart(d, head)) clean.push(k);
-  }
+  // A hint from another worker of the same file is used when it fits this file (sync samples only).
+  const isKey = new Set(tl.keys);
+  const hinted = Array.isArray(hint) && hint.length && hint[0] === tl.keys[0] && hint.every((k) => isKey.has(k));
+  const clean = hinted ? hint.slice() : await cleanKeys(file, d, tl.keys);
   tl.keys = clean;
+  const cleanSet = new Set(clean);
   Object.assign(W, { file, d, tl });
   const a = d.audio;
   post({
@@ -176,7 +196,8 @@ async function open(file) {
     durationUs: tl.durationUs,
     times: tl.frames.map((f) => f.us),
     frameSamples: tl.frames.map((f) => f.sample),
-    keyFrames: tl.frames.map((f, t) => (clean.includes(f.sample) ? t : -1)).filter((t) => t >= 0),
+    keyFrames: tl.frames.map((f, t) => (cleanSet.has(f.sample) ? t : -1)).filter((t) => t >= 0),
+    cleanKeys: clean,
     audio: a ? { codec: a.codec, channels: a.channels, sampleRate: a.sampleRate, durationUs: a.durationUs } : null,
   });
 }
@@ -257,7 +278,7 @@ self.onmessage = (e) => {
   } else if (m.cmd === 'open') {
     W.job = -1;
     poke();
-    chain = chain.then(() => open(m.file)).catch((err) => post({ cmd: 'error', message: String(err && err.message ? err.message : err) }));
+    chain = chain.then(() => open(m.file, m.keys)).catch((err) => post({ cmd: 'error', message: String(err && err.message ? err.message : err) }));
   } else if (m.cmd === 'seek') runJob(seek, m);
   else if (m.cmd === 'play') runJob(play, m);
   else if (m.cmd === 'thumbs') runJob(thumbs, m);
