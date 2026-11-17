@@ -27,6 +27,7 @@ import { PRESETS, applyPreset, presetFile, parsePresetFile, dataUrlBlob, merge }
 import { initLayout } from './ui/layout.js';
 import { startDemos } from './ui/startscreen.js';
 import { runBench } from './bench.js';
+import { Mosh, MOSH_LOOK } from './mosh.js';
 
 const $ = (id) => document.getElementById(id);
 const VERSION = '@VERSION@';
@@ -34,9 +35,12 @@ const DECODE_WORKER = "@WORKER:io/demux.js,io/timeline.js,io/decode-worker.js";
 const GPU_WORKER = "@WORKER:maps/builtin.js,maps/curve.js,modes/slit.js,analysis/regions.js,gpu/store.js,gpu/gl.js,gpu/blend.js,gpu/mapgen.js,gpu/slit.js,gpu/mask.js,gpu/edge.js,gpu/engine.js,gpu/gpu-worker.js";
 const ANALYSIS_WORKER = "@WORKER:analysis/cleanplate.js,analysis/analysis-worker.js";
 const ENCODE_WORKER = "@WORKER:io/encode-worker.js";
+// Mode 3, Datamosh: the neomosh codec (with its WebAssembly kernels), the muxer, the recorder.
+const MOSH_WORKER = "@WORKER:mosh/codec/bitio.js,mosh/codec/tables.js,mosh/codec/transform.js,mosh/codec/inter.js,mosh/codec/mvpred.js,mosh/codec/cavlc.js,mosh/codec/intra.js,mosh/codec/headers.js,mosh/codec/color.js,mosh/codec/wasm-bytes.js,mosh/codec/wasm.js,mosh/codec/decoder.js,mosh/codec/encoder.js,mosh/mux/mp4.js,mosh/mux/remux.js,mosh/capture.js,io/demux.js,mosh/mosh-worker.js";
 
 let player, preview, timeline, gpu, inspector, analysis, handles, tools, exportDialog, gpuCaps, platform;
 let exporter = null; // the export that runs
+let mosh = null; // Mode 3, Datamosh
 let layout = null;
 const history = new History();
 const locks = new Set(); // the sections that Randomize keeps
@@ -74,6 +78,37 @@ let demos = null;
 function setState(state) {
   document.body.dataset.state = state;
   if (demos) (state === 'start' ? demos.start : demos.stop)();
+}
+
+// The mode on the page: the Datamosh record bar, the view buttons, the Export button (the Datamosh
+// export needs no encoder of the browser).
+function modeChanged() {
+  document.body.dataset.mode = settings.mode;
+  const dm = settings.mode === 'datamosh';
+  const ok = !!player && !!player.info && (dm || platform.encoder);
+  $('exportBtn').disabled = !ok;
+  $('exportBtn').title = ok || !player || !player.info ? '' : 'This browser has no video encoder.';
+  if (mosh) {
+    if (!dm && mosh.busy) {
+      mosh.pause();
+      mosh.stopPlay();
+    }
+    mosh.show();
+  }
+}
+
+// The frame of the open video at a file time (the last frame that starts at or before it).
+function frameAtUs(us) {
+  const T = player.info.times;
+  let lo = 0, hi = T.length - 1, r = 0;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (T[m] <= us + 1) {
+      r = m;
+      lo = m + 1;
+    } else hi = m - 1;
+  }
+  return r;
 }
 
 function status() {
@@ -511,6 +546,8 @@ function change(path, value, final) {
     if (final) history.cut();
   }
   setPath(settings, path, value);
+  if (path === 'mode') modeChanged();
+  if (path.startsWith('mosh.') && mosh) mosh.settingsChanged();
   // The Subject edge source needs the cutout (plan §8.5); Scan object is Mode 2 only.
   if (path === 'slitscan.source' && value === 'edge' && settings.cutout.mode === 'off') settings.cutout.mode = 'overlay';
   if (path === 'cutout.mode' && value === 'off' && settings.slitscan.source === 'edge') settings.slitscan.source = 'line';
@@ -585,6 +622,11 @@ async function openFile(file) {
     return;
   }
   showMessage('');
+  // Datamosh: a clip that is recorded ends first (the session stays: the next clip is from this file).
+  if (mosh && mosh.busy) {
+    mosh.stopPlay();
+    await mosh.pause();
+  }
   setLoading(`Opening ${file.name}…`);
   try {
     timeline.reset();
@@ -608,8 +650,7 @@ async function openFile(file) {
     setLoading(`Preparing ${file.name}…`);
     setState('open');
     $('view').hidden = false;
-    $('exportBtn').disabled = !platform.encoder;
-    $('exportBtn').title = platform.encoder ? '' : 'This browser has no video encoder.';
+    modeChanged();
     handles.update();
     try {
       await configureStore();
@@ -693,9 +734,11 @@ function exportCheck(w, h) {
 
 // The keyboard is off while an export runs or a dialog is open (a seek or playback would put frames
 // into the frame store of the export).
-const keysOff = () => !!exporter || !!document.querySelector('dialog[open]');
+const keysOff = () => !!exporter || !!document.querySelector('dialog[open]') || !!(mosh && (mosh.busy || mosh.exporting));
 
 function keys(e) {
+  // Datamosh: R records / pauses, B (held) blooms; also while a clip is recorded.
+  if (player.info && mosh && !exporter && !document.querySelector('dialog[open]') && !e.target.closest('input, select, textarea') && mosh.key(e, true)) return e.preventDefault();
   if (!player.info || keysOff() || e.target.closest('input, select, textarea')) return;
   const P = player;
   const k = e.key;
@@ -715,7 +758,7 @@ function keys(e) {
     syncWrap();
   }
   else if (k === 'm' || k === 'M') change('view', settings.view === 'mask' ? 'result' : 'mask');
-  else if ((k === 'e' || k === 'E') && (e.ctrlKey || e.metaKey)) exportDialog.open();
+  else if ((k === 'e' || k === 'E') && (e.ctrlKey || e.metaKey)) openExport();
   else if ((k === 'z' || k === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey && BRUSHES.includes(toolState.tool) && matteUndo.length) undoStroke(); // while painting: the last stroke
   else if ((k === 'z' || k === 'Z') && (e.ctrlKey || e.metaKey)) (e.shiftKey ? redo() : undo());
   else if ((k === 'y' || k === 'Y') && (e.ctrlKey || e.metaKey)) redo();
@@ -763,7 +806,13 @@ function stopAll() {
 }
 
 let holdView = null;
+function openExport() {
+  if (settings.mode === 'datamosh') mosh.openExport();
+  else exportDialog.open();
+}
+
 function keysUp(e) {
+  if (mosh && player.info && mosh.key(e, false)) return;
   if (e.key === ' ' && player.info && !keysOff() && !e.target.closest('input, select, textarea')) {
     e.preventDefault();
     if (!preview.spacePanned) player.toggle();
@@ -803,6 +852,8 @@ function replaceSettings(next) {
   for (const k of Object.keys(settings)) delete settings[k];
   Object.assign(settings, clone(next));
   inspector.build(settings, limits());
+  modeChanged();
+  if (mosh) mosh.settingsChanged();
   viewChanged();
   handles.update();
   updateThumbs();
@@ -860,7 +911,7 @@ function loadLocal() {
 
 // Randomize (plan §12.5): the sections of the mode that are not locked (or the given ones), with a
 // seed (the same seed gives the same look). One undo step.
-const MODE_SECTIONS = { timemap: ['map', 'adjust', 'anim', 'time', 'composite', 'look'], slitscan: ['source', 'time2', 'composite', 'look'] };
+const MODE_SECTIONS = { timemap: ['map', 'adjust', 'anim', 'time', 'composite', 'look'], slitscan: ['source', 'time2', 'composite', 'look'], datamosh: [] };
 function randomize(sections, seed) {
   lastSeed = seed ?? Math.floor(Math.random() * 1e6);
   const list = (sections || MODE_SECTIONS[settings.mode]).filter((sec) => sections || !locks.has(sec));
@@ -1222,6 +1273,10 @@ function onVisibility() {
   if (document.hidden) {
     if (player) player.pause();
     stopReverse();
+    if (mosh && mosh.busy) {
+      mosh.stopPlay();
+      mosh.pause(); // (timers are slow in the background: the clip ends here)
+    }
     return;
   }
   setTimeout(async () => {
@@ -1296,6 +1351,26 @@ async function start() {
     onProgress: setProgress,
   });
   timeline = new Timeline($('transport'), player);
+  mosh = new Mosh({
+    workerSrc: MOSH_WORKER, canvas: $('moshView'), bar: $('moshBar'), dialog: $('moshDialog'), settings, player,
+    file: () => currentFile,
+    info: () => player.info,
+    message: showMessage,
+    changed: () => {
+      if (inspector && settings.mode === 'datamosh') inspector.build(settings, limits());
+    },
+    // While a clip is recorded: the playhead of the timeline follows the file time.
+    playhead: (us) => {
+      if (!player.info) return;
+      player.current = frameAtUs(us);
+      timeline.update();
+    },
+    // After a clip: the source at the next frame (the next clip continues there).
+    seekSource: (us, ended) => {
+      if (!player.info) return;
+      quiet(player.seek(Math.min(player.frameCount - 1, frameAtUs(us) + (ended ? 0 : 1))));
+    },
+  });
   handles = new LineHandles($('preview'), $('view'), { change, settings, tools: toolState, edgeMode: () => edgeMode() });
   analysis = new Analysis(DECODE_WORKER, gpu, {
     onProgress: (f) => {
@@ -1344,6 +1419,13 @@ async function start() {
       return gpu.call({ cmd: 'matteClear' });
     },
     edgeStats: () => edgeStats,
+    mosh: () => mosh,
+    moshDefault: () => {
+      // One undo step: the encoder look back to the neomosh defaults.
+      history.record(JSON.stringify(settings), 'moshDefault');
+      history.cut();
+      return replaceSettings({ ...settings, mosh: { ...settings.mosh, ...MOSH_LOOK } });
+    },
     locks,
     toggleLock,
     randomize: (list) => randomize(list),
@@ -1376,6 +1458,7 @@ async function start() {
   preview.onChange = () => {
     handles.update();
     viewChanged();
+    mosh.place(preview.canvas);
   };
   $('presetsBtn').addEventListener('click', openPresets);
   $('undoBtn').addEventListener('click', undo);
@@ -1395,7 +1478,8 @@ async function start() {
     run: exportVideo,
     cancel: () => exporter && exporter.cancel(),
   });
-  $('exportBtn').addEventListener('click', () => exportDialog.open());
+  $('exportBtn').addEventListener('click', openExport);
+  modeChanged();
   $('benchClose').addEventListener('click', () => $('benchDialog').close());
   $('benchCopy').addEventListener('click', () => {
     const t = $('benchOut');
@@ -1420,7 +1504,7 @@ async function start() {
       $('benchClose').disabled = false;
     }
   });
-  Object.assign(window.neofx, { toggleOverlay, undoStroke, cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  Object.assign(window.neofx, { mosh, toggleOverlay, undoStroke, cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   for (const id of ['fileInput', 'maskFileInput', 'mapFileInput']) watchPicker($(id));
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));

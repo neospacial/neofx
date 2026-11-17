@@ -8,6 +8,7 @@ import { getPath, fixSteps } from '../settings.js';
 import { MAPS } from '../../maps/builtin.js';
 import { curveEditor } from './curve.js';
 import { RANDOM_SECTIONS } from '../random.js';
+import { MOSH_SIZES, MOSH_RATES, MOSH_LOOK } from '../mosh.js';
 
 export const THUMB_W = 72;
 export const THUMB_H = 40;
@@ -45,7 +46,7 @@ export class Inspector {
     };
     const on = (key) => (v) => this.app.change(key, v);
     // The tab of each section in the narrow layout (plan §12.3).
-    const TABS = { presets: 'presets', mode: 'mode', map: 'map', adjust: 'map', anim: 'map', source: 'map', time: 'time', time2: 'time', warp: 'time', cutout: 'cutout', subject: 'cutout', composite: 'mix', look: 'look' };
+    const TABS = { presets: 'presets', mode: 'mode', map: 'map', adjust: 'map', anim: 'map', source: 'map', time: 'time', time2: 'time', warp: 'time', mosh: 'map', moshlook: 'time', moshhist: 'mix', cutout: 'cutout', subject: 'cutout', composite: 'mix', look: 'look' };
     const sec = (name, title, def = true) => {
       const d = section(title, open[name] ?? def);
       d.dataset.name = name;
@@ -83,8 +84,13 @@ export class Inspector {
     if (this.app.presetPanel) this.app.presetPanel(sec('presets', 'Presets', false));
 
     const mode = sec('mode', 'Mode');
-    add(mode, segmented({ key: 'mode', options: [['timemap', 'Time Map'], ['slitscan', 'Slit Scan']], value: S.mode, onChange: on('mode') }));
+    add(mode, segmented({ key: 'mode', options: [['timemap', 'Time Map'], ['slitscan', 'Slit Scan'], ['datamosh', 'Datamosh']], value: S.mode, onChange: on('mode') }));
 
+    if (S.mode === 'datamosh') {
+      this.buildMosh(S, sec, add, num, bool, on);
+      this.tabBar([['presets', 'Presets'], ['mode', 'Mode'], ['map', 'Mosh'], ['time', 'Look'], ['mix', 'History']]);
+      return;
+    }
     if (S.mode === 'timemap') {
       // Map.
       const M = S.map;
@@ -357,19 +363,118 @@ export class Inspector {
     if (S.mode === 'timemap') add(look, slider({ key: 'look.offset', label: 'Spatial offset', min: 0, max: 64, step: 0.5, value: L.offset, def: 0, unit: 'px', onChange: on('look.offset') }));
     if (S.mode === 'timemap' && L.offset > 0) add(look, slider({ key: 'look.offsetAngle', label: 'Offset angle', min: 0, max: 360, step: 1, value: L.offsetAngle, def: 0, unit: '°', onChange: on('look.offsetAngle') }));
 
-    // The narrow layout: tabs for the sections (plan §12.3).
+    this.tabBar([['presets', 'Presets'], ['mode', 'Mode'], ['map', S.mode === 'timemap' ? 'Map' : 'Source'], ['time', 'Time'], ['cutout', 'Cutout'], ['mix', 'Mix'], ['look', 'Look']]);
+  }
+
+  // The narrow layout: tabs for the sections (plan §12.3).
+  tabBar(list) {
     const tabs = document.createElement('div');
     tabs.className = 'tabBar';
     tabs.setAttribute('role', 'tablist');
-    for (const [id, text] of [['presets', 'Presets'], ['mode', 'Mode'], ['map', S.mode === 'timemap' ? 'Map' : 'Source'], ['time', 'Time'], ['cutout', 'Cutout'], ['mix', 'Mix'], ['look', 'Look']]) {
+    for (const [id, text] of list) {
       const b = Object.assign(document.createElement('button'), { type: 'button', textContent: text });
       b.dataset.tab = id;
       b.setAttribute('role', 'tab');
       b.addEventListener('click', () => this.setTab(id));
       tabs.append(b);
     }
-    r.prepend(tabs);
-    this.setTab(this.tab || 'mode');
+    this.root.prepend(tabs);
+    // (A tab of another mode that this mode does not have: the Mode tab.)
+    this.setTab(list.some(([id]) => id === this.tab) ? this.tab : 'mode');
+  }
+
+  // Mode 3, Datamosh (from neomosh): the session, the encoder look, the history.
+  buildMosh(S, sec, add, num, bool, on) {
+    const M = this.app.mosh ? this.app.mosh() : null;
+    const ses = M && M.session && M.session.frames ? M.session : null;
+    const p = (text, cls = 'note') => Object.assign(document.createElement('p'), { className: cls, textContent: text });
+    const button = (text, act, fn) => {
+      const b = Object.assign(document.createElement('button'), { type: 'button', textContent: text });
+      b.dataset.act = act;
+      b.addEventListener('click', fn);
+      return b;
+    };
+    const main = sec('mosh', 'Datamosh');
+    main.append(p('1. Move the playhead to the start of a shot. 2. Touch the red button (R) to record; touch it again to pause. 3. Move the playhead (or open another video) and record again: the new clip has no keyframe, so its motion moves the old picture. Hold BLOOM (B) while paused to repeat the last motion.'));
+    const size = add(main, select({ key: 'mosh.size', label: 'Size (short side)', options: MOSH_SIZES.map((v) => [String(v), String(v)]), value: String(S.mosh.size), onChange: (v) => this.app.change('mosh.size', Number(v)) }));
+    const fps = add(main, select({ key: 'mosh.fps', label: 'Frame rate', options: MOSH_RATES.map((v) => [String(v), `${v} fps`]), value: String(S.mosh.fps), onChange: (v) => this.app.change('mosh.fps', Number(v)) }));
+    for (const row of [size, fps]) {
+      const s = row.querySelector('select');
+      s.disabled = !!ses;
+      const set = row.setValue;
+      row.setValue = (v) => set(String(v));
+    }
+    if (ses) main.append(p(`This video is ${ses.w}×${ses.h} at ${ses.fps} fps. The size and the frame rate can change before the first recorded frame (New video).`));
+    num(main, 'mosh.guide', 'Guide', 0, 1, 0.01, 0.5);
+    main.append(p('Guide: while paused, the last picture shows over the video at this opacity, to align the next shot.'));
+    bool(main, 'mosh.preview', 'Mosh preview');
+    const row = Object.assign(document.createElement('div'), { className: 'toolRow' });
+    let armed = 0;
+    const fresh = button('New video', 'moshNew', () => {
+      // Two touches (the video is deleted).
+      if (!ses || Date.now() - armed < 4000) return M.revert(-1);
+      armed = Date.now();
+      fresh.textContent = 'Delete the video?';
+      setTimeout(() => (fresh.textContent = 'New video'), 4000);
+    });
+    fresh.disabled = !ses || M.busy;
+    row.append(fresh);
+    main.append(row);
+
+    const look = sec('moshlook', 'Mosh look');
+    num(look, 'mosh.qp', 'Quality (QP)', 16, 44, 1, MOSH_LOOK.qp);
+    const strSel = (key, label, options) => add(look, select({ key, label, options, value: String(S.mosh[key.split('.')[1]]), onChange: (v) => this.app.change(key, key === 'mosh.searchRange' ? Number(v) : v) }));
+    const sr = strSel('mosh.searchRange', 'Search range', [['8', '±8'], ['16', '±16'], ['32', '±32'], ['64', '±64']]);
+    const setSr = sr.setValue;
+    sr.setValue = (v) => setSr(String(v));
+    strSel('mosh.precision', 'Motion', [['full', 'Full'], ['half', 'Half'], ['quarter', 'Quarter']]);
+    num(look, 'mosh.skipBias', 'Skip bias', 0, 100, 1, MOSH_LOOK.skipBias);
+    strSel('mosh.heal', 'Heal', [['off', 'Off'], ['low', 'Low'], ['high', 'High']]);
+    strSel('mosh.denoise', 'Denoise', [['off', 'Off'], ['low', 'Low'], ['high', 'High']]);
+    const lr = Object.assign(document.createElement('div'), { className: 'toolRow' });
+    lr.append(button('Default look', 'moshDefault', () => this.app.moshDefault && this.app.moshDefault()));
+    look.append(lr);
+    look.append(p('The look applies to the next clip; each clip keeps its own. QP: high = coarse blocks. Search range: larger = longer smears with fast motion. Motion: Full = blocky steps, Quarter = a smooth smear. Skip bias: high = more old pixels stay. Heal repairs bad areas (a partial mosh).'));
+
+    const hist = sec('moshhist', 'History');
+    if (!ses) {
+      hist.append(p('No clips yet.'));
+      return;
+    }
+    const pr = Object.assign(document.createElement('div'), { className: 'moshScrubRow' });
+    const playing = M.state === 'playing';
+    const play = button(playing ? 'Stop' : 'Play', 'moshPlay', () => (playing ? M.stopPlay() : M.play()));
+    play.disabled = M.busy && !playing;
+    const scrub = Object.assign(document.createElement('input'), { type: 'range', className: 'moshScrub', min: 0, max: ses.durationUs / 1e6, step: 1 / ses.fps, value: (M.lookUs ?? ses.durationUs) / 1e6 });
+    scrub.setAttribute('aria-label', 'Time in the recorded video');
+    scrub.disabled = M.busy;
+    scrub.addEventListener('input', () => M.seek(Number(scrub.value) * 1e6));
+    const end = button('Last picture', 'moshLive', () => M.live());
+    end.disabled = M.busy;
+    pr.append(play, scrub, end);
+    hist.append(pr);
+    const cards = Object.assign(document.createElement('div'), { className: 'moshCards' });
+    const time = (us) => {
+      const ds = Math.floor(us / 100000);
+      return `${Math.floor(ds / 600)}:${String(Math.floor(ds / 10) % 60).padStart(2, '0')}.${ds % 10}`;
+    };
+    ses.points.forEach((pt, i) => {
+      const card = Object.assign(document.createElement('div'), { className: 'moshCard' });
+      card.dataset.point = String(i);
+      const c = document.createElement('canvas');
+      const th = M.thumbs[i];
+      c.width = th ? th.width : 72;
+      c.height = th ? th.height : 40;
+      if (th) c.getContext('2d').drawImage(th, 0, 0);
+      const last = i === ses.points.length - 1;
+      const rv = button('Revert', 'moshRevert', () => M.revert(i));
+      rv.disabled = last || M.busy;
+      rv.title = last ? 'The video ends here' : 'Delete all clips after this point';
+      card.append(c, Object.assign(document.createElement('span'), { textContent: `Pause ${i + 1} · ${time(pt.tsUs)} · ${pt.frames} frames` }), rv);
+      cards.append(card);
+    });
+    hist.append(cards);
+    hist.append(p('Revert deletes all clips after a pause point, and the next clip continues from it. Export (top right) makes the file: for each cut, Mosh or Clean.'));
   }
 
   // Show the Presets section (the Presets button): its tab, open, in view.

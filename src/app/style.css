@@ -103,8 +103,8 @@ body[data-state="start"] #viewBar{display:none}
 .setting.color{grid-template-columns:96px auto 1fr}
 .setting.color input[type=color]{width:40px;height:28px;padding:0;border:1px solid var(--line);border-radius:4px;background:none}
 #benchDialog textarea{width:100%;font:12px ui-monospace,monospace;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px}
-#benchDialog,#exportDialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:0;width:min(440px,calc(100vw - 32px))}
-#exportDialog::backdrop{background:rgba(0,0,0,.6)}
+#benchDialog,#exportDialog,#moshDialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:0;width:min(440px,calc(100vw - 32px))}
+#exportDialog::backdrop,#moshDialog::backdrop{background:rgba(0,0,0,.6)}
 .exportForm{display:grid;gap:8px;padding:16px}
 .exportForm h2{margin:0 0 4px;font-size:16px}
 .exportRow{display:grid;grid-template-columns:140px 1fr;align-items:center;gap:8px;font-size:13px;color:var(--dim)}
@@ -216,3 +216,25 @@ a.button{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;b
 
 /* The transport icons (SVG: the media symbols are emoji on iOS). */
 #transport .controls button svg{width:18px;height:18px;fill:currentColor;display:block;margin:auto;pointer-events:none}
+/* Mode 3, Datamosh: the mosh picture over the preview, and the record bar. */
+#moshView{position:absolute;transform-origin:0 0;object-fit:contain;pointer-events:none;z-index:1}
+#moshView[hidden]{display:none}
+#moshBar{display:none;position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:3;align-items:center;gap:10px;padding:6px 12px;background:rgba(20,21,24,.82);border:1px solid var(--line);border-radius:28px;max-width:calc(100% - 16px)}
+body[data-state="open"][data-mode="datamosh"] #moshBar{display:flex}
+#moshBar [data-act="rec"]{width:44px;height:44px;min-height:44px;padding:0;border-radius:50%;border:2px solid #fff;background:transparent;display:grid;place-items:center;flex:none}
+#moshBar [data-act="rec"] span{display:block;width:28px;height:28px;border-radius:50%;background:#e5383b;transition:border-radius .12s,width .12s,height .12s}
+#moshBar [data-act="rec"].on span{width:16px;height:16px;border-radius:3px}
+#moshBar [data-act="bloom"]{min-height:36px;padding:0 12px;border-radius:18px;font-size:12px;font-weight:600;letter-spacing:.04em;flex:none;touch-action:none;user-select:none;-webkit-user-select:none}
+#moshBar [data-act="bloom"].on{background:var(--accent);color:#000}
+#moshBar button:disabled{opacity:.4}
+.moshInfo{font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+body[data-mode="datamosh"] #viewBar button[data-view],body[data-mode="datamosh"] #viewBar .vsep{display:none}
+body[data-mosh="recording"] #transport,body[data-mosh="blooming"] #transport{pointer-events:none;opacity:.5}
+.moshCards{display:grid;gap:6px;padding:4px 12px}
+.moshCard{display:grid;grid-template-columns:72px 1fr auto;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
+.moshCard canvas{width:72px;height:auto;border-radius:4px;background:#000;display:block}
+.moshCard button{min-height:28px;font-size:12px;padding:0 8px}
+.moshScrubRow{display:flex;align-items:center;gap:8px;padding:4px 12px}
+.moshScrubRow input{flex:1;min-width:0}
+.moshCuts{display:grid;gap:8px;max-height:30vh;overflow:auto}
+#moshDialog .note{font-size:12px;color:var(--dim);margin:0}
