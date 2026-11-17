@@ -204,6 +204,12 @@ export class Slit {
       gl.uniform1i(p.u.u_ecol, 12);
       gl.uniform1i(p.u.u_eframes, 13);
     }
+    // The trail shape: twist, drift, spread, wave.
+    const wp = sl.warp || {};
+    const diag = Math.hypot(e.w, e.h);
+    const wl = Math.max(1, wp.waveLength || 1);
+    gl.uniform4f(p.u.u_warp, ((wp.twist || 0) * Math.PI) / 180, wp.drift || 0, wp.spread || 0, 1 / diag);
+    gl.uniform3f(p.u.u_wave, wp.wave || 0, (2 * Math.PI) / wl, (-2 * Math.PI * (wp.waveSpeed || 0) * index) / wl);
     gl.uniform1i(p.u.u_timeOn, sl.time ? 1 : 0);
     gl.uniform1i(p.u.u_sharp, sl.sampling === 'blend' ? 0 : 1);
     gl.uniform1i(p.u.u_view, VIEWS[s.view] ?? 0);

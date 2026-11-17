@@ -19,7 +19,7 @@ The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries
 
 **Views** (above the preview): **Result**, **Original**, **Split** (drag the divider: the original on the left, the result on the right), **Mask**, **Map** (the Time Map in grey, or the age of Slit Scan as heat colours). **Fit** and **100%** set the zoom; the mouse wheel zooms at the pointer; drag with the middle button or with Space held to move the picture; on a touch screen, two fingers zoom and move it (one finger is for the tool: the line, the brush, the eyedropper).
 
-**Presets** (the first section of the inspector, its own tab on a phone; the **Presets** button in the top bar, or the ⋯ menu, opens it): **Randomize all**, **Reset to defaults**, 25 built-in looks for both modes and the cutout modes, **Save preset** and **Load preset**. Save writes a `.neofx.json` file (with an image map and the garbage matte in it); Load reads one. A video map or a mask video is stored by its file name: the app asks you to open the file. The last settings also stay in the browser.
+**Presets** (the first section of the inspector, its own tab on a phone; the **Presets** button in the top bar, or the ⋯ menu, opens it): **Randomize all**, **Reset to defaults**, 27 built-in looks for both modes and the cutout modes, **Save preset** and **Load preset**. Save writes a `.neofx.json` file (with an image map and the garbage matte in it); Load reads one. A video map or a mask video is stored by its file name: the app asks you to open the file. The last settings also stay in the browser.
 
 **Randomize all** sets safe random values in the sections of the mode; the lock of a section keeps it, the dice of a section changes only that section. Each look has a number (its seed). **Reset to defaults** sets every setting back to its default (the view, an imported mask video, and the loaded map files stay); it is one undo step. **Undo** / **Redo** (↶ ↷, Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z) go back and forward through the setting changes; a slider drag is one change.
 
@@ -27,7 +27,7 @@ The app uses only browser APIs (WebCodecs, WebGL2, Workers). It has no libraries
 
 **Curves** (Map adjust curve, Slit Scan rate curve, decay curve): drag a point; click on the line to add one; double-click (or long press) a point to remove it; or use a preset (Linear, Ease in, Ease out, S-curve, Step).
 
-Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out (the loop and export range; the transport has no In / Out buttons); J play backward, K stop, L play; hold \ to show the original; M the Mask view; Ctrl/Cmd+Z undo, Shift+Ctrl/Cmd+Z redo; Ctrl/Cmd+E export.
+Keyboard (desktop): Space play/pause; ← / → one frame; Shift+← / → 10 frames; Home / End; I / O set In / Out (the loop and export range; the transport has no In / Out buttons); J play backward, K stop, L play; hold \ to show the original; M the Mask view; [ / ] the brush size; Ctrl/Cmd+Z undo, Shift+Ctrl/Cmd+Z redo; Ctrl/Cmd+E export.
 
 While a slider moves, the preview shows the newest value: settings changes that come faster than the GPU renders are joined (the ones between are not rendered).
 
@@ -72,6 +72,17 @@ Drag the line on the preview: the centre point moves it, the round handle turns 
 | Max age | 1 … the history length (frames) | 600 |
 | Sampling | Sharp (nearest frame) / Blend (mix 2 frames) | Sharp |
 
+**Trail shape** (its own section; the trail is drawn in another shape, the analysis does not run again):
+
+| Setting | Values | Default |
+|---|---|---|
+| Twist | −720 … 720° at the distance of the frame diagonal: the trail turns about the source point, more with the distance | 0 |
+| Drift | −2 … 2 px along the line for each px of distance: the trail moves to the side | 0 |
+| Spread | −0.9 … 4: the trail gets wider (or narrower) with the distance | 0 |
+| Wave | 0 … 300 px, with a Wave length (px) and a Wave speed (px/frame: the wave moves away from the line) | 0 |
+
+With the Subject edge source, the same settings bend the trails about the frame centre (the subject on top does not move). The presets **Twister** and **Wavy ribbon** use them.
+
 **Subject edge source** (needs the cutout): all the edge pixels of the subject are the source, so the source moves with the subject. Set the **Edge direction** (0° = to the right) with the round handle on the preview. In each row of the direction, the places where the subject ends (up to 4) emit a trail with the colour of the last subject pixel; the trail of one frame joins to the trail of the frame before when their edges are nearer than the **Join limit** (default 8 px). Where trails cross, the youngest pixel wins. Time Off: the edge colour repeats to the end of the row. The Max age of the edge source (default 120 frames, at most 512) is also limited by the GPU time of the trail (target 20 ms at the preview resolution); the inspector shows the limit.
 
 The age at a distance s is A(s), the inverse of S(a) = ∫ rate. When the line changes, an **analysis pass** decodes the full video in the background and fills the slit history (one row for each frame, up to 4096 frames); the status bar shows "Analysis N %". Until it ends, the trail uses the rows that are there (the frames in the frame store at once); the other rows are black. The **Map** view shows the age as heat colours.
@@ -87,9 +98,11 @@ Mask pipeline, in this order:
    - **Chroma key**: the key colour (**Pick** it on the preview), tolerance, softness, spill suppression (on the subject layer).
    - **Luma key**: low, high, softness, invert.
    - Or a **mask video** (Mask import): a black-and-white video, one frame for each source frame. It replaces the methods. The mask frames stay on the GPU in a memory budget (256 MB on desktop, less on phones): a long mask video is kept at a smaller size, and the frames after the texture layer limit of the GPU use the last mask.
-2. **Garbage matte**: paint **Always subject** / **Never subject** / **Erase** on the preview (brush size, hardness). The matte is the same for the full video.
+2. **Refine by hand (matte)**: paint **Always subject** / **Never subject** / **Erase** on the preview (brush size, hardness; **[** and **]** change the size). While a brush is the tool (or with **Show cutout**), the preview shows the cutout: the background dark and violet, Always in green, Never in red. **Undo stroke** (or Ctrl/Cmd+Z while a brush is the tool) takes back the last strokes (up to 8, also a Clear). The matte is the same for the full video. **Manual mode**: with no method on, the subject is the area painted with Always subject.
 3. **Clean up**: Open (removes small spots), Close (fills small gaps), Fill holes (enclosed areas smaller than a part of the frame), Keep largest region.
-4. **Grow / shrink** (−32 … 32 px), **Temporal smooth** (a mix with the mask of the previous frame) with **Hysteresis**, **Feather**.
+4. **Grow / shrink** (−32 … 32 px), **Temporal smooth** (a mix with the mask of the previous frame) with **Hysteresis**, **Edge refine** (0 … 16 px), **Feather**.
+
+**Edge refine** moves the mask edge to the edge of the subject in the picture. In a band of the given radius about the mask edge, each pixel goes to the subject or to the background by its colour: nearer to the colours of the sure subject near it, or to those of the sure background. **Edge softness** sets how soft the new edge is. It corrects a mask that is a little too large or too small (in the test video, a mask grown by 5 px goes from IoU 0.68 to 0.99). Where the subject and the background have the same colour, the mask stays as it is.
 
 **Subject layer** (Overlay): blend mode, opacity, its own grow / shrink and feather, an outline (width and colour).
 

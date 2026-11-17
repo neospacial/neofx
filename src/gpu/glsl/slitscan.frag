@@ -26,8 +26,26 @@ uniform highp isampler2D u_eframes;
 uniform int u_eH, u_eK;
 uniform float u_eD;
 uniform vec2 u_ed, u_ee;
+// The trail shape (plan §8.6). u_warp: twist (radians at the distance of the frame diagonal), drift
+// (px along the line for each px of distance), spread (the trail gets wider with the distance),
+// 1 / diagonal. u_wave: amount (px), 2 pi / length, phase.
+uniform vec4 u_warp;
+uniform vec3 u_wave;
 in vec2 v_uv;
 out vec4 o;
+
+// Twist: the trail turns about the source point, more with the distance from it.
+vec2 twist(vec2 q) {
+  float th = -u_warp.x * length(q) * u_warp.w;
+  float c = cos(th), s = sin(th);
+  return vec2(c * q.x - s * q.y, s * q.x + c * q.y);
+}
+
+// The position along the line that a pixel at u, at the distance s, shows (drift, wave, spread).
+float bend(float u, float s) {
+  u -= u_warp.y * s + u_wave.x * sin(u_wave.y * s + u_wave.z);
+  return u / max(1.0 + u_warp.z * s * u_warp.w, 0.05);
+}
 
 float S(int i) { return texelFetch(u_S, ivec2(i % 1024, i / 1024), 0).r; }
 
@@ -58,8 +76,8 @@ vec3 heat(float u) { // dark blue -> red -> yellow
 // The edge effect at pixel p (working px): rgb, a = 1 when there is a trail; age in .w of the out.
 vec4 edgeEffect(vec2 p, out float age) {
   age = 0.0;
-  vec2 q = p - u_res * 0.5;
-  float xp = dot(q, u_ed), yp = dot(q, u_ee);
+  vec2 q = twist(p - u_res * 0.5);
+  float xp = dot(q, u_ed), yp = bend(dot(q, u_ee), xp);
   int r = int(floor(yp + 0.5 * u_eD));
   if (r < 0 || float(r) >= u_eD) return vec4(0.0);
   if (u_timeOn) {
@@ -98,9 +116,9 @@ void main() {
     o = vec4(subjectOver(res, base, uv), 1.0);
     return;
   }
-  vec2 p = uv * u_res - u_L;
+  vec2 p = twist(uv * u_res - u_L);
   float s = dot(p, u_d);
-  float x = (dot(p, u_e) + u_c + 0.5) / u_len;
+  float x = (bend(dot(p, u_e), max(s, 0.0)) + u_c + 0.5) / u_len;
   if (s < -1e-3) { o = vec4(u_view == 2 ? base * 0.3 : subjectOver(base, base, uv), 1.0); return; }
   s = max(s, 0.0);
   float a = 0.0;

@@ -45,7 +45,7 @@ export class Inspector {
     };
     const on = (key) => (v) => this.app.change(key, v);
     // The tab of each section in the narrow layout (plan §12.3).
-    const TABS = { presets: 'presets', mode: 'mode', map: 'map', adjust: 'map', anim: 'map', source: 'map', time: 'time', time2: 'time', cutout: 'cutout', subject: 'cutout', composite: 'mix', look: 'look' };
+    const TABS = { presets: 'presets', mode: 'mode', map: 'map', adjust: 'map', anim: 'map', source: 'map', time: 'time', time2: 'time', warp: 'time', cutout: 'cutout', subject: 'cutout', composite: 'mix', look: 'look' };
     const sec = (name, title, def = true) => {
       const d = section(title, open[name] ?? def);
       d.dataset.name = name;
@@ -207,6 +207,15 @@ export class Inspector {
           add(time, segmented({ key: 'slitscan.sampling', label: 'Sampling', options: [['sharp', 'Sharp'], ['blend', 'Blend']], value: SL.sampling, onChange: on('slitscan.sampling') }));
         }
       }
+      // The trail shape: move, distort and twist the trail (render only: no new analysis).
+      const wp = sec('warp', 'Trail shape', false);
+      num(wp, 'slitscan.warp.twist', 'Twist', -720, 720, 1, 0, '°');
+      num(wp, 'slitscan.warp.drift', 'Drift', -2, 2, 0.01, 0);
+      num(wp, 'slitscan.warp.spread', 'Spread', -0.9, 4, 0.01, 0);
+      num(wp, 'slitscan.warp.wave', 'Wave', 0, 300, 1, 0, 'px');
+      num(wp, 'slitscan.warp.waveLength', 'Wave length', 8, 2000, 1, 120, 'px');
+      num(wp, 'slitscan.warp.waveSpeed', 'Wave speed', -40, 40, 0.1, 0, 'px/f');
+      wp.append(Object.assign(document.createElement('p'), { className: 'note', textContent: 'Twist turns the trail about the source point, more with the distance. Drift moves it along the line. Spread makes it wider (or narrower) with the distance. Wave bends it; Wave speed moves the wave.' }));
     }
 
     // Cutout (§9): the subject mask, and the subject layer on top (Overlay).
@@ -263,13 +272,20 @@ export class Inspector {
       bool(cut, 'cutout.luma.invert', 'Invert');
     }
     add(cut, segmented({ key: 'cutout.combine', label: 'Combine', options: [['union', 'Union'], ['intersect', 'Intersect']], value: Cu.combine, onChange: on('cutout.combine') }));
-    sub('Garbage matte');
+    const manual = !Cu.bgdiff.on && !Cu.chroma.on && !Cu.luma.on && !Cu.import.on;
+    if (manual) cut.append(Object.assign(document.createElement('p'), { className: 'note manualNote', textContent: 'Manual: no method is on. The subject is the area that you paint with Always subject.' }));
+    sub('Refine by hand (matte)');
     const mr = Object.assign(document.createElement('div'), { className: 'toolRow' });
     btn(mr, 'Always subject', 'always', () => this.app.setTool('always'), tools.tool === 'always');
     btn(mr, 'Never subject', 'never', () => this.app.setTool('never'), tools.tool === 'never');
     btn(mr, 'Erase', 'erase', () => this.app.setTool('erase'), tools.tool === 'erase');
-    btn(mr, 'Clear', 'clearMatte', () => this.app.clearMatte());
     cut.append(mr);
+    const mr2 = Object.assign(document.createElement('div'), { className: 'toolRow' });
+    btn(mr2, 'Show cutout', 'overlay', () => this.app.toggleOverlay && this.app.toggleOverlay(), tools.overlay);
+    btn(mr2, 'Undo stroke', 'undoStroke', () => this.app.undoStroke && this.app.undoStroke()).disabled = !tools.undoCount;
+    btn(mr2, 'Clear', 'clearMatte', () => this.app.clearMatte());
+    cut.append(mr2);
+    cut.append(Object.assign(document.createElement('p'), { className: 'note', textContent: 'Paint on the preview: the background is dark, Always is green, Never is red. [ and ] change the brush size.' }));
     add(cut, slider({ key: 'tools.brushSize', label: 'Brush size', min: 2, max: 400, step: 1, value: tools.brush ? tools.brush.size : 40, def: 40, unit: 'px', onChange: (v) => (tools.brush.size = v) }));
     add(cut, slider({ key: 'tools.brushHardness', label: 'Hardness', min: 0, max: 1, step: 0.01, value: tools.brush ? tools.brush.hardness : 0.7, def: 0.7, onChange: (v) => (tools.brush.hardness = v) }));
     sub('Clean up');
@@ -284,6 +300,8 @@ export class Inspector {
       num(cut, 'cutout.tLow', 'Off below', 0, 1, 0.01, 0.35);
       num(cut, 'cutout.tHigh', 'On above', 0, 1, 0.01, 0.65);
     }
+    num(cut, 'cutout.refine', 'Edge refine', 0, 16, 1, 0, 'px');
+    if (Cu.refine > 0) num(cut, 'cutout.refineSens', 'Edge softness', 0.01, 0.5, 0.01, 0.1);
     num(cut, 'cutout.feather', 'Feather', 0, 32, 0.5, 0, 'px');
     sub('Mask import');
     const ir = Object.assign(document.createElement('div'), { className: 'toolRow' });

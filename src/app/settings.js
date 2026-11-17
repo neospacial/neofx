@@ -38,6 +38,10 @@ export const DEFAULTS = {
     edgeAngle: 0, // the scan direction of the Subject edge source (0° = to the right)
     joinLimit: 8, // px: join the trail of an emitter to the one of the frame before when nearer
     maxAgeEdge: 120, // frames (Subject edge source)
+    // The trail shape (render only: no new analysis). twist: degrees at the distance of the frame
+    // diagonal; drift: px along the line for each px of distance; spread: wider (> 0) or narrower
+    // with the distance; wave: px, with its length (px) and speed (px/frame).
+    warp: { twist: 0, drift: 0, spread: 0, wave: 0, waveLength: 120, waveSpeed: 0 },
   },
   cutout: {
     mode: 'off', // 'off' | 'overlay' | 'scan' (Scan object: Mode 2 only, the subject edge) (plan §9.4)
@@ -55,6 +59,8 @@ export const DEFAULTS = {
     hysteresis: false,
     tLow: 0.35,
     tHigh: 0.65,
+    refine: 0, // edge refine radius (px, 0 = off): the mask edge moves to the colour edge of the picture
+    refineSens: 0.1, // the softness of the refined edge
     feather: 0, // px
     import: { on: false, name: '' }, // a mask video (plan §9.3)
   },

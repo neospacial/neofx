@@ -43,7 +43,7 @@ const locks = new Set(); // the sections that Randomize keeps
 let lastSeed = 0;
 const LOCAL_KEY = 'neofx.settings';
 // The state of the preview tools and the clean plate (not part of the settings).
-const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false, matteVersion: 0 };
+const toolState = { tool: null, brush: { size: 40, hardness: 0.7 }, plateText: '', plateOk: false, matteVersion: 0, overlay: false, undoCount: 0 };
 let edgeStats = null; // the Subject edge source: the measured GPU time and the Max age limit
 let currentFile = null;
 const settings = clone(DEFAULTS);
@@ -316,6 +316,58 @@ function setTool(tool) {
   tools.setTool(tool);
 }
 
+// The cutout overlay on the preview: while a brush is the tool, or with Show cutout.
+const BRUSHES = ['always', 'never', 'erase'];
+let overlaySent = false;
+function syncOverlay() {
+  const on = toolState.overlay || BRUSHES.includes(toolState.tool);
+  if (on === overlaySent) return;
+  overlaySent = on;
+  quiet(gpu.call({ cmd: 'refine', on }));
+}
+
+function toggleOverlay() {
+  toolState.overlay = !toolState.overlay;
+  syncOverlay();
+  inspector.build(settings, limits());
+}
+
+// Undo for the matte (the last strokes, a Clear): the matte before each one, read from the GPU.
+const MATTE_UNDO = 8;
+const matteUndo = []; // promises of { pixels, width, height }
+function matteCheckpoint() {
+  matteUndo.push(gpu.call({ cmd: 'matteGet' }).catch(() => null));
+  if (matteUndo.length > MATTE_UNDO) matteUndo.shift();
+  if (toolState.undoCount !== matteUndo.length) {
+    toolState.undoCount = matteUndo.length;
+    const b = document.querySelector('#inspector button[data-act="undoStroke"]');
+    if (b) b.disabled = false;
+  }
+}
+
+async function undoStroke() {
+  const p = matteUndo.pop();
+  toolState.undoCount = matteUndo.length;
+  const m = p && (await p);
+  if (m) {
+    const r = await gpu.call({ cmd: 'matteSetPixels', pixels: m.pixels, width: m.width, height: m.height }, [m.pixels.buffer]).catch(() => null);
+    if (r && r.ok) {
+      toolState.matteVersion++;
+      scheduleAnalysis();
+      snapMatte();
+    }
+  }
+  inspector.build(settings, limits());
+}
+
+// [ and ]: the brush size.
+function brushSize(k) {
+  const b = toolState.brush;
+  b.size = Math.round(Math.min(400, Math.max(2, b.size * k + (k > 1 ? 1 : -1))));
+  const row = inspector.rows['tools.brushSize'];
+  if (row) row.setValue(b.size);
+}
+
 async function pick(u, v) {
   const r = await gpu.call({ cmd: 'pick', index: Math.max(0, player.vcur), u, v });
   const hex = `#${r.rgb.map((c) => c.toString(16).padStart(2, '0')).join('')}`;
@@ -539,7 +591,8 @@ async function openFile(file) {
     if (analysis) analysis.stop();
     if (plateJob) plateJob.terminate();
     plateJob = null;
-    Object.assign(toolState, { plateOk: false, plateText: '' });
+    Object.assign(toolState, { plateOk: false, plateText: '', undoCount: 0 });
+    matteUndo.length = 0;
     settings.cutout.import = { on: false, name: '' };
     gpuState.maskFile = gpuState.plateFile = null;
     currentFile = file;
@@ -663,8 +716,11 @@ function keys(e) {
   }
   else if (k === 'm' || k === 'M') change('view', settings.view === 'mask' ? 'result' : 'mask');
   else if ((k === 'e' || k === 'E') && (e.ctrlKey || e.metaKey)) exportDialog.open();
+  else if ((k === 'z' || k === 'Z') && (e.ctrlKey || e.metaKey) && !e.shiftKey && BRUSHES.includes(toolState.tool) && matteUndo.length) undoStroke(); // while painting: the last stroke
   else if ((k === 'z' || k === 'Z') && (e.ctrlKey || e.metaKey)) (e.shiftKey ? redo() : undo());
   else if ((k === 'y' || k === 'Y') && (e.ctrlKey || e.metaKey)) redo();
+  else if (k === '[' && BRUSHES.includes(toolState.tool)) brushSize(0.8);
+  else if (k === ']' && BRUSHES.includes(toolState.tool)) brushSize(1.25);
   else if (k === 'j' || k === 'J') playReverse();
   else if (k === 'k' || k === 'K') stopAll();
   else if (k === 'l' || k === 'L') {
@@ -1121,6 +1177,10 @@ function restartGpu() {
       gpuCaps = await gpu.ready;
       analysis.gpu = gpu;
       window.neofx.gpu = gpu;
+      overlaySent = false;
+      matteUndo.length = 0; // (the matte of the new engine can have another size)
+      toolState.undoCount = 0;
+      syncOverlay();
       if (player.info) {
         await configureStore();
         player.setWrap(false);
@@ -1256,6 +1316,7 @@ async function start() {
   });
   tools = new PreviewTools($('preview'), $('view'), {
     pick,
+    strokeStart: matteCheckpoint,
     stroke: (points, mode) => {
       toolState.matteVersion++;
       scheduleAnalysis();
@@ -1265,13 +1326,17 @@ async function start() {
     brush: toolState.brush,
     onTool: (t) => {
       toolState.tool = t;
-      for (const b of document.querySelectorAll('#inspector .toolRow button[data-act]')) b.classList.toggle('on', b.dataset.act === t);
+      syncOverlay();
+      for (const b of document.querySelectorAll('#inspector .toolRow button[data-act]')) b.classList.toggle('on', b.dataset.act === t || (b.dataset.act === 'overlay' && toolState.overlay));
       handles.update();
     },
   });
   inspector = new Inspector($('inspector'), {
     change, openMap, info: () => mapInfo, tools: toolState, setTool, plate: makePlate, importMask, removeMask,
+    toggleOverlay,
+    undoStroke,
     clearMatte: () => {
+      matteCheckpoint();
       toolState.matteVersion++;
       clearTimeout(matteTimer);
       gpuState.matte = null;
@@ -1355,7 +1420,7 @@ async function start() {
       $('benchClose').disabled = false;
     }
   });
-  Object.assign(window.neofx, { cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
+  Object.assign(window.neofx, { toggleOverlay, undoStroke, cleanExportStorage, restartGpu, snapMatte, benchmark, undo, redo, history, randomize, resetSettings, pickPreset, locks, toggleLock, openPresets, savePreset, loadPreset, PRESETS, setView, playReverse, stopAll, exportVideo, exportDialog, cancelExport: () => exporter && exporter.cancel(), refreshEdgeStats, edgeMode, player, preview, timeline, gpu, store, settings, inspector, openFile, configureStore, change, applySettings, loadMapFile, updateThumbs, analysis, handles, slitKey, tools, toolState, makePlate, loadMaskVideo, removeMask });
   for (const id of ['fileInput', 'maskFileInput', 'mapFileInput']) watchPicker($(id));
   $('plateFileInput').addEventListener('change', (e) => plateImage(e.target.files[0]));
   $('maskFileInput').addEventListener('change', (e) => loadMaskVideo(e.target.files[0]));

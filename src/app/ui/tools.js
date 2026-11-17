@@ -2,7 +2,8 @@
 // (Always subject / Never subject / Erase). One finger or the mouse: the active tool.
 
 export class PreviewTools {
-  // app: { pick(u, v), stroke(points, mode), brush: { size, hardness }, onTool(tool) }
+  // app: { pick(u, v), strokeStart() (before the first points of a stroke), stroke(points, mode),
+  //        brush: { size, hardness }, onTool(tool) }
   constructor(area, canvas, app) {
     this.area = area;
     this.canvas = canvas;
@@ -39,6 +40,7 @@ export class PreviewTools {
         return;
       }
       canvas.setPointerCapture(e.pointerId);
+      if (this.app.strokeStart) this.app.strokeStart();
       pts = [uv(e)];
       sent = 0;
       flush();

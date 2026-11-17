@@ -16,6 +16,9 @@ const BRUSH_FRAG = "@GLSL:gpu/glsl/brush.frag";
 const JFA_FRAG = "@GLSL:gpu/glsl/jfa.frag";
 const SHOW_FRAG = "@GLSL:gpu/glsl/maskshow.frag";
 const YUVCOPY_FRAG = "@GLSL:gpu/glsl/yuvcopy.frag";
+const REFINE_FRAG = "@GLSL:gpu/glsl/maskrefine.frag";
+const REFINE2_FRAG = "@GLSL:gpu/glsl/maskrefine2.frag";
+const OVERLAY_FRAG = "@GLSL:gpu/glsl/maskoverlay.frag";
 const HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\n';
 const FIX_SIZE = 256; // the long side of the small copy for Fill holes / Keep largest
 const MATTE_SIZE = 1024; // the long side of the garbage matte
@@ -37,6 +40,9 @@ export class Mask {
     this.jfa = program(gl, QUAD_VERT, `#version 300 es\n${JFA_FRAG}`);
     this.show = program(gl, QUAD_VERT, `#version 300 es\n${SHOW_FRAG}`);
     this.yuvcopy = program(gl, QUAD_VERT, `#version 300 es\n${YUVCOPY_FRAG}`);
+    this.refine = program(gl, QUAD_VERT, `#version 300 es\n${REFINE_FRAG}`);
+    this.refine2 = program(gl, QUAD_VERT, `#version 300 es\n${REFINE2_FRAG}`);
+    this.overlay = program(gl, QUAD_VERT, `#version 300 es\n${OVERLAY_FRAG}`);
     this.tex = null;
     this.key = '';
     this.version = 0; // clean plate, matte, import changes
@@ -66,6 +72,8 @@ export class Mask {
   configure(w, h) {
     const gl = this.gl;
     if (this.tex) for (const t of Object.values(this.tex)) gl.deleteTexture(t);
+    if (this.rtex) for (const t of Object.values(this.rtex)) gl.deleteTexture(t);
+    this.rtex = null; // the Edge refine work textures: made when it is used
     const R8 = gl.R8;
     this.tex = { a: this.tex2(w, h, R8), b: this.tex2(w, h, R8), c: this.tex2(w, h, R8), out: this.tex2(w, h, R8), sub: this.tex2(w, h, R8), outline: this.tex2(w, h, R8), prev: this.tex2(w, h, R8) };
     if (this.e.caps.floatTargets) {
@@ -153,6 +161,19 @@ export class Mask {
     bitmap.close();
     this.version++;
     return { cmd: 'matte', width: w, height: h };
+  }
+
+  // Set the matte from RGBA bytes of the matte size (the undo of a stroke).
+  matteSetPixels(pixels, width, height) {
+    const gl = this.gl;
+    const [w, h] = this.matteSize;
+    if (width !== w || height !== h || pixels.length !== w * h * 4) return { cmd: 'matte', ok: false };
+    gl.bindTexture(gl.TEXTURE_2D, this.matte[0]);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    this.version++;
+    return { cmd: 'matte', ok: true, width: w, height: h };
   }
 
   // A brush stroke (plan §9.1 step 3). points: [[u, v], ...] in 0..1 of the picture; size: the brush
@@ -339,6 +360,56 @@ export class Mask {
     return dst;
   }
 
+  // Edge refine: the mask edge moves to the colour edge of the picture. In the band of the radius
+  // about the mask edge, each pixel goes to the subject or to the background by its colour (the mean
+  // colours of the sure subject and the sure background near it). frame: { Y, C, layer }.
+  refineOp(src, dst, radius, soft, frame) {
+    const gl = this.gl;
+    const e = this.e;
+    const r = Math.min(32, Math.round(radius));
+    if (!(r > 0) || frame.layer < 0) return src;
+    // The work textures of this step are made when it is first used.
+    if (!this.rtex) {
+      this.rtex = { ero: this.tex2(e.w, e.h, gl.R8), dil: this.tex2(e.w, e.h, gl.R8), x1: this.tex2(e.w, e.h, gl.RGBA8), fg: this.tex2(e.w, e.h, gl.RGBA8), bg: this.tex2(e.w, e.h, gl.RGBA8) };
+    }
+    const R = this.rtex;
+    const T = this.tex;
+    const ero = this.morphOp(src, T.c, R.ero, -r), dil = this.morphOp(src, T.c, R.dil, r);
+    const frameTex = (u) => {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, frame.Y);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, frame.C);
+      gl.uniform1i(u.u_Y, 1);
+      gl.uniform1i(u.u_C, 2);
+      gl.uniform1f(u.u_layer, frame.layer);
+    };
+    // The mean colours in a window of 2 r + 4 px.
+    const sums = (sure, invert, out) => {
+      const set = (first, dir) => (u) => {
+        frameTex(u);
+        gl.uniform1i(u.u_first, first ? 1 : 0);
+        gl.uniform1i(u.u_invert, invert ? 1 : 0);
+        gl.uniform2f(u.u_dir, ...dir);
+        gl.uniform1i(u.u_r, 2 * r + 4);
+      };
+      this.pass(this.refine, sure, R.x1, set(true, [1, 0]));
+      this.pass(this.refine, R.x1, out, set(false, [0, 1]));
+    };
+    sums(ero, false, R.fg);
+    sums(dil, true, R.bg);
+    this.pass(this.refine2, src, dst, (u) => {
+      frameTex(u);
+      [[3, R.fg, 'u_fg'], [4, R.bg, 'u_bg'], [5, ero, 'u_ero'], [6, dil, 'u_dil']].forEach(([unit, tex, name]) => {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.uniform1i(u[name], unit);
+      });
+      gl.uniform1f(u.u_soft, Math.min(0.5, Math.max(0.01, soft ?? 0.1)));
+    });
+    return dst;
+  }
+
   // Copy src into dst (a pass of the post shader without work).
   copy(src, dst) {
     const gl = this.gl;
@@ -460,7 +531,8 @@ export class Mask {
       this.copy(cur, T.prev);
       this.prev = { t, key: base };
     }
-    // 7. Feather.
+    // 7. Edge refine (with the frame as the guide), then Feather.
+    cur = this.refineOp(cur, other(cur), C.refine || 0, C.refineSens, src || { Y: e.storeY, C: e.storeC, layer: e.layerOf(t) });
     cur = this.blurOp(cur, T.c, other(cur), C.feather);
     this.copy(cur, T.out);
     // The subject layer: its own grow and feather (§10.4), and the outline.
@@ -557,9 +629,29 @@ export class Mask {
     gl.uniform3fv(p.u.u_keyRgb, hexRgb(s.cutout.chroma.key));
   }
 
-  // The Mask view.
-  render() {
+  // The Mask view. overlay (index: the frame): the cutout on the picture, with the matte strokes.
+  render(overlay, index) {
     const gl = this.gl;
+    if (overlay) {
+      const e = this.e;
+      const p = this.overlay;
+      gl.useProgram(p.prog);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.tex.out);
+      gl.uniform1i(p.u.u_in, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, e.storeY);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, e.storeC);
+      gl.uniform1i(p.u.u_Y, 1);
+      gl.uniform1i(p.u.u_C, 2);
+      gl.uniform1f(p.u.u_layer, e.layerOf(index));
+      gl.activeTexture(gl.TEXTURE5);
+      gl.bindTexture(gl.TEXTURE_2D, this.matte[0]);
+      gl.uniform1i(p.u.u_matte, 5);
+      drawQuad(gl);
+      return;
+    }
     gl.useProgram(this.show.prog);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.tex.out);

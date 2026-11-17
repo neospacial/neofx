@@ -22,6 +22,8 @@
 //   { cmd: 'plateYuv', Y, C } / { cmd: 'plateImage', bitmap } / { cmd: 'plateFrame', index }
 //                                          the clean plate (plan §9.2)                      -> { cmd: 'plate', ok }
 //   { cmd: 'matteStroke', points, size, hardness, mode } / { cmd: 'matteClear' }  garbage matte -> { cmd: 'matte' }
+//   { cmd: 'matteGet' } -> { pixels, width, height, empty } / { cmd: 'matteSetPixels', pixels, width, height }
+//   { cmd: 'refine', on }                  the cutout overlay on the preview (painting the matte)
 //   { cmd: 'maskImportBegin', width, height, count } / { cmd: 'maskImportFrame', i, frame, rotation } / { cmd: 'maskImportClear' }
 //   { cmd: 'pick', index, u, v }           the colour of frame index at (u, v)              -> { cmd: 'color', rgb }
 //   { cmd: 'readMask', index }             tests: the mask of frame index (bytes, top row first) -> { cmd: 'mask', width, height, pixels }
@@ -148,6 +150,12 @@ export class Engine {
     if (m.cmd === 'pick') return this.pick(m);
     if (m.cmd === 'matteGet') return this.mask.matteGet();
     if (m.cmd === 'matteSet') return this.rerender(this.mask.matteSet(m.bitmap));
+    if (m.cmd === 'matteSetPixels') return this.rerender(this.mask.matteSetPixels(m.pixels, m.width, m.height));
+    if (m.cmd === 'refine') {
+      // The cutout overlay on the preview (while the matte is painted). Not in the export.
+      this.refineView = !!m.on;
+      return this.rerender({ cmd: 'refine', on: this.refineView });
+    }
     if (m.cmd === 'exporting') {
       this.exporting = !!m.on;
       return { cmd: 'exporting', on: this.exporting };
@@ -462,7 +470,8 @@ export class Engine {
   render(index, delay) {
     const gl = this.gl;
     // Split view (plan §12.2): the result, and the original on the left of the divider.
-    if (delay === undefined && this.settings && this.settings.view === 'split') {
+    const overlay = !!this.refineView && !this.exporting && delay === undefined && !!this.settings;
+    if (!overlay && delay === undefined && this.settings && this.settings.view === 'split') {
       const saved = this.settings;
       this.settings = { ...saved, view: 'result' };
       try {
@@ -483,12 +492,12 @@ export class Engine {
     }
     this.last = { index, delay };
     const s0 = this.settings;
-    if (s0 && delay === undefined && this.maskNeeded()) this.mask.update(index);
+    if (s0 && delay === undefined && (overlay || this.maskNeeded())) this.mask.update(index);
     if (!s0 || s0.mode !== 'slitscan') this.updateMap(index);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.w, this.h);
-    if (s0 && delay === undefined && s0.view === 'mask') {
-      this.mask.render();
+    if (overlay || (s0 && delay === undefined && s0.view === 'mask')) {
+      this.mask.render(overlay, index);
       return;
     }
     if (delay !== undefined || !this.settings) {
