@@ -27,19 +27,50 @@ export class Slit {
     this.sKey = '';
     this.geo = null;
     this.M = 1;
+    // Complete histories of other lines (a return to a line needs no new analysis pass): key ->
+    // { hist, rowFrame }, the oldest first, in cacheBudget bytes (set by the engine).
+    this.cache = new Map();
+    this.cacheBudget = 0;
+  }
+
+  dropCache() {
+    for (const c of this.cache.values()) this.gl.deleteTexture(c.hist);
+    this.cache.clear();
+  }
+
+  // Keep the history of this.key, when it is complete and the budget has room for it. Returns true
+  // when this.hist went into the cache (then the caller makes a new one).
+  stash(key) {
+    const bytes = this.len * this.H * 4;
+    if (!key || this.cacheBudget < bytes || this.filled() < Math.min(this.frames, this.H)) return false;
+    while (this.cache.size && (this.cache.size + 1) * bytes > this.cacheBudget) {
+      const [k, c] = this.cache.entries().next().value;
+      this.gl.deleteTexture(c.hist);
+      this.cache.delete(k);
+    }
+    this.cache.set(key, { hist: this.hist, rowFrame: this.rowFrame.slice() });
+    return true;
+  }
+
+  newHist() {
+    const gl = this.gl;
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, this.len, this.H);
+    texParams(gl, gl.TEXTURE_2D);
+    return t;
   }
 
   // For a working size and a frame count. The history is empty after this.
   configure(w, h, frames) {
     const gl = this.gl;
     for (const t of [this.hist, this.rowsTex, this.Stex, this.stY, this.stC]) if (t) gl.deleteTexture(t);
+    this.dropCache();
+    this.frames = frames;
     const maxTex = this.e.caps.maxTexture;
     this.H = historyRows(frames, maxTex);
     this.len = lineGeometry({ x: 0.5, y: 0.5, angle: 90 }, w, h, maxTex).len;
-    this.hist = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.hist);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, this.len, this.H);
-    texParams(gl, gl.TEXTURE_2D);
+    this.hist = this.newHist();
     this.rowFrame = new Int32Array(this.H).fill(-1);
     this.rowsTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.rowsTex);
@@ -64,16 +95,31 @@ export class Slit {
     return !!(this.e.settings && this.e.settings.mode === 'slitscan' && this.hist);
   }
 
-  // A change of the line (or the slit width): the history is not valid; rebuild it from the frames
-  // in the store at once (the analysis pass of the page does the rest).
+  // A change of the line (or the slit width): the history is not valid. A history of this line in the
+  // cache comes back; then the rows of the frames in the store are written (all of them, when the store
+  // holds the video: then no analysis pass is needed, and no history goes into the cache).
   update() {
     if (!this.active()) return;
     const sl = this.e.settings.slitscan;
     const e = this.e;
     const key = JSON.stringify([sl.x, sl.y, sl.angle, sl.flip, sl.width, e.w, e.h]);
     if (key !== this.key) {
+      const old = this.key;
       this.key = key;
       this.geo = lineGeometry(sl, e.w, e.h, e.caps.maxTexture);
+      const hit = this.cache.get(key);
+      // (When the store holds the video, a history is made again at once: no cache.)
+      const kept = !this.e.allStored() && this.stash(old);
+      if (hit) {
+        this.cache.delete(key);
+        if (!kept) this.gl.deleteTexture(this.hist);
+        this.hist = hit.hist;
+        this.rowFrame.set(hit.rowFrame);
+        this.uploadRows();
+        this.sKey = '';
+        return;
+      }
+      if (kept) this.hist = this.newHist();
       this.rowFrame.fill(-1);
       const order = [];
       for (let l = 0; l < e.n; l++) if (e.layerFrame[l] >= 0) order.push([e.layerFrame[l], l]);

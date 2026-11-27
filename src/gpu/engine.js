@@ -16,7 +16,11 @@
 //   { cmd: 'mapVideoFrame', i, frame, rotation }      one frame of it                     -> { cmd: 'map', ... }
 //   { cmd: 'mapClear' }
 //   { cmd: 'thumbs', maps, t, width, height }  map thumbnails (luma bytes)                -> { cmd: 'thumbs', images }
-//   { cmd: 'slitFrame', index, frame }     analysis pass: the slit history row of a frame    -> { cmd: 'slit', filled, rows }
+//   { cmd: 'slitFrame', index, frame, store }  analysis pass: the slit history row of a frame (store: the
+//                                          frame also goes into the frame store, which holds the full video) -> { cmd: 'slit', filled, rows }
+//   { cmd: 'slitRebuild' }                 the history of the current line / edge settings without a decode:
+//                                          from the store (when it holds every frame) or the cache of histories
+//                                          -> { cmd: 'slit', filled, rows, done, complete }
 //   { cmd: 'slitStatus' }                                                                   -> { cmd: 'slit', filled, rows }
 //   { cmd: 'plateGrab', frame }            a frame as the store keeps it                   -> { cmd: 'yuv', Y, C }
 //   { cmd: 'plateYuv', Y, C } / { cmd: 'plateImage', bitmap } / { cmd: 'plateFrame', index }
@@ -123,9 +127,13 @@ export class Engine {
     if (m.cmd === 'read') return this.read();
     if (m.cmd === 'compositeTest') return this.compositeTest(m);
     if (m.cmd === 'slitFrame') {
-      this.slit.analysisFrame(m.index, m.frame);
+      // When the store holds the full video, the frames of the pass go into it: a later line (or edge)
+      // is made from the store, with no new decode of the video.
+      if (m.store && this.n >= this.frameCount) this.put(m.index, m.frame);
+      else this.slit.analysisFrame(m.index, m.frame);
       return this.slitStatus();
     }
+    if (m.cmd === 'slitRebuild') return this.slitRebuild();
     if (m.cmd === 'slitStatus') return this.slitStatus();
     if (m.cmd === 'edgeTest') {
       this.edge.forceMsPerAge = m.msPerAge || 0; // tests: a slow GPU
@@ -262,6 +270,8 @@ export class Engine {
     else gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
     texParams(gl, gl.TEXTURE_2D, gl.NEAREST);
     this.mapKey = '';
+    this.frameCount = m.frames || 1;
+    this.slit.cacheBudget = Math.min(96 * 1048576, Math.floor((m.budget || 0) / 4)); // kept histories of other lines
     const slit = this.slit.configure(w, h, m.frames || 1);
     this.mask.configure(w, h);
     this.edge.configure(w, h, m.frames || 1);
@@ -360,6 +370,33 @@ export class Engine {
   edgeActive() {
     const s = this.settings;
     return !!(s && s.mode === 'slitscan' && (s.slitscan.source === 'edge' || s.cutout.mode === 'scan') && this.edge.tex);
+  }
+
+  // Every frame of the video is in the store (at its own layer).
+  allStored() {
+    const F = this.frameCount || 0;
+    if (!F || this.n < F) return false;
+    for (let t = 0; t < F; t++) if (this.layerFrame[t] !== t) return false;
+    return true;
+  }
+
+  // The history of the current settings without a decode (see the message list). The edge history is
+  // made from the store in parts (some frames for each call: the mask of each frame is made again), so
+  // the preview is not stopped for long; call again while done is false.
+  slitRebuild() {
+    let done = true;
+    let complete = false;
+    if (this.edgeActive()) {
+      const ed = this.edge;
+      ed.update();
+      if (this.allStored()) done = ed.rebuildPart(this.frameCount, this.last.index);
+      complete = ed.filled() >= Math.min(this.frameCount, ed.H);
+    } else if (this.slit.active()) {
+      this.slit.update();
+      complete = this.slit.filled() >= Math.min(this.frameCount, this.slit.H);
+    }
+    if (done) this.rerender(null);
+    return { ...this.slitStatus(), done, complete };
   }
 
   slitStatus() {

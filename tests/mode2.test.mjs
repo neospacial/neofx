@@ -247,34 +247,99 @@ export const tests = [
     },
   },
   {
-    name: 'analysis pass: a line change rebuilds the history from the store at once, then the pass fills all rows',
-    timeout: 120000,
+    name: 'analysis once: the first pass keeps the video in the frame store, then each line (and presets, modes, the edge source) is made from it with no new pass, the same as a pass',
+    timeout: 180000,
     async fn() {
-      await withMode2(async (page) => {
+      await withMode2(async (page, codes) => {
+        await page.evaluate(() => {
+          const A = window.neofx.analysis;
+          window.__passes = 0;
+          const start = A.start.bind(A);
+          A.start = (...a) => {
+            window.__passes++;
+            return start(...a);
+          };
+        });
         const r = await page.evaluate(async () => {
           const N = window.neofx;
-          const full = await N.gpu.call({ cmd: 'slitStatus' });
-          // Frames 0..9 in the store (the player decoded them): play 10 frames.
-          for (let k = 1; k < 10; k++) await N.player.step(1);
+          const P = N.player;
+          const stored = Array.from({ length: P.frameCount }, (_, t) => P.inStore(t)).every(Boolean);
           N.change('slitscan.angle', 60);
           await N.applySettings();
-          const now = await N.gpu.call({ cmd: 'slitStatus' });
-          const status = [];
           await new Promise((res) => {
-            const k = () => {
-              status.push(document.getElementById('status').textContent);
-              if (N.analysis.doneKey === N.slitKey()) res();
-              else setTimeout(k, 30);
-            };
+            const k = () => (N.analysis.doneKey === N.slitKey() ? res() : setTimeout(k, 30));
             k();
           });
-          const end = await N.gpu.call({ cmd: 'slitStatus' });
-          return { full, now, end, analysing: status.some((s) => s.startsWith('Analysis')), maxAge: N.settings.slitscan.maxAge };
+          const now = await N.gpu.call({ cmd: 'slitStatus' });
+          return { stored, now };
         });
-        assert(r.full.filled === 90 && r.full.rows === 90, `after the first pass: ${JSON.stringify(r.full)}`);
-        assert(r.now.filled >= 10 && r.now.filled < 90, `just after the change: ${r.now.filled} rows (the frames in the store)`);
-        assert(r.end.filled === 90 && r.analysing, `after the pass: ${r.end.filled} rows, status shown ${r.analysing}`);
-        assert(r.maxAge === 90, `Max age is limited to the 90 rows: ${r.maxAge}`);
+        assert(r.stored, 'after the first pass every frame is in the store');
+        assert(r.now.filled === 90, `the new line: ${r.now.filled} rows at once`);
+        // The pixels are the same as after a pass (the Time On check of the turned line is in the other tests).
+        const sl = { ...clone(DEFAULTS).slitscan, x: LX, y: 0.5, angle: 90, maxAge: 90, rate: 1 };
+        checkAll('from the store, rate 1', await view(page, { x: LX, y: 0.5, angle: 90, maxAge: 90, rate: 1 }, 80), codes, sl, 80, right);
+        // Presets, modes, the cutout mode of the edge source: no new pass.
+        await page.evaluate(async () => {
+          const N = window.neofx;
+          const wait = () => new Promise((res) => {
+            const k = () => (N.analysis.doneKey === N.slitKey() && !N.analysis.running ? res() : setTimeout(k, 30));
+            setTimeout(k, 400);
+          });
+          for (const id of ['timeline', 'smear', 'wave', 'finish', 'twistscan', 'timeline']) {
+            await N.pickPreset(N.PRESETS.find((p) => p.id === id));
+            await wait();
+          }
+          N.change('cutout.bgdiff.on', false);
+          N.change('cutout.luma.on', true);
+          N.change('slitscan.source', 'edge');
+          await wait();
+          N.change('cutout.mode', 'scan');
+          await wait();
+          N.change('cutout.mode', 'overlay');
+          await wait();
+        });
+        const passes = await page.evaluate(() => window.__passes);
+        const edge = await page.evaluate(async () => (await window.neofx.gpu.call({ cmd: 'slitStatus' })).edge);
+        assert(passes === 0, `${passes} analysis passes after the first one`);
+        assert(edge && edge.filled === 90, `the edge history from the store: ${JSON.stringify(edge)}`);
+      });
+    },
+  },
+  {
+    name: 'analysis, a video longer than the frame store: a line change needs a pass, but a return to a line that had one takes its history from the cache',
+    timeout: 180000,
+    async fn() {
+      await withMode2(async (page) => {
+        const res = await page.evaluate(`(async () => {
+          const N = window.neofx;
+          const wait = () => new Promise((res) => {
+            const k = () => (N.analysis.doneKey === N.slitKey() && !N.analysis.running ? res() : setTimeout(k, 30));
+            setTimeout(k, 400);
+          });
+          N.store.budget = 40 * 320 * 240 * 1.5;
+          await N.configureStore();
+          await N.player.seek(0);
+          await wait();
+          let passes = 0;
+          const start = N.analysis.start.bind(N.analysis);
+          N.analysis.start = (...a) => { passes++; return start(...a); };
+          const out = { n: N.store.n };
+          N.change('slitscan.x', 0.25);
+          await wait();
+          out.b = passes;
+          N.change('slitscan.x', 0.5); // the first line (the default)
+          await wait();
+          out.back = passes;
+          out.rows = (await N.gpu.call({ cmd: 'slitStatus' })).filled;
+          N.change('slitscan.x', 0.25);
+          await wait();
+          out.back2 = passes;
+          return out;
+        })()`);
+        assert(res.n === 40, `store ${res.n}`);
+        assert(res.b === 1, `a new line: one pass (${res.b})`);
+        assert(res.back === 1 && res.rows === 90, `back to the first line: no pass (${res.back}), ${res.rows} rows`);
+        assert(res.back2 === 1, `and to the second again: no pass (${res.back2})`);
       });
     },
   },
