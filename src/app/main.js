@@ -462,7 +462,8 @@ const slitKey = () => {
   const sl = settings.slitscan;
   if (edgeMode()) {
     // The emitters need the mask: its settings, the clean plate, the matte, the imported mask.
-    return JSON.stringify(['edge', currentFile && currentFile.name, sl.edgeAngle, sl.flip, settings.cutout, toolState.plateText, toolState.matteVersion, store.width, store.height]);
+    // (Overlay and Scan object make the same mask: the cutout mode is not in the key.)
+    return JSON.stringify(['edge', currentFile && currentFile.name, sl.edgeAngle, sl.flip, { ...settings.cutout, mode: undefined }, toolState.plateText, toolState.matteVersion, store.width, store.height]);
   }
   return JSON.stringify([currentFile && currentFile.name, sl.x, sl.y, sl.angle, sl.flip, sl.width, store.width, store.height]);
 };
@@ -475,9 +476,45 @@ function scheduleAnalysis() {
   if (edgeMode() && C.bgdiff.on && !C.import.on && !toolState.plateOk) return;
   const key = slitKey();
   if (key === analysis.doneKey || key === analysis.key) return;
-  analysisTimer = setTimeout(() => {
-    if (settings.mode === 'slitscan' && slitKey() === key) analysis.start(currentFile, player.frameCount, key, fileKeys(currentFile));
+  analysisTimer = setTimeout(async () => {
+    if (settings.mode !== 'slitscan' || slitKey() !== key) return;
+    // Each video is decoded for the history once: when the frame store holds every frame (or the
+    // history of this line is in the cache), the engine makes it without a decode.
+    if (await historyWithoutDecode(key)) return;
+    if (settings.mode !== 'slitscan' || slitKey() !== key || key === analysis.key) return;
+    // The pass also fills the frame store when it can hold the full video: then this is the last one.
+    const keep = !player.wrap && store.n >= player.frameCount;
+    analysis.start(currentFile, player.frameCount, key, fileKeys(currentFile), keep);
   }, 300);
+}
+
+// The history of the slit (or edge) settings with key, from the frames in the store or the cache of
+// the engine. Returns true when it is complete (no analysis pass). The edge history is made in parts.
+async function historyWithoutDecode(key) {
+  try {
+    let r;
+    do {
+      r = await gpu.call({ cmd: 'slitRebuild' });
+      if (slitKey() !== key || settings.mode !== 'slitscan') return true; // a newer key schedules itself
+      if (!r.done) setProgress(r.edge ? r.edge.filled / Math.max(1, Math.min(player.frameCount, r.edge.rows)) : 0.5);
+    } while (!r.done);
+    setProgress(null);
+    if (!r.complete) return false;
+    if (analysis.running) analysis.stop();
+    analysis.doneKey = key;
+    if (!player.playing && !player.busy && player.vcur >= 0) quiet(gpu.call({ cmd: 'render', index: player.vcur }));
+    status();
+    refreshEdgeStats();
+    return true;
+  } catch {
+    setProgress(null);
+    return false; // (the GPU restarts: it schedules again)
+  }
+}
+
+// The frames that the analysis pass put into the frame store (the mirror of the player).
+function analysisStored(index) {
+  if (player.n >= player.frameCount && !player.wrap) player.have[index % player.n] = index;
 }
 
 // The history that the effect needs: Mode 1, the Max delay (and the frames of the Motion map).
@@ -1559,6 +1596,7 @@ async function start() {
     onError: (msg) => {
       if (!restarting) showMessage(`The analysis stopped: ${msg}`);
     },
+    onStored: analysisStored,
     onDone: () => {
       status();
       refreshEdgeStats();

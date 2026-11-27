@@ -84,9 +84,11 @@ export class Edge {
     const e = this.e;
     const s = e.settings;
     const sl = s.slitscan;
-    const key = JSON.stringify([sl.edgeAngle, sl.flip, s.cutout, e.mask.version, e.w, e.h]);
+    // (Overlay and Scan object make the same mask: the cutout mode is not in the key.)
+    const key = JSON.stringify([sl.edgeAngle, sl.flip, { ...s.cutout, mode: undefined }, e.mask.version, e.w, e.h]);
     if (key !== this.key) {
       this.key = key;
+      this.rebuild = null;
       this.slotFrame.fill(-1);
       this.uploadFrames();
       const t = e.last.index;
@@ -120,6 +122,28 @@ export class Edge {
     const sl = this.e.settings.slitscan;
     // The GPU-time limit is for the preview; the export uses the setting (plan §8.4).
     return Math.max(1, Math.min(sl.maxAgeEdge, this.H, this.e.exporting ? Infinity : this.stats.limit));
+  }
+
+  // The emitters of the frames in the store, some frames for each call (the store holds every frame):
+  // all of them when the history has room, else the H frames up to t. Returns true when it is done.
+  rebuildPart(frames, t) {
+    if (!this.tex) return true;
+    const e = this.e;
+    if (!this.rebuild || this.rebuild.key !== this.key) {
+      const to = frames <= this.H ? frames - 1 : Math.max(this.H - 1, Math.min(frames - 1, t));
+      const from = Math.max(0, to - this.H + 1);
+      this.rebuild = { key: this.key, next: from, to };
+    }
+    const R = this.rebuild;
+    const end = Math.min(R.to, R.next + 31);
+    for (; R.next <= end; R.next++) {
+      // (A frame that is there already is not made again.)
+      if (this.slotFrame[R.next % this.H] === R.next) continue;
+      const l = e.layerOf(R.next);
+      if (l >= 0) this.addFrame(R.next, { Y: e.storeY, C: e.storeC, layer: l }, true);
+    }
+    this.uploadFrames();
+    return R.next > R.to;
   }
 
   uploadFrames() {

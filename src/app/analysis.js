@@ -6,7 +6,8 @@ import { makeWorker } from './player.js';
 
 export class Analysis {
   // opts: { onProgress(fraction | null), onRows() (some rows are new), onDone(key),
-  //         onError(message) (optional: the pass stopped) }
+  //         onError(message) (optional: the pass stopped), onStored(index) (optional: the frame went into
+  //         the frame store) }
   constructor(workerSrc, gpu, opts) {
     this.src = workerSrc;
     this.gpu = gpu;
@@ -29,7 +30,8 @@ export class Analysis {
   }
 
   // keys (optional): the clean sync samples of the file (the 'info' of the player's worker).
-  start(file, count, key, keys) {
+  // store: the frames also go into the frame store (it holds the full video).
+  start(file, count, key, keys, store = false) {
     this.stop();
     this.key = key;
     this.doneKey = '';
@@ -49,7 +51,8 @@ export class Analysis {
       if (m.cmd === 'info') wk.postMessage({ cmd: 'play', job: 1, from: 0, to: count - 1 });
       else if (m.cmd === 'frame') {
         try {
-          await this.gpu.call({ cmd: 'slitFrame', index: m.index, frame: m.frame }, [m.frame]);
+          await this.gpu.call({ cmd: 'slitFrame', index: m.index, frame: m.frame, store }, [m.frame]);
+          if (store && this.opts.onStored) this.opts.onStored(m.index);
         } catch (err) {
           return fail(err.message);
         }
